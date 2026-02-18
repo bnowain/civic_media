@@ -1,11 +1,12 @@
 """
 Celery task definitions.
 
-Two tasks:
-  - process_video_task: Full video ingestion pipeline.
-  - process_pdf_task:   PDF text extraction (native + OCR fallback).
+Three tasks:
+  - process_video_task:     Full video ingestion pipeline.
+  - process_pdf_task:       PDF text extraction (native + OCR fallback).
+  - rerun_voiceprints_task: Background voiceprint re-evaluation after confirmation.
 
-Both tasks use their own DB sessions (never share across task boundaries).
+All tasks use their own DB sessions (never share across task boundaries).
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ logger = logging.getLogger(__name__)
 def process_video_task(self, meeting_id: str, media_id: str) -> dict:
     """
     Run the full video ingestion pipeline for a single video file.
-
     Returns a summary dict with segment count.
     """
     from app.database import SessionLocal
@@ -76,7 +76,6 @@ def process_pdf_task(self, document_id: str) -> dict:
         doc.ocr_text = text
         db.commit()
 
-        # Write optional text file alongside OCR directory
         ocr_dir = OCR_TEXT_DIR / doc.meeting_id
         ocr_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(doc.file_path).stem
@@ -90,5 +89,34 @@ def process_pdf_task(self, document_id: str) -> dict:
         db.rollback()
         logger.exception("process_pdf_task failed for document %s", document_id)
         raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="tasks.rerun_voiceprints",
+    max_retries=0,
+)
+def rerun_voiceprints_task(meeting_id: str) -> dict:
+    """
+    Re-evaluate all unverified segments in a meeting against current voiceprints.
+    Runs in the background after a human confirmation so the HTTP response
+    returns immediately without blocking on 1700+ segment re-evaluations.
+    """
+    from app.database import SessionLocal
+    from app.services import voiceprint as vp_service
+
+    db = SessionLocal()
+    try:
+        count = vp_service.rerun_unverified_segments(db, meeting_id)
+        logger.info(
+            "rerun_voiceprints_task complete: %d segments re-evaluated for meeting %s",
+            count, meeting_id,
+        )
+        return {"meeting_id": meeting_id, "segments_reprocessed": count}
+    except Exception:
+        db.rollback()
+        logger.exception("rerun_voiceprints_task failed for meeting %s", meeting_id)
+        raise
     finally:
         db.close()

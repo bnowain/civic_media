@@ -3,10 +3,11 @@ Media upload endpoints.
 
 POST /api/media/{meeting_id}/upload  — accepts a video file, saves it,
                                        enqueues the processing pipeline.
-GET  /api/media/{meeting_id}/status  — poll pipeline readiness.
+GET  /api/media/{meeting_id}/status  — poll pipeline readiness + progress.
 GET  /api/media/{meeting_id}         — list media files for a meeting.
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -49,7 +50,6 @@ async def upload_video(
             f"Allowed: {', '.join(sorted(_ALLOWED_VIDEO_SUFFIXES))}",
         )
 
-    # Save to media/{meeting_id}/video{suffix}
     dest_dir = MEDIA_DIR / meeting_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"video{suffix}"
@@ -67,15 +67,25 @@ async def upload_video(
     db.commit()
     db.refresh(media)
 
-    # Enqueue pipeline
     process_video_task.delay(meeting_id, media.media_id)
 
     return media
 
 
+def _read_progress(meeting_id: str) -> dict:
+    """Read progress.json written by the pipeline. Returns empty dict if absent."""
+    p = MEDIA_DIR / meeting_id / "progress.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {}
+
+
 @router.get("/{meeting_id}/status", response_model=schemas.PipelineStatus)
 def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
-    """Poll how many segments have been processed so far."""
+    """Poll pipeline status and progress for a meeting."""
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
@@ -92,18 +102,34 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         .first()
     )
 
+    progress = _read_progress(meeting_id)
+    stage = progress.get("stage")
+    pct = progress.get("pct")
+    detail = progress.get("detail", "")
+
     if not has_video:
         status = "pending"
-    elif segment_count == 0:
-        status = "processing"
-    else:
+        stage = stage or "Waiting for upload"
+        pct = pct or 0
+    elif stage == "Complete" or pct == 100:
         status = "complete"
+        pct = 100
+    elif segment_count > 0 or stage:
+        status = "processing"
+        pct = pct or 10
+    else:
+        status = "processing"
+        stage = stage or "Starting..."
+        pct = pct or 0
 
     return schemas.PipelineStatus(
         meeting_id=meeting_id,
         segment_count=segment_count,
         task_id=None,
         status=status,
+        stage=stage,
+        progress_pct=pct,
+        detail=detail,
     )
 
 

@@ -8,6 +8,73 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
+  <style>
+    /* Progress bar inside pipeline banner */
+    .pipeline-banner .banner-progress {
+      margin-left: 12px;
+      flex: 1;
+      max-width: 280px;
+    }
+    .banner-progress-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .banner-stage {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.68rem;
+      color: #4aacff;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .banner-pct {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.68rem;
+      color: #777;
+    }
+    .banner-bar-track {
+      width: 100%;
+      height: 3px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .banner-bar-fill {
+      height: 100%;
+      background: #4aacff;
+      border-radius: 2px;
+      transition: width 1.8s ease;
+      min-width: 2px;
+    }
+    .banner-bar-fill.indeterminate {
+      width: 35% !important;
+      animation: banner-slide 1.8s ease-in-out infinite;
+    }
+    @keyframes banner-slide {
+      0%   { transform: translateX(-150%); }
+      100% { transform: translateX(400%); }
+    }
+    .banner-detail {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.62rem;
+      color: #555;
+      margin-top: 3px;
+    }
+    /* Reprocess indicator */
+    .reprocess-indicator {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.7rem;
+      color: #4aacff;
+      padding: 3px 8px;
+      border: 1px solid rgba(74,172,255,0.3);
+      border-radius: 3px;
+      background: rgba(74,172,255,0.08);
+      display: none;
+    }
+    .reprocess-indicator.visible {
+      display: inline-block;
+    }
+  </style>
 </head>
 <body class="page-review">
 
@@ -29,6 +96,7 @@
       <button class="btn btn-ghost btn-sm" id="reprocess-btn" title="Re-run voiceprint matching on all unverified segments">
         ↻ Reprocess
       </button>
+      <span class="reprocess-indicator" id="reprocess-indicator">↻ matching in background…</span>
       <div class="segment-stats" id="segment-stats">—</div>
     </div>
   </header>
@@ -36,7 +104,17 @@
   <!-- ── Pipeline Pending Banner ─────────────────────────────────────────── -->
   <div class="pipeline-banner" id="pipeline-banner" hidden>
     <div class="pipeline-spinner"></div>
-    <span id="pipeline-banner-text">Pipeline processing... checking every 10 seconds.</span>
+    <span id="pipeline-banner-text">Pipeline processing…</span>
+    <div class="banner-progress" id="banner-progress" style="display:none">
+      <div class="banner-progress-header">
+        <span class="banner-stage" id="banner-stage"></span>
+        <span class="banner-pct" id="banner-pct"></span>
+      </div>
+      <div class="banner-bar-track">
+        <div class="banner-bar-fill" id="banner-bar-fill"></div>
+      </div>
+      <div class="banner-detail" id="banner-detail"></div>
+    </div>
   </div>
 
   <!-- ── Upload Bar (shown when no video yet) ────────────────────────────── -->

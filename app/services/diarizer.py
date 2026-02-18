@@ -3,7 +3,6 @@ Speaker diarization service using pyannote.audio.
 Pipeline is loaded once and cached for the worker process.
 Requires HF_TOKEN environment variable for pyannote model access.
 """
-
 from __future__ import annotations
 
 import logging
@@ -16,17 +15,17 @@ if TYPE_CHECKING:
     from pyannote.audio import Pipeline as _PipelineType
 
 logger = logging.getLogger(__name__)
-
 _pipeline: "_PipelineType | None" = None
 
 
 def _get_pipeline() -> "_PipelineType":
     global _pipeline
     if _pipeline is None:
+        import huggingface_hub
         import torch
         from pyannote.audio import Pipeline
 
-        token = os.environ.get("HF_TOKEN", "")
+        token = os.environ.get("HF_TOKEN", "").strip()
         if not token:
             raise EnvironmentError(
                 "HF_TOKEN environment variable is required for pyannote.audio. "
@@ -35,7 +34,8 @@ def _get_pipeline() -> "_PipelineType":
             )
 
         logger.info("Loading pyannote diarization pipeline...")
-        _pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL, token=token)
+        huggingface_hub.login(token=token, add_to_git_credential=False)
+        _pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL)
 
         if torch.cuda.is_available():
             _pipeline.to(torch.device("cuda"))
@@ -55,7 +55,6 @@ def diarize(audio_path: str) -> list[dict]:
         e.g. speaker = "SPEAKER_00"
     """
     pipeline = _get_pipeline()
-
     logger.info("Diarizing %s ...", audio_path)
     diarization = pipeline(audio_path)
 

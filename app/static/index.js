@@ -8,17 +8,17 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let meetings = [];
+const activePollers = {}; // meetingId -> intervalId
+const POLL_INTERVAL = 4000;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  // Set today as default date
   const dateInput = document.getElementById("f-meeting-date");
   dateInput.value = new Date().toISOString().slice(0, 10);
 
   await loadMeetings();
 
-  // Wire up buttons
   document.getElementById("new-meeting-btn")
     .addEventListener("click", openDialog);
   document.getElementById("close-dialog-btn")
@@ -30,7 +30,6 @@ async function init() {
   document.getElementById("overlay")
     .addEventListener("click", closeDialog);
 
-  // Allow Enter key to submit
   document.getElementById("f-title")
     .addEventListener("keydown", e => { if (e.key === "Enter") handleCreateMeeting(); });
 }
@@ -88,14 +87,20 @@ function renderMeetings() {
     return;
   }
 
+  // Stop any existing pollers before re-rendering
+  Object.keys(activePollers).forEach(id => {
+    clearInterval(activePollers[id]);
+    delete activePollers[id];
+  });
+
   list.innerHTML = "";
   meetings.forEach(m => {
     const card = createMeetingCard(m);
     list.appendChild(card);
   });
 
-  // Async badge updates — fire & forget
-  meetings.forEach(m => updateCardBadge(m.meeting_id));
+  // Kick off status checks for all cards
+  meetings.forEach(m => updateCardStatus(m.meeting_id));
 }
 
 function createMeetingCard(m) {
@@ -111,6 +116,7 @@ function createMeetingCard(m) {
     <div class="meeting-card-body">
       <div class="meeting-card-title">${esc(m.title)}</div>
       <div class="meeting-card-sub">${esc(m.governing_body)} · ${esc(m.meeting_type)}</div>
+      <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">—</span>
     <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete meeting">✕</button>
@@ -139,17 +145,32 @@ async function deleteMeeting(meetingId) {
   }
 }
 
-async function updateCardBadge(meetingId) {
-  const badge = document.getElementById(`badge-${meetingId}`);
+// ── Progress & Status ─────────────────────────────────────────────────────────
+
+function renderProgressBar(progressEl, status) {
+  const pct = status.progress_pct ?? 0;
+  const stage = status.stage || "";
+  const detail = status.detail || "";
+  const isComplete = status.status === "complete";
+  const indeterminate = !isComplete && pct === 0 && stage !== "";
+
+  progressEl.innerHTML = `
+    <div class="pipeline-progress">
+      <div class="progress-header">
+        <span class="progress-stage">${esc(stage)}</span>
+        <span class="progress-pct">${isComplete ? "✓ done" : pct ? pct + "%" : ""}</span>
+      </div>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill${indeterminate ? " indeterminate" : ""}"
+             style="width: ${indeterminate ? 40 : pct}%"></div>
+      </div>
+      ${detail ? `<div class="progress-detail">${esc(detail)}</div>` : ""}
+    </div>
+  `;
+}
+
+function applyStatusToBadge(badge, status) {
   if (!badge) return;
-
-  const status = await getMeetingStatus(meetingId);
-  if (!status) {
-    badge.textContent = "pending";
-    badge.className = "meeting-card-badge badge-pending";
-    return;
-  }
-
   if (status.status === "complete" && status.segment_count > 0) {
     badge.textContent = `${status.segment_count} segs`;
     badge.className = "meeting-card-badge badge-complete";
@@ -160,6 +181,54 @@ async function updateCardBadge(meetingId) {
     badge.textContent = "no video";
     badge.className = "meeting-card-badge badge-pending";
   }
+}
+
+async function updateCardStatus(meetingId) {
+  const badge = document.getElementById(`badge-${meetingId}`);
+  const progressEl = document.getElementById(`progress-${meetingId}`);
+
+  const status = await getMeetingStatus(meetingId);
+  if (!status) {
+    if (badge) {
+      badge.textContent = "pending";
+      badge.className = "meeting-card-badge badge-pending";
+    }
+    return;
+  }
+
+  applyStatusToBadge(badge, status);
+
+  if (status.status === "processing" && progressEl) {
+    renderProgressBar(progressEl, status);
+    startPolling(meetingId);
+  } else if (status.status === "complete" && progressEl) {
+    renderProgressBar(progressEl, status);
+  }
+}
+
+function startPolling(meetingId) {
+  if (activePollers[meetingId]) return; // already polling
+
+  activePollers[meetingId] = setInterval(async () => {
+    const badge = document.getElementById(`badge-${meetingId}`);
+    const progressEl = document.getElementById(`progress-${meetingId}`);
+    if (!badge && !progressEl) {
+      clearInterval(activePollers[meetingId]);
+      delete activePollers[meetingId];
+      return;
+    }
+
+    const status = await getMeetingStatus(meetingId);
+    if (!status) return;
+
+    applyStatusToBadge(badge, status);
+    if (progressEl) renderProgressBar(progressEl, status);
+
+    if (status.status === "complete") {
+      clearInterval(activePollers[meetingId]);
+      delete activePollers[meetingId];
+    }
+  }, POLL_INTERVAL);
 }
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
@@ -176,10 +245,10 @@ function closeDialog() {
 }
 
 async function handleCreateMeeting() {
-  const body     = document.getElementById("f-governing-body").value.trim();
-  const type     = document.getElementById("f-meeting-type").value;
-  const date     = document.getElementById("f-meeting-date").value;
-  const title    = document.getElementById("f-title").value.trim();
+  const body  = document.getElementById("f-governing-body").value.trim();
+  const type  = document.getElementById("f-meeting-type").value;
+  const date  = document.getElementById("f-meeting-date").value;
+  const title = document.getElementById("f-title").value.trim();
 
   if (!body || !date || !title) {
     alert("Please fill in Governing Body, Date, and Title.");
@@ -198,7 +267,6 @@ async function handleCreateMeeting() {
       title:          title,
     });
     closeDialog();
-    // Navigate directly to the review page for the new meeting
     window.location.href = `/review/${meeting.meeting_id}`;
   } catch (err) {
     alert(`Failed to create meeting: ${err.message}`);

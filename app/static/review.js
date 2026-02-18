@@ -8,7 +8,7 @@
  *   - Clicking a segment card seeks the video.
  *   - Confirm/correct speaker assignments → voiceprint learning loop.
  *   - Upload video, agenda, minutes PDFs.
- *   - Poll for pipeline completion.
+ *   - Poll for pipeline completion with progress bar.
  */
 
 "use strict";
@@ -23,6 +23,7 @@ let people       = [];
 let documents    = [];
 let activeIndex  = -1;
 let pollTimer    = null;
+let reprocessPollTimer = null;
 let pendingSegmentId = null;   // for new-person dialog
 
 // DOM shortcuts
@@ -37,11 +38,7 @@ async function init() {
     return;
   }
 
-  await Promise.all([
-    loadMeeting(),
-    loadPeople(),
-  ]);
-
+  await Promise.all([loadMeeting(), loadPeople()]);
   await loadDocuments();
   await loadSegments();
 
@@ -147,7 +144,6 @@ function renderTranscript() {
     return;
   }
 
-  // Preserve scroll position
   const scrollTop = list.scrollTop;
   list.innerHTML = "";
 
@@ -176,10 +172,7 @@ function buildSegmentCard(seg, idx) {
   const person = people.find(p => p.person_id === personId);
   const speakerName = person?.canonical_name ?? seg.raw_speaker_label ?? "Unknown";
 
-  const scoreStr = score !== null
-    ? `${Math.round(score * 100)}%`
-    : "—";
-
+  const scoreStr = score !== null ? `${Math.round(score * 100)}%` : "—";
   const badgeText = verified ? "✓ verified"
     : confClass === "unknown" ? "unknown"
     : `${confClass} ${scoreStr}`;
@@ -214,7 +207,6 @@ function buildSegmentCard(seg, idx) {
     </div>
   `;
 
-  // Seek on card body click
   card.addEventListener("click", e => {
     if (e.target.closest(".seg-controls")) return;
     const v = video();
@@ -224,14 +216,12 @@ function buildSegmentCard(seg, idx) {
     }
   });
 
-  // Confirm button
   card.querySelector(".seg-confirm-btn").addEventListener("click", async () => {
     const sel = card.querySelector(".seg-select");
     if (!sel.value) { alert("Select a speaker first."); return; }
     await handleConfirm(seg.segment_id, sel.value, card);
   });
 
-  // New person button
   card.querySelector(".seg-new-btn").addEventListener("click", () => {
     pendingSegmentId = seg.segment_id;
     openPersonDialog();
@@ -245,13 +235,65 @@ async function handleConfirm(segmentId, personId, cardEl) {
   if (btn) { btn.textContent = "…"; btn.disabled = true; }
 
   try {
-    await confirmAssignment(segmentId, personId);
-    // Reload all segments — predictions may have changed across the board
-    await Promise.all([loadPeople(), loadSegments()]);
+    const assignment = await confirmAssignment(segmentId, personId);
+
+    // Update just this card immediately — don't reload all 1700 segments
+    const person = people.find(p => p.person_id === personId);
+    if (cardEl && person) {
+      const nameEl = cardEl.querySelector(".seg-speaker-name");
+      const badgeEl = cardEl.querySelector(".seg-badge");
+      if (nameEl) nameEl.textContent = person.canonical_name;
+      if (badgeEl) {
+        badgeEl.textContent = "✓ verified";
+        badgeEl.className = "seg-badge badge-verified";
+      }
+      cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-verified");
+    }
+    if (btn) { btn.textContent = "✓"; btn.disabled = false; btn.classList.add("confirmed"); }
+
+    // Update the segment in local state
+    const seg = segments.find(s => s.segment_id === segmentId);
+    if (seg) {
+      seg.assignment = assignment;
+    }
+    updateStats();
+
+    // Show background reprocessing indicator and poll until it settles
+    showReprocessIndicator();
+
   } catch (err) {
     alert(`Failed to confirm: ${err.message}`);
     if (btn) { btn.textContent = "Confirm"; btn.disabled = false; }
   }
+}
+
+// Show indicator, then after a delay reload segments to pick up new predictions
+function showReprocessIndicator() {
+  const indicator = document.getElementById("reprocess-indicator");
+  if (indicator) indicator.classList.add("visible");
+
+  // Clear any existing reprocess poll
+  if (reprocessPollTimer) clearTimeout(reprocessPollTimer);
+
+  // Poll a few times to reload segments as background rerun completes
+  let attempts = 0;
+  const maxAttempts = 6;
+  const interval = 5000; // 5s between checks
+
+  function schedulePoll() {
+    reprocessPollTimer = setTimeout(async () => {
+      await Promise.all([loadPeople(), loadSegments()]);
+      attempts++;
+      if (attempts < maxAttempts) {
+        schedulePoll();
+      } else {
+        if (indicator) indicator.classList.remove("visible");
+        reprocessPollTimer = null;
+      }
+    }, interval);
+  }
+
+  schedulePoll();
 }
 
 // ── Stats bar ──────────────────────────────────────────────────────────────────
@@ -274,7 +316,6 @@ function setupVideoEvents() {
 
   v.addEventListener("timeupdate", () => {
     syncActiveCard(v.currentTime, true);
-    // Update time display
     const cur = document.getElementById("current-time-display");
     const dur = document.getElementById("duration-display");
     if (cur) cur.textContent = fmtTime(v.currentTime);
@@ -294,7 +335,6 @@ function syncActiveCard(t, scrollIntoView) {
   const idx = segments.findIndex(s => t >= s.start_time && t <= s.end_time);
   if (idx === activeIndex) return;
 
-  // Deactivate old
   if (activeIndex >= 0) {
     const old = transcriptList().querySelector(`[data-idx="${activeIndex}"]`);
     if (old) old.classList.remove("is-active");
@@ -315,7 +355,6 @@ function syncActiveCard(t, scrollIntoView) {
     }
   }
 
-  // Update speaker label in video meta bar
   const seg    = segments[idx];
   const assign = seg.assignment;
   const person = assign?.predicted_person_id
@@ -328,32 +367,40 @@ function syncActiveCard(t, scrollIntoView) {
 // ── Pipeline polling ──────────────────────────────────────────────────────────
 
 async function checkPipelineAndPoll() {
-  const status = await fetchStatus();
+  const status  = await fetchStatus();
   const hasVideo = await fetchHasVideo();
 
   if (!hasVideo) {
-    // Show upload bar — no video uploaded yet
     document.getElementById("upload-bar").hidden = false;
     return;
   }
 
-  if (!status || status.status === "processing" || status.segment_count === 0) {
-    showPipelineBanner("Pipeline processing… refreshing every 10s.");
-    setVideoSource();
-    pollTimer = setInterval(async () => {
-      const s = await fetchStatus();
-      if (s && s.segment_count > 0) {
-        clearInterval(pollTimer);
-        hidePipelineBanner();
-        await loadSegments();
-      }
-    }, 10_000);
+  setVideoSource();
+
+  if (!status || status.status === "complete") {
+    hidePipelineBanner();
     return;
   }
 
-  // Video exists and segments are ready
-  hidePipelineBanner();
-  setVideoSource();
+  // Pipeline still running — show banner with progress
+  // BUT also show any segments already in DB (raw transcript)
+  showPipelineBanner(status);
+
+  pollTimer = setInterval(async () => {
+    const s = await fetchStatus();
+    if (!s) return;
+
+    updateBannerProgress(s);
+
+    // Reload segments as they become available (e.g. after transcription commits)
+    await loadSegments();
+
+    if (s.status === "complete") {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      hidePipelineBanner();
+    }
+  }, 4000);
 }
 
 async function fetchStatus() {
@@ -378,10 +425,43 @@ function setVideoSource() {
   v.src = `/media/${meetingId}/video.mp4`;
 }
 
-function showPipelineBanner(msg) {
+function showPipelineBanner(status) {
   const banner = document.getElementById("pipeline-banner");
-  document.getElementById("pipeline-banner-text").textContent = msg;
   banner.hidden = false;
+  updateBannerProgress(status);
+}
+
+function updateBannerProgress(status) {
+  const pct     = status.progress_pct ?? 0;
+  const stage   = status.stage || "Processing…";
+  const detail  = status.detail || "";
+  const indeterminate = pct === 0 && stage !== "";
+
+  document.getElementById("pipeline-banner-text").textContent =
+    status.segment_count > 0
+      ? `Processing — ${status.segment_count} segments available below`
+      : "Processing — transcript will appear when ready";
+
+  const progressEl = document.getElementById("banner-progress");
+  if (progressEl) progressEl.style.display = "block";
+
+  const stageEl = document.getElementById("banner-stage");
+  const pctEl   = document.getElementById("banner-pct");
+  const fillEl  = document.getElementById("banner-bar-fill");
+  const detailEl = document.getElementById("banner-detail");
+
+  if (stageEl) stageEl.textContent = stage;
+  if (pctEl)   pctEl.textContent   = pct ? `${pct}%` : "";
+  if (detailEl) detailEl.textContent = detail;
+  if (fillEl) {
+    if (indeterminate) {
+      fillEl.classList.add("indeterminate");
+      fillEl.style.width = "35%";
+    } else {
+      fillEl.classList.remove("indeterminate");
+      fillEl.style.width = `${pct}%`;
+    }
+  }
 }
 
 function hidePipelineBanner() {
@@ -397,11 +477,11 @@ function setupControls() {
   document.getElementById("reprocess-btn")
     .addEventListener("click", async () => {
       const btn = document.getElementById("reprocess-btn");
-      btn.textContent = "↻ Running…";
+      btn.textContent = "↻ Queuing…";
       btn.disabled = true;
       try {
         await reprocessAll();
-        await loadSegments();
+        showReprocessIndicator();
       } finally {
         btn.textContent = "↻ Reprocess";
         btn.disabled = false;
@@ -409,10 +489,9 @@ function setupControls() {
     });
 }
 
-// ── Video upload (from upload-bar shown when no video exists) ─────────────────
+// ── Video upload ──────────────────────────────────────────────────────────────
 
 function setupDocumentUploads() {
-  // Upload-bar video button
   const videoInput = document.getElementById("video-upload-input");
   const videoBtn   = document.getElementById("video-upload-btn");
   if (videoBtn) {
@@ -423,11 +502,9 @@ function setupDocumentUploads() {
     });
   }
 
-  // Upload-bar PDF buttons
   setupBarPdfButton("agenda-upload-input",  "agenda-upload-btn",  "agenda");
   setupBarPdfButton("minutes-upload-input", "minutes-upload-btn", "minutes");
 
-  // Doc-panel file inputs (inline in the left column)
   document.querySelectorAll(".doc-file-input").forEach(input => {
     input.addEventListener("change", async () => {
       const f = input.files?.[0];
@@ -476,16 +553,21 @@ async function uploadVideo(file, btn) {
       throw new Error(err.detail || `HTTP ${r.status}`);
     }
     document.getElementById("upload-bar").hidden = true;
-    showPipelineBanner("Processing started… transcript will appear when ready.");
+    const fakeStatus = { status: "processing", stage: "Starting…", progress_pct: 0, detail: "", segment_count: 0 };
+    showPipelineBanner(fakeStatus);
     setVideoSource();
+
     pollTimer = setInterval(async () => {
       const s = await fetchStatus();
-      if (s && s.segment_count > 0) {
+      if (!s) return;
+      updateBannerProgress(s);
+      await loadSegments();
+      if (s.status === "complete") {
         clearInterval(pollTimer);
+        pollTimer = null;
         hidePipelineBanner();
-        await loadSegments();
       }
-    }, 10_000);
+    }, 4000);
   } catch (err) {
     alert(`Upload failed: ${err.message}`);
   } finally {
@@ -587,8 +669,8 @@ async function handleCreatePerson() {
     document.getElementById("new-person-dialog").close();
 
     if (pendingSegmentId) {
-      const cardEl = transcriptList().querySelector(`[data-seg-id="${pendingSegmentId}"]`);
-      await handleConfirm(pendingSegmentId, person.person_id, cardEl?.closest(".segment-card"));
+      const cardEl = transcriptList().querySelector(`[data-segment-id="${pendingSegmentId}"]`);
+      await handleConfirm(pendingSegmentId, person.person_id, cardEl);
       pendingSegmentId = null;
     } else {
       await loadSegments();

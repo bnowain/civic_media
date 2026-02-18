@@ -1,228 +1,115 @@
-# Civic Meeting Media Processing Tool
-## Phase 1 — Local Transcription, Diarization & Speaker Refinement
+# civic_media
 
-A focused, local-first tool for processing government meeting recordings.
-Load a video. Transcribe it. Diarize speakers. Review and correct assignments.
-The system learns from every correction.
+A local transcription and speaker diarization tool for civic meeting recordings. Built for accountability journalism — processes city council, county supervisor, and other public meeting videos into searchable, speaker-attributed transcripts.
 
----
+## What it does
 
-## What It Does
+1. **Upload** a video recording of a public meeting
+2. **Transcribe** speech to text using Whisper large-v3 (via faster-whisper)
+3. **Diarize** — identify and separate speakers using pyannote.audio
+4. **Attribute** — match speaker turns to known individuals using voice embeddings (SpeechBrain ECAPA-TDNN)
+5. **Review** — side-by-side video + transcript interface with click-to-seek and speaker confirmation
 
-1. Ingests meeting videos (MP4, MKV, MOV, AVI, WebM)
-2. Extracts mono 16kHz audio via ffmpeg
-3. Transcribes speech with timestamps (faster-whisper)
-4. Diarizes speakers (pyannote.audio)
-5. Aligns transcript + diarization segments
-6. Extracts speaker embeddings (SpeechBrain ECAPA-TDNN)
-7. Matches segments against a voiceprint library (cosine similarity)
-8. Stores everything in SQLite
-9. Provides a side-by-side video + transcript review interface
-10. Learns incrementally from every human correction
-11. Accepts agenda/minutes PDFs (with OCR fallback via Tesseract)
+Each confirmed speaker identification feeds back into a voiceprint library that automatically matches future segments, improving over time with use.
 
-**It does nothing else.**
+## Stack
 
----
+| Layer | Technology |
+|---|---|
+| API | FastAPI + SQLAlchemy |
+| Task queue | Celery (solo pool, single worker) |
+| Database | SQLite |
+| Transcription | faster-whisper (large-v3) |
+| Diarization | pyannote.audio 3.3.2 |
+| Speaker embeddings | SpeechBrain ECAPA-TDNN |
+| Frontend | Vanilla JS + IBM Plex fonts |
 
-## What It Does Not Do
+## Hardware requirements
 
-- Summaries
-- Search
-- Analytics
-- Statistics
-- Participation metrics
-- Cloud sync
-- Multi-user support
-- Face recognition
-- Anything beyond ingestion and speaker refinement
+- **GPU**: NVIDIA RTX 5090 (or other CUDA 12.8 capable GPU)
+- **RAM**: 32GB+ recommended (64GB+ for long meetings)
+- **Disk**: ~5GB per 3-hour meeting (video + WAV + database)
 
----
+> **Note**: This project runs PyTorch nightly (`2.12.0.dev+cu128`) required for RTX 5090 CUDA 12.8 support. Several library patches are required as a result — see [INSTALL.md](INSTALL.md).
 
-## Directory Structure
+## Project structure
 
 ```
 civic_media/
 ├── app/
-│   ├── main.py              # FastAPI app
-│   ├── config.py            # Paths, thresholds, model names
-│   ├── database.py          # SQLAlchemy engine + session
-│   ├── models.py            # ORM table definitions
-│   ├── schemas.py           # Pydantic request/response models
+│   ├── routers/
+│   │   ├── assignments.py   # Speaker confirmation + voiceprint learning
+│   │   ├── media.py         # Video upload + pipeline status/progress
+│   │   ├── meetings.py      # Meeting CRUD
+│   │   └── ...
+│   ├── services/
+│   │   ├── pipeline.py      # Orchestrates all processing steps
+│   │   ├── transcriber.py   # faster-whisper wrapper
+│   │   ├── diarizer.py      # pyannote.audio wrapper
+│   │   ├── embedder.py      # SpeechBrain ECAPA embedding
+│   │   ├── aligner.py       # Merge transcript + diarization
+│   │   ├── voiceprint.py    # Cosine similarity matching engine
+│   │   └── audio_extractor.py
+│   ├── static/
+│   │   ├── index.html/js    # Meeting list with live progress bars
+│   │   └── review.html/js   # Video + transcript review interface
+│   ├── models.py
+│   ├── schemas.py
+│   ├── config.py
+│   ├── database.py
 │   ├── tasks.py             # Celery task definitions
-│   ├── worker.py            # Celery app instance
-│   ├── routers/             # API route handlers
-│   │   ├── meetings.py
-│   │   ├── media.py
-│   │   ├── documents.py
-│   │   ├── segments.py
-│   │   ├── people.py
-│   │   └── assignments.py   # Voiceprint learning loop
-│   ├── services/            # Business logic
-│   │   ├── audio_extractor.py
-│   │   ├── transcriber.py
-│   │   ├── diarizer.py
-│   │   ├── aligner.py
-│   │   ├── embedder.py
-│   │   ├── voiceprint.py    # Cosine similarity + centroid computation
-│   │   ├── pdf_ingestor.py
-│   │   └── pipeline.py      # Orchestrates full video pipeline
-│   └── static/
-│       ├── index.html       # Meeting list
-│       ├── review.html      # Side-by-side review interface
-│       ├── index.js
-│       ├── review.js
-│       └── style.css
-├── database/
-│   └── civic_media.db       # SQLite database
-├── media/
-│   └── {meeting_id}/
-│       ├── video.mp4
-│       └── audio.wav
-├── documents/
-│   └── {meeting_id}/
-│       └── agenda.pdf
-├── ocr_text/
-│   └── {meeting_id}/
-│       └── agenda.txt
-├── requirements.txt
-├── docker-compose.yml        # Redis only
-└── run.sh
+│   └── worker.py
+├── media/                   # Created at runtime — video/audio files
+├── test_diarizer.py          # Standalone diarization test script
+├── INSTALL.md
+└── README.md
 ```
 
----
+## Pipeline details
 
-## Prerequisites
+Processing is fully resumable. If the worker crashes mid-run, restarting picks up from the last completed checkpoint:
 
-### System packages
+| Checkpoint | What's saved |
+|---|---|
+| After audio extraction | `MediaFile` record + `audio.wav` on disk |
+| After transcription | Raw `TranscriptSegment` rows (no speaker labels yet) |
+| After diarization + alignment + embedding | Completed segments with speaker labels and voice embeddings |
 
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg tesseract-ocr poppler-utils
+Progress is written to `media/{meeting_id}/progress.json` and polled by the UI every 4 seconds.
 
-# macOS
-brew install ffmpeg tesseract poppler
+## Speaker learning
+
+The voiceprint system is purely additive — nothing is ever deleted or overwritten:
+
+- Each human confirmation adds the segment's embedding as a new `Voiceprint` row
+- Person centroids are computed fresh each time (mean of all embeddings)
+- All unverified segments are re-evaluated in the background after each confirmation
+- Confidence tiers: **high** ≥ 92%, **medium** ≥ 75%, **unknown** below that
+- Verified assignments are never touched by automatic matching
+
+## Development
+
+See [INSTALL.md](INSTALL.md) for full setup including required library patches.
+
+Quick start after setup:
+
+```powershell
+# Terminal 1 — API server
+cd E:\0-Automated-Apps\civic_media
+venv\Scripts\activate
+uvicorn app.main:app --reload
+
+# Terminal 2 — Celery worker
+cd E:\0-Automated-Apps\civic_media
+venv\Scripts\activate
+celery -A app.worker worker --loglevel=info --concurrency=1 --pool=solo
 ```
 
-### Python
+Then open http://localhost:8000
 
-Python 3.11 or 3.12 required.
+## Known limitations
 
-```bash
-pip install -r requirements.txt
-```
-
-For CUDA (RTX 5090 / any NVIDIA GPU):
-```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-### Redis
-
-```bash
-docker compose up -d redis
-# or: sudo apt install redis-server && sudo systemctl start redis
-```
-
-### HuggingFace Token (required for pyannote)
-
-1. Create an account at https://huggingface.co
-2. Accept the model licence at https://hf.co/pyannote/speaker-diarization-3.1
-3. Create a token at https://hf.co/settings/tokens
-4. Export it:
-   ```bash
-   export HF_TOKEN=hf_your_token_here
-   ```
-
----
-
-## Running
-
-```bash
-export HF_TOKEN=hf_your_token_here
-./run.sh
-```
-
-Open http://localhost:8000 in your browser.
-
----
-
-## Configuration
-
-Edit `app/config.py` or set environment variables:
-
-| Variable          | Default      | Description                             |
-|-------------------|--------------|-----------------------------------------|
-| `HF_TOKEN`        | (required)   | HuggingFace token for pyannote          |
-| `WHISPER_MODEL`   | `large-v3`   | Whisper model size                      |
-| `WHISPER_DEVICE`  | `cuda`       | `cuda` or `cpu`                         |
-| `WHISPER_COMPUTE` | `float16`    | `float16`, `int8`, or `float32`         |
-| `CELERY_BROKER`   | `redis://localhost:6379/0` | Celery broker URL      |
-
----
-
-## Voiceprint Learning Loop
-
-Every time you confirm a speaker assignment in the review interface:
-
-1. The segment's embedding is added as a new voiceprint for that person (never overwritten)
-2. A fresh centroid is computed from ALL embeddings for that person
-3. ALL unverified segments in the meeting are re-evaluated against updated centroids
-4. New predictions appear immediately in the interface
-
-Confidence thresholds:
-- **High** (≥ 0.92): Strong match, shown with blue left border
-- **Medium** (0.75–0.91): Plausible match, shown with amber left border
-- **Unknown** (< 0.75): No match, shown with gray left border
-- **Verified**: Human-confirmed, shown with green left border
-
-Verified assignments are never touched by automatic matching.
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/meetings/` | List meetings |
-| POST | `/api/meetings/` | Create meeting |
-| GET | `/api/meetings/{id}` | Get meeting |
-| POST | `/api/media/{id}/upload` | Upload video → triggers pipeline |
-| GET | `/api/media/{id}/status` | Pipeline status |
-| POST | `/api/documents/{id}/upload` | Upload PDF → triggers OCR |
-| GET | `/api/segments/{id}` | List transcript segments |
-| GET | `/api/people/` | List all known speakers |
-| POST | `/api/people/` | Create new speaker |
-| **POST** | **`/api/assignments/{seg_id}/confirm`** | **Confirm speaker (learning loop)** |
-| POST | `/api/assignments/reprocess/{meeting_id}` | Re-run all predictions |
-| GET | `/api/docs` | Interactive API documentation |
-
----
-
-## Database Schema
-
-Six tables only, as specified:
-
-- `meetings` — meeting metadata
-- `media_files` — video and audio file paths
-- `documents` — PDF paths and extracted text
-- `transcript_segments` — timestamped text + raw speaker label + embedding blob
-- `people` — canonical speaker names
-- `voiceprints` — per-person embedding blobs (additive, never deleted)
-- `segment_assignments` — predicted speaker + similarity score + verified flag
-
----
-
-## Scope
-
-This tool will not gain additional features. Phase 1 is complete when:
-
-- A meeting video can be uploaded and processed end-to-end
-- The review interface shows a synchronised side-by-side layout
-- Speaker assignments can be corrected and confirmed
-- Voiceprint learning demonstrably improves predictions over time
-- PDFs can be uploaded and text extracted
-- All data persists in SQLite on disk
-
-Nothing beyond this scope.
-# civic_media
+- Single-worker Celery setup — one video processes at a time
+- PyTorch nightly required for RTX 5090; library patches must be reapplied after venv rebuild
+- Diarization is slow (~10-20 min per hour of audio on RTX 5090)
+- Embedding loop (~1700 segments for a 3-hour meeting) is the largest memory consumer
