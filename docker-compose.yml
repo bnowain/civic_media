@@ -1,0 +1,17 @@
+version: "3.9"
+
+# Redis only — the app and Celery worker run natively (no Docker)
+# so that ML models have direct access to the GPU.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+volumes:
+  redis_data:

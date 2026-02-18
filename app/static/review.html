@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Review — Civic Media</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-review">
+
+  <!-- ── Top Bar ─────────────────────────────────────────────────────────── -->
+  <header class="review-header">
+    <a href="/" class="back-link">← Meetings</a>
+
+    <div class="review-title-block">
+      <span class="review-governing-body" id="hdr-governing-body">—</span>
+      <span class="review-title" id="hdr-title">Loading...</span>
+    </div>
+
+    <div class="review-controls">
+      <select class="ctrl-select" id="filter-select" title="Filter segments">
+        <option value="">All Segments</option>
+        <option value="unknown">Unknown Only</option>
+        <option value="low_confidence">Low Confidence</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" id="reprocess-btn" title="Re-run voiceprint matching on all unverified segments">
+        ↻ Reprocess
+      </button>
+      <div class="segment-stats" id="segment-stats">—</div>
+    </div>
+  </header>
+
+  <!-- ── Pipeline Pending Banner ─────────────────────────────────────────── -->
+  <div class="pipeline-banner" id="pipeline-banner" hidden>
+    <div class="pipeline-spinner"></div>
+    <span id="pipeline-banner-text">Pipeline processing... checking every 10 seconds.</span>
+  </div>
+
+  <!-- ── Upload Bar (shown when no video yet) ────────────────────────────── -->
+  <div class="upload-bar" id="upload-bar" hidden>
+    <div class="upload-section">
+      <label class="upload-label">Upload Video</label>
+      <div class="upload-row">
+        <input type="file" id="video-upload-input" accept=".mp4,.mkv,.mov,.avi,.webm,.m4v" class="file-input">
+        <button class="btn btn-primary btn-sm" id="video-upload-btn">Upload & Process</button>
+      </div>
+    </div>
+    <div class="upload-section">
+      <label class="upload-label">Agenda PDF</label>
+      <div class="upload-row">
+        <input type="file" id="agenda-upload-input" accept=".pdf" class="file-input">
+        <button class="btn btn-ghost btn-sm" id="agenda-upload-btn">Upload</button>
+      </div>
+    </div>
+    <div class="upload-section">
+      <label class="upload-label">Minutes PDF</label>
+      <div class="upload-row">
+        <input type="file" id="minutes-upload-input" accept=".pdf" class="file-input">
+        <button class="btn btn-ghost btn-sm" id="minutes-upload-btn">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Main Review Layout ──────────────────────────────────────────────── -->
+  <div class="review-layout" id="review-layout">
+
+    <!-- LEFT: Video Panel -->
+    <section class="video-panel" id="video-panel">
+      <div class="video-wrapper">
+        <video id="video-player" controls preload="auto">
+          Your browser doesn't support HTML5 video.
+        </video>
+      </div>
+      <div class="video-meta" id="video-meta">
+        <span id="current-time-display">0:00</span>
+        <span class="video-meta-sep">/</span>
+        <span id="duration-display">—</span>
+        <span class="video-meta-label" id="active-speaker-label"></span>
+      </div>
+
+      <!-- Documents panel below video -->
+      <div class="doc-panel" id="doc-panel">
+        <div class="doc-panel-header">
+          <span class="doc-panel-title">Documents</span>
+          <div class="doc-upload-controls">
+            <label class="doc-upload-btn" title="Upload Agenda">
+              Agenda
+              <input type="file" accept=".pdf" data-doc-type="agenda" class="doc-file-input">
+            </label>
+            <label class="doc-upload-btn" title="Upload Minutes">
+              Minutes
+              <input type="file" accept=".pdf" data-doc-type="minutes" class="doc-file-input">
+            </label>
+            <label class="doc-upload-btn" title="Upload Supplemental">
+              + Other
+              <input type="file" accept=".pdf" data-doc-type="supplemental" class="doc-file-input">
+            </label>
+          </div>
+        </div>
+        <div class="doc-list" id="doc-list">
+          <div class="doc-empty">No documents uploaded.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Transcript Panel -->
+    <section class="transcript-panel" id="transcript-panel">
+      <div class="transcript-toolbar">
+        <span class="transcript-label">TRANSCRIPT</span>
+        <span class="transcript-hint">Click segment to seek video</span>
+      </div>
+      <div class="transcript-list" id="transcript-list">
+        <div class="empty-state" id="transcript-empty">
+          <span class="empty-icon">⬡</span>
+          <p>No transcript yet.</p>
+          <p class="empty-sub">Upload a video to begin processing.</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ── New Person Modal ────────────────────────────────────────────────── -->
+  <dialog id="new-person-dialog" class="modal">
+    <div class="modal-header">
+      <h3>Add New Speaker</h3>
+      <button class="modal-close" id="close-person-dialog">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Full Name</label>
+        <input type="text" id="new-person-name" class="form-input"
+               placeholder="e.g. Jane Smith" autocomplete="off">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="cancel-person-btn">Cancel</button>
+      <button class="btn btn-primary" id="create-person-confirm-btn">Create & Assign</button>
+    </div>
+  </dialog>
+
+  <div class="overlay" id="overlay"></div>
+
+  <script src="/static/review.js"></script>
+</body>
+</html>

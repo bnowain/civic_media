@@ -1,0 +1,94 @@
+"""
+Celery task definitions.
+
+Two tasks:
+  - process_video_task: Full video ingestion pipeline.
+  - process_pdf_task:   PDF text extraction (native + OCR fallback).
+
+Both tasks use their own DB sessions (never share across task boundaries).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from app.worker import celery_app
+
+logger = logging.getLogger(__name__)
+
+
+@celery_app.task(
+    bind=True,
+    name="tasks.process_video",
+    max_retries=1,
+    default_retry_delay=15,
+)
+def process_video_task(self, meeting_id: str, media_id: str) -> dict:
+    """
+    Run the full video ingestion pipeline for a single video file.
+
+    Returns a summary dict with segment count.
+    """
+    from app.database import SessionLocal
+    from app.services.pipeline import run_video_pipeline
+
+    db = SessionLocal()
+    try:
+        run_video_pipeline(db, meeting_id, media_id)
+
+        from app.models import TranscriptSegment
+        count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
+        return {"meeting_id": meeting_id, "segment_count": count, "status": "complete"}
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("process_video_task failed for meeting %s", meeting_id)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="tasks.process_pdf",
+    max_retries=1,
+    default_retry_delay=10,
+)
+def process_pdf_task(self, document_id: str) -> dict:
+    """
+    Extract text from a PDF document and store it in the database.
+    Also writes a .txt file to ocr_text/{meeting_id}/.
+    """
+    from app.database import SessionLocal
+    from app.models import Document
+    from app.services.pdf_ingestor import extract_text
+    from app.config import OCR_TEXT_DIR
+
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter_by(document_id=document_id).first()
+        if not doc:
+            logger.error("Document %s not found", document_id)
+            return {"error": "not_found"}
+
+        text = extract_text(doc.file_path)
+        doc.ocr_text = text
+        db.commit()
+
+        # Write optional text file alongside OCR directory
+        ocr_dir = OCR_TEXT_DIR / doc.meeting_id
+        ocr_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(doc.file_path).stem
+        out_file = ocr_dir / f"{stem}.txt"
+        out_file.write_text(text, encoding="utf-8")
+
+        logger.info("PDF processed: %s (%d chars)", doc.file_path, len(text))
+        return {"document_id": document_id, "char_count": len(text), "status": "complete"}
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("process_pdf_task failed for document %s", document_id)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()

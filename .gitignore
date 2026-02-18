@@ -1,0 +1,42 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Database
+database/civic_media.db
+database/civic_media.db-shm
+database/civic_media.db-wal
+
+# Media files (videos and audio — too large for git)
+media/
+
+# Uploaded documents and OCR output
+documents/
+ocr_text/
+
+# ML model cache (downloaded automatically on first run)
+.cache/
+*.pt
+*.bin
+
+# Environment
+.env
+*.env
+
+# Celery
+celery.pid
+celery.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/

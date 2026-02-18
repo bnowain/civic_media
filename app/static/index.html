@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Civic Media — Meetings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-index">
+
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">⬡</span>
+      <span class="brand-name">CIVIC MEDIA</span>
+      <span class="brand-sub">Meeting Processing Tool</span>
+    </div>
+    <button class="btn btn-primary" id="new-meeting-btn">+ New Meeting</button>
+  </header>
+
+  <main class="index-main">
+    <div class="index-content">
+
+      <div class="section-header">
+        <h2>Meetings</h2>
+        <span class="meeting-count" id="meeting-count">—</span>
+      </div>
+
+      <div id="meetings-list" class="meetings-grid">
+        <div class="loading-state">Loading meetings...</div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- New Meeting Dialog -->
+  <dialog id="new-meeting-dialog" class="modal">
+    <div class="modal-header">
+      <h3>New Meeting</h3>
+      <button class="modal-close" id="close-dialog-btn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Governing Body</label>
+        <input type="text" id="f-governing-body" class="form-input"
+               placeholder="e.g. Shasta County Board of Supervisors" autocomplete="off">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Meeting Type</label>
+          <select id="f-meeting-type" class="form-input">
+            <option value="Regular">Regular</option>
+            <option value="Special">Special</option>
+            <option value="Workshop">Workshop</option>
+            <option value="Closed Session">Closed Session</option>
+            <option value="Emergency">Emergency</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Meeting Date</label>
+          <input type="date" id="f-meeting-date" class="form-input">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Title</label>
+        <input type="text" id="f-title" class="form-input"
+               placeholder="e.g. January Regular Meeting" autocomplete="off">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="cancel-dialog-btn">Cancel</button>
+      <button class="btn btn-primary" id="create-meeting-btn">Create Meeting</button>
+    </div>
+  </dialog>
+
+  <div class="overlay" id="overlay"></div>
+
+  <script src="/static/index.js"></script>
+</body>
+</html>
