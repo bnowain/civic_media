@@ -35,7 +35,7 @@ def _get_pipeline() -> "_PipelineType":
             )
 
         logger.info("Loading pyannote diarization pipeline...")
-        _pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL, use_auth_token=token)
+        _pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL, token=token)
 
         if torch.cuda.is_available():
             _pipeline.to(torch.device("cuda"))

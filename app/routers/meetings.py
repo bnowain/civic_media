@@ -1,11 +1,13 @@
 """Meeting CRUD endpoints."""
 
+import shutil
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app import models, schemas
-from app.config import MEDIA_DIR
+from app.config import MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR
 
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
@@ -42,11 +44,19 @@ def get_meeting(meeting_id: str, db: Session = Depends(get_db)):
 @router.delete("/{meeting_id}", status_code=204)
 def delete_meeting(meeting_id: str, db: Session = Depends(get_db)):
     """
-    Delete a meeting and all associated records.
-    Media files on disk are NOT removed (data integrity).
+    Delete a meeting, all associated database records, and all files on disk.
+    Cascades to: media_files, documents, transcript_segments, segment_assignments, voiceprints.
     """
     m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not m:
         raise HTTPException(404, "Meeting not found")
+
+    # Delete database records — cascade handles child tables
     db.delete(m)
     db.commit()
+
+    # Delete all files on disk for this meeting
+    for directory in [MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR]:
+        meeting_dir = directory / meeting_id
+        if meeting_dir.exists():
+            shutil.rmtree(meeting_dir)

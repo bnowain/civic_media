@@ -113,13 +113,30 @@ function createMeetingCard(m) {
       <div class="meeting-card-sub">${esc(m.governing_body)} · ${esc(m.meeting_type)}</div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">—</span>
+    <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete meeting">✕</button>
   `;
 
-  card.addEventListener("click", () => {
+  card.addEventListener("click", e => {
+    if (e.target.closest(".delete-btn")) return;
     window.location.href = `/review/${m.meeting_id}`;
   });
 
+  card.querySelector(".delete-btn").addEventListener("click", async e => {
+    e.stopPropagation();
+    if (!confirm(`Delete "${m.title}"? This cannot be undone.`)) return;
+    await deleteMeeting(m.meeting_id);
+  });
+
   return card;
+}
+
+async function deleteMeeting(meetingId) {
+  const r = await fetch(`/api/meetings/${meetingId}`, { method: "DELETE" });
+  if (r.ok) {
+    await loadMeetings();
+  } else {
+    alert("Failed to delete meeting.");
+  }
 }
 
 async function updateCardBadge(meetingId) {
