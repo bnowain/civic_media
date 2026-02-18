@@ -28,20 +28,14 @@ if (-not $hfToken) {
     Write-Host ""
 }
 
-# ── 3. Celery worker in a new window ─────────────────────────────────────────
+# ── 3. Celery worker in a new CMD window ─────────────────────────────────────
 
 Write-Host "  [2/3] Starting Celery worker..." -ForegroundColor White
 
-$celeryCmd = @"
-cd '$Root'
-& '$Root\venv\Scripts\activate.ps1'
-`$env:PYTHONPATH = '.'
-`$env:HF_TOKEN = '$hfToken'
-Write-Host '  Celery worker running. Do not close this window.' -ForegroundColor Cyan
-celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo
-"@
+$celeryCmd = "cd /d `"$Root`" && `"$Root\venv\Scripts\activate.bat`" && set PYTHONPATH=. && set HF_TOKEN=$hfToken && celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo"
 
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $celeryCmd
+Start-Process cmd -ArgumentList "/K", $celeryCmd
+
 Start-Sleep -Seconds 2
 Write-Host "        Celery worker started (check the new window)." -ForegroundColor Green
 
