@@ -258,8 +258,7 @@ async function handleConfirm(segmentId, personId, cardEl) {
     }
     updateStats();
 
-    // Show background reprocessing indicator and poll until it settles
-    showReprocessIndicator();
+    // No auto-reprocess — use the "Process Assignments" button when ready
 
   } catch (err) {
     alert(`Failed to confirm: ${err.message}`);
@@ -267,33 +266,13 @@ async function handleConfirm(segmentId, personId, cardEl) {
   }
 }
 
-// Show indicator, then after a delay reload segments to pick up new predictions
+// Show indicator briefly — no segment polling, user hits Process when ready
 function showReprocessIndicator() {
   const indicator = document.getElementById("reprocess-indicator");
-  if (indicator) indicator.classList.add("visible");
-
-  // Clear any existing reprocess poll
-  if (reprocessPollTimer) clearTimeout(reprocessPollTimer);
-
-  // Poll a few times to reload segments as background rerun completes
-  let attempts = 0;
-  const maxAttempts = 6;
-  const interval = 5000; // 5s between checks
-
-  function schedulePoll() {
-    reprocessPollTimer = setTimeout(async () => {
-      await Promise.all([loadPeople(), loadSegments()]);
-      attempts++;
-      if (attempts < maxAttempts) {
-        schedulePoll();
-      } else {
-        if (indicator) indicator.classList.remove("visible");
-        reprocessPollTimer = null;
-      }
-    }, interval);
+  if (indicator) {
+    indicator.classList.add("visible");
+    setTimeout(() => indicator.classList.remove("visible"), 4000);
   }
-
-  schedulePoll();
 }
 
 // ── Stats bar ──────────────────────────────────────────────────────────────────
@@ -422,7 +401,7 @@ async function fetchHasVideo() {
 function setVideoSource() {
   const v = video();
   if (!v || v.src) return;
-  v.src = `/media/${meetingId}/video.mp4`;
+  v.src = `/media/${meetingId}/video`;
 }
 
 function showPipelineBanner(status) {
@@ -482,8 +461,16 @@ function setupControls() {
       try {
         await reprocessAll();
         showReprocessIndicator();
+
+        // Single reload after Celery task completes — not a polling loop
+        setTimeout(async () => {
+          await loadSegments();
+          const indicator = document.getElementById("reprocess-indicator");
+          if (indicator) indicator.classList.remove("visible");
+        }, 8000);
+
       } finally {
-        btn.textContent = "↻ Reprocess";
+        btn.textContent = "↻ Process Assignments";
         btn.disabled = false;
       }
     });
@@ -664,6 +651,13 @@ async function handleCreatePerson() {
     if (!person) {
       person = await createPerson(name);
       people.push(person);
+      // Add new person to all existing segment dropdowns
+      document.querySelectorAll(".seg-select").forEach(sel => {
+        const opt = document.createElement("option");
+        opt.value = person.person_id;
+        opt.textContent = person.canonical_name;
+        sel.appendChild(opt);
+      });
     }
 
     document.getElementById("new-person-dialog").close();

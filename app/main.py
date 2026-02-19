@@ -8,7 +8,7 @@ initialises the database schema on first run.
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, MEDIA_DIR
@@ -39,8 +39,7 @@ app.include_router(assignments.router)
 _static_dir = BASE_DIR / "app" / "static"
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
-# Serve original media files for the HTML5 video player
-app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+# /media/{meeting_id}/video is handled by media.router with range request support
 
 # ── Frontend page routes ──────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
@@ -51,6 +50,12 @@ def index():
 @app.get("/review/{meeting_id}", include_in_schema=False)
 def review_page(meeting_id: str):
     return FileResponse(str(_static_dir / "review.html"))
+
+
+# ── Favicon ───────────────────────────────────────────────────────────────────
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
