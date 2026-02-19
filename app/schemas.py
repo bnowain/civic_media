@@ -104,13 +104,18 @@ class SegmentOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SegmentEdit(BaseModel):
+    """Payload for manually correcting segment text."""
+    text: str
+
+
 # ── Pipeline Status ───────────────────────────────────────────────────────────
 
 class PipelineStatus(BaseModel):
     meeting_id: str
     segment_count: int
     task_id: Optional[str]
-    status: str         # "pending" | "processing" | "complete" | "error"
-    stage: Optional[str]    # Human-readable current step
-    progress_pct: Optional[int]  # 0-100
-    detail: Optional[str]        # Extra info e.g. "1200/1800 segments"
+    status: str              # "pending" | "processing" | "complete" | "error"
+    stage: Optional[str]     # Human-readable current step
+    progress_pct: Optional[int]   # 0-100
+    detail: Optional[str]         # Extra info e.g. "1200/1800 segments"

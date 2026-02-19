@@ -1,0 +1,124 @@
+# config/vocab_hints.yml
+#
+# Vocabulary hints fed to Whisper as initial_prompt.
+# Add terms here to improve transcription accuracy for names, places,
+# and acronyms common in Redding-area civic meetings.
+#
+# Categories:
+#   people    - council members, staff, speakers
+#   places    - streets, neighborhoods, landmarks
+#   agencies  - departments, districts, organizations
+#   acronyms  - abbreviations Whisper commonly gets wrong
+#   programs  - named initiatives, funds, projects
+#   other     - anything else
+#
+# Set active: false to exclude a term without deleting it.
+# Terms are deduplicated and sorted before building the prompt.
+
+global_terms:
+
+  people:
+    - term: "Jared Huffman"
+      active: true
+    - term: "Michael Dacquisto"
+      active: true
+    - term: "Erin Resner"
+      active: true
+    - term: "Mark Mezzano"
+      active: true
+    - term: "Julie Winter"
+      active: true
+    - term: "Patrick Jones"
+      active: true
+    - term: "Tim Garman"
+      active: true
+    - term: "Barry Rabe"
+      active: true
+
+  places:
+    - term: "Redding"
+      active: true
+    - term: "Shasta County"
+      active: true
+    - term: "Shasta Dam"
+      active: true
+    - term: "Sacramento River"
+      active: true
+    - term: "Stillwater"
+      active: true
+    - term: "Sundial Bridge"
+      active: true
+    - term: "Benton Airpark"
+      active: true
+    - term: "Turtle Bay"
+      active: true
+    - term: "Enterprise"
+      active: true
+    - term: "Buckeye"
+      active: true
+
+  agencies:
+    - term: "City of Redding"
+      active: true
+    - term: "Redding City Council"
+      active: true
+    - term: "Shasta County Board of Supervisors"
+      active: true
+    - term: "Redding Electric Utility"
+      active: true
+    - term: "REU"
+      active: true
+    - term: "Caltrans"
+      active: true
+    - term: "CDFW"
+      active: true
+    - term: "CalFire"
+      active: true
+    - term: "Bureau of Reclamation"
+      active: true
+
+  acronyms:
+    - term: "EIR"
+      active: true
+    - term: "CEQA"
+      active: true
+    - term: "SB 9"
+      active: true
+    - term: "AB 2011"
+      active: true
+    - term: "ADA"
+      active: true
+    - term: "RFP"
+      active: true
+    - term: "CIP"
+      active: true
+    - term: "FPPC"
+      active: true
+    - term: "PG&E"
+      active: true
+    - term: "MOU"
+      active: true
+
+  programs:
+    - term: "General Plan"
+      active: true
+    - term: "Housing Element"
+      active: true
+    - term: "Urban Growth Boundary"
+      active: true
+    - term: "Homeless Action Plan"
+      active: true
+    - term: "CDBG"
+      active: true
+
+  other:
+    - term: "public comment"
+      active: true
+    - term: "consent calendar"
+      active: true
+    - term: "closed session"
+      active: true
+    - term: "resolution"
+      active: true
+    - term: "ordinance"
+      active: true

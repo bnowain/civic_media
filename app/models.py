@@ -78,6 +78,15 @@ class TranscriptSegment(Base):
     raw_speaker_label = Column(String)                  # e.g. "SPEAKER_00"
     embedding         = Column(LargeBinary)             # serialised numpy array
 
+    # Whisper confidence metadata — populated during transcription.
+    # avg_logprob:    average log-probability of output tokens. 0 = perfect,
+    #                 more negative = less confident. Below -1.0 is suspicious.
+    # no_speech_prob: model's estimate that this segment contains no speech.
+    #                 Above 0.6 is suspicious (likely silence/noise hallucination).
+    # NULL for segments transcribed before this column was added.
+    avg_logprob    = Column(Float, nullable=True)
+    no_speech_prob = Column(Float, nullable=True)
+
     meeting    = relationship("Meeting", back_populates="segments")
     assignment = relationship(
         "SegmentAssignment", back_populates="segment",

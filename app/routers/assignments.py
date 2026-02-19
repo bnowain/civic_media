@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/assignments", tags=["assignments"])
 def confirm_assignment(
     segment_id: str,
     payload: schemas.ConfirmAssignment,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """
@@ -34,9 +35,9 @@ def confirm_assignment(
 
     When a user confirms or corrects a speaker:
       1. The segment's embedding is stored as a new voiceprint for that person.
-      2. The assignment is marked verified.
+      2. The assignment is marked verified and committed immediately.
       3. A background Celery task re-evaluates all unverified segments so the
-         HTTP response returns immediately (non-blocking).
+         HTTP response returns instantly (no blocking on 1700+ re-evaluations).
 
     Embeddings are NEVER overwritten — each confirmation adds a new row.
     Verified assignments are NEVER touched by automatic matching.
@@ -48,9 +49,6 @@ def confirm_assignment(
     person = db.query(models.Person).filter_by(person_id=payload.person_id).first()
     if not person:
         raise HTTPException(404, "Person not found")
-
-    # Capture meeting_id before any commit/refresh that might expire attributes
-    meeting_id = segment.meeting_id
 
     # 1. Add embedding as a new voiceprint (additive — never overwrites)
     if segment.embedding:
@@ -82,6 +80,14 @@ def confirm_assignment(
     db.commit()
     db.refresh(assign)
 
+    # 3. Dispatch re-evaluation to background — returns immediately to UI
+    from app.tasks import rerun_voiceprints_task
+    rerun_voiceprints_task.delay(segment.meeting_id)
+    logger.info(
+        "Queued background voiceprint re-evaluation for meeting %s",
+        segment.meeting_id,
+    )
+
     return assign
 
 
@@ -111,7 +117,7 @@ def reprocess_segment(segment_id: str, db: Session = Depends(get_db)):
 def reprocess_meeting(meeting_id: str, db: Session = Depends(get_db)):
     """
     Re-run voiceprint matching for all unverified segments in a meeting.
-    Dispatched to Celery so the response is immediate.
+    Triggered manually from the review interface — runs in background.
     """
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:

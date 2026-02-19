@@ -60,6 +60,7 @@
       color: #555;
       margin-top: 3px;
     }
+
     /* Reprocess indicator */
     .reprocess-indicator {
       font-family: 'IBM Plex Mono', monospace;
@@ -71,8 +72,57 @@
       background: rgba(74,172,255,0.08);
       display: none;
     }
-    .reprocess-indicator.visible {
+    .reprocess-indicator.visible { display: inline-block; }
+
+    /* Export dropdown */
+    .export-dropdown {
+      position: relative;
       display: inline-block;
+    }
+    .export-dropdown-menu {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 4px);
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      min-width: 130px;
+      z-index: 100;
+      overflow: hidden;
+    }
+    .export-dropdown-menu.open { display: block; }
+    .export-dropdown-menu a {
+      display: block;
+      padding: 8px 14px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.75rem;
+      color: #ccc;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .export-dropdown-menu a:hover { background: #2a2a2a; color: #fff; }
+
+    /* Inline text editing */
+    .seg-text.editing {
+      outline: 1px solid #4aacff;
+      border-radius: 2px;
+      padding: 2px 4px;
+      background: rgba(74,172,255,0.06);
+    }
+    .seg-edit-controls {
+      display: none;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .seg-edit-controls.visible { display: flex; }
+
+    /* Rerun dialog */
+    .rerun-warning {
+      color: #e06c75;
+      font-size: 0.82rem;
+      margin-top: 8px;
+      line-height: 1.5;
     }
   </style>
 </head>
@@ -93,10 +143,26 @@
         <option value="unknown">Unknown Only</option>
         <option value="low_confidence">Low Confidence</option>
       </select>
+
       <button class="btn btn-ghost btn-sm" id="reprocess-btn" title="Re-run voiceprint matching on all unverified segments">
         ↻ Reprocess
       </button>
-      <span class="reprocess-indicator" id="reprocess-indicator">↻ matching in background…</span>
+      <span class="reprocess-indicator" id="reprocess-indicator">↻ matching…</span>
+
+      <!-- Export dropdown -->
+      <div class="export-dropdown" id="export-dropdown">
+        <button class="btn btn-ghost btn-sm" id="export-btn">↓ Export</button>
+        <div class="export-dropdown-menu" id="export-menu">
+          <a id="export-srt">SRT subtitles</a>
+          <a id="export-txt">Plain text</a>
+          <a id="export-json">JSON</a>
+        </div>
+      </div>
+
+      <button class="btn btn-ghost btn-sm btn-danger" id="rerun-btn" title="Wipe and reprocess this meeting from scratch">
+        ⟳ Re-run Pipeline
+      </button>
+
       <div class="segment-stats" id="segment-stats">—</div>
     </div>
   </header>
@@ -108,7 +174,7 @@
     <div class="banner-progress" id="banner-progress" style="display:none">
       <div class="banner-progress-header">
         <span class="banner-stage" id="banner-stage"></span>
-        <span class="banner-pct" id="banner-pct"></span>
+        <span class="banner-pct"   id="banner-pct"></span>
       </div>
       <div class="banner-bar-track">
         <div class="banner-bar-fill" id="banner-bar-fill"></div>
@@ -117,7 +183,7 @@
     </div>
   </div>
 
-  <!-- ── Upload Bar (shown when no video yet) ────────────────────────────── -->
+  <!-- ── Upload Bar ──────────────────────────────────────────────────────── -->
   <div class="upload-bar" id="upload-bar" hidden>
     <div class="upload-section">
       <label class="upload-label">Upload Video</label>
@@ -159,7 +225,6 @@
         <span class="video-meta-label" id="active-speaker-label"></span>
       </div>
 
-      <!-- Documents panel below video -->
       <div class="doc-panel" id="doc-panel">
         <div class="doc-panel-header">
           <span class="doc-panel-title">Documents</span>
@@ -188,7 +253,7 @@
     <section class="transcript-panel" id="transcript-panel">
       <div class="transcript-toolbar">
         <span class="transcript-label">TRANSCRIPT</span>
-        <span class="transcript-hint">Click segment to seek video</span>
+        <span class="transcript-hint">Click segment to seek · Double-click text to edit</span>
       </div>
       <div class="transcript-list" id="transcript-list">
         <div class="empty-state" id="transcript-empty">
@@ -217,6 +282,22 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" id="cancel-person-btn">Cancel</button>
       <button class="btn btn-primary" id="create-person-confirm-btn">Create & Assign</button>
+    </div>
+  </dialog>
+
+  <!-- ── Rerun Confirmation Modal ────────────────────────────────────────── -->
+  <dialog id="rerun-dialog" class="modal">
+    <div class="modal-header">
+      <h3>Re-run Pipeline</h3>
+      <button class="modal-close" id="close-rerun-dialog">✕</button>
+    </div>
+    <div class="modal-body">
+      <p>This will permanently delete all transcript segments and speaker assignments for this meeting, then reprocess from scratch.</p>
+      <p class="rerun-warning">⚠ All confirmed speaker assignments will be lost. Speaker voiceprints from other meetings are unaffected.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="cancel-rerun-btn">Cancel</button>
+      <button class="btn btn-primary" id="confirm-rerun-btn">Yes, Re-run</button>
     </div>
   </dialog>
 

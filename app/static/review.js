@@ -1,14 +1,14 @@
 /**
  * review.js — Side-by-side video review interface.
  *
- * Responsibilities:
- *   - Load meeting, segments, people from API.
- *   - Render a scrollable transcript beside the video.
- *   - Sync video playback position → active transcript card highlight.
- *   - Clicking a segment card seeks the video.
- *   - Confirm/correct speaker assignments → voiceprint learning loop.
- *   - Upload video, agenda, minutes PDFs.
- *   - Poll for pipeline completion with progress bar.
+ * Changes from previous version:
+ *   - Confirmation overwrite bug fixed: confirmed cards are tracked in
+ *     _confirmedThisSession and never overwritten by background polling.
+ *   - Inline text editing: double-click a segment's text to edit it.
+ *   - Export dropdown: SRT, TXT, JSON download.
+ *   - Re-run pipeline button with confirmation dialog.
+ *   - Progress bar in pipeline banner (polls every 4s).
+ *   - Video source uses /media/{id}/video (range-request endpoint, no .mp4).
  */
 
 "use strict";
@@ -23,8 +23,10 @@ let people       = [];
 let documents    = [];
 let activeIndex  = -1;
 let pollTimer    = null;
-let reprocessPollTimer = null;
 let pendingSegmentId = null;   // for new-person dialog
+
+// Segments confirmed in this browser session — never overwritten by polling
+const _confirmedThisSession = new Set();
 
 // DOM shortcuts
 const video          = () => document.getElementById("video-player");
@@ -46,6 +48,8 @@ async function init() {
   setupControls();
   setupDocumentUploads();
   setupPersonDialog();
+  setupExportDropdown();
+  setupRerunDialog();
 
   checkPipelineAndPoll();
 }
@@ -75,18 +79,34 @@ async function loadPeople() {
   }
 }
 
-async function loadSegments() {
+async function fetchSegments() {
   const filter = document.getElementById("filter-select").value;
   const url = `/api/segments/${meetingId}${filter ? `?filter=${filter}` : ""}`;
   try {
     const r = await fetch(url);
-    if (!r.ok) return;
-    segments = await r.json();
-    renderTranscript();
-    updateStats();
+    if (!r.ok) return null;
+    return r.json();
   } catch (err) {
-    console.error("loadSegments:", err);
+    console.error("fetchSegments:", err);
+    return null;
   }
+}
+
+async function loadSegments() {
+  const fresh = await fetchSegments();
+  if (!fresh) return;
+
+  // Don't overwrite cards confirmed in this session
+  segments = fresh.map(s => {
+    if (_confirmedThisSession.has(s.segment_id)) {
+      const existing = segments.find(x => x.segment_id === s.segment_id);
+      return existing || s;
+    }
+    return s;
+  });
+
+  renderTranscript();
+  updateStats();
 }
 
 async function loadDocuments() {
@@ -127,6 +147,19 @@ async function createPerson(name) {
 async function reprocessAll() {
   const r = await fetch(`/api/assignments/reprocess/${meetingId}`, { method: "POST" });
   return r.ok ? r.json() : null;
+}
+
+async function editSegmentText(segmentId, text) {
+  const r = await fetch(`/api/segments/${segmentId}/edit`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
 }
 
 // ── Render Transcript ─────────────────────────────────────────────────────────
@@ -190,7 +223,11 @@ function buildSegmentCard(seg, idx) {
       <span class="seg-badge badge-${confClass}">${esc(badgeText)}</span>
       <span class="seg-speaker-name">${esc(speakerName)}</span>
     </div>
-    <div class="seg-text">${esc(seg.text)}</div>
+    <div class="seg-text" title="Double-click to edit">${esc(seg.text)}</div>
+    <div class="seg-edit-controls" id="edit-controls-${seg.segment_id}">
+      <button class="btn btn-primary btn-xs seg-save-btn" data-seg="${seg.segment_id}">Save</button>
+      <button class="btn btn-ghost btn-xs seg-cancel-btn" data-seg="${seg.segment_id}">Cancel</button>
+    </div>
     <div class="seg-controls" onclick="event.stopPropagation()">
       <select class="seg-select" data-seg="${seg.segment_id}">
         <option value="">— Assign —</option>
@@ -207,8 +244,11 @@ function buildSegmentCard(seg, idx) {
     </div>
   `;
 
+  // Seek on card body click
   card.addEventListener("click", e => {
     if (e.target.closest(".seg-controls")) return;
+    if (e.target.closest(".seg-edit-controls")) return;
+    if (e.target.classList.contains("seg-text") && e.detail >= 2) return; // let dblclick handle
     const v = video();
     if (v) {
       v.currentTime = seg.start_time;
@@ -216,12 +256,31 @@ function buildSegmentCard(seg, idx) {
     }
   });
 
+  // Double-click text to edit
+  const textEl = card.querySelector(".seg-text");
+  textEl.addEventListener("dblclick", e => {
+    e.stopPropagation();
+    startTextEdit(card, seg, textEl);
+  });
+
+  // Save / cancel edit
+  card.querySelector(".seg-save-btn").addEventListener("click", e => {
+    e.stopPropagation();
+    saveTextEdit(card, seg, textEl);
+  });
+  card.querySelector(".seg-cancel-btn").addEventListener("click", e => {
+    e.stopPropagation();
+    cancelTextEdit(card, seg, textEl);
+  });
+
+  // Confirm button
   card.querySelector(".seg-confirm-btn").addEventListener("click", async () => {
     const sel = card.querySelector(".seg-select");
     if (!sel.value) { alert("Select a speaker first."); return; }
     await handleConfirm(seg.segment_id, sel.value, card);
   });
 
+  // New person button
   card.querySelector(".seg-new-btn").addEventListener("click", () => {
     pendingSegmentId = seg.segment_id;
     openPersonDialog();
@@ -230,35 +289,120 @@ function buildSegmentCard(seg, idx) {
   return card;
 }
 
+// ── Inline text editing ───────────────────────────────────────────────────────
+
+function startTextEdit(card, seg, textEl) {
+  if (textEl.getAttribute("contenteditable") === "true") return;
+  textEl.setAttribute("contenteditable", "true");
+  textEl.classList.add("editing");
+  textEl.focus();
+
+  // Move cursor to end
+  const range = document.createRange();
+  range.selectNodeContents(textEl);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  const editControls = card.querySelector(".seg-edit-controls");
+  editControls.classList.add("visible");
+
+  // Ctrl+Enter to save, Escape to cancel
+  textEl._keyHandler = e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      saveTextEdit(card, seg, textEl);
+    } else if (e.key === "Escape") {
+      cancelTextEdit(card, seg, textEl);
+    }
+  };
+  textEl.addEventListener("keydown", textEl._keyHandler);
+}
+
+async function saveTextEdit(card, seg, textEl) {
+  const newText = textEl.textContent.trim();
+  if (!newText) { alert("Text cannot be empty."); return; }
+
+  const saveBtn = card.querySelector(".seg-save-btn");
+  saveBtn.textContent = "Saving…";
+  saveBtn.disabled = true;
+
+  try {
+    await editSegmentText(seg.segment_id, newText);
+    // Update local state
+    const localSeg = segments.find(s => s.segment_id === seg.segment_id);
+    if (localSeg) localSeg.text = newText;
+    seg.text = newText;
+  } catch (err) {
+    alert(`Save failed: ${err.message}`);
+    textEl.textContent = seg.text; // revert
+  } finally {
+    finishTextEdit(card, textEl);
+    saveBtn.textContent = "Save";
+    saveBtn.disabled = false;
+  }
+}
+
+function cancelTextEdit(card, seg, textEl) {
+  textEl.textContent = seg.text;
+  finishTextEdit(card, textEl);
+}
+
+function finishTextEdit(card, textEl) {
+  textEl.setAttribute("contenteditable", "false");
+  textEl.classList.remove("editing");
+  if (textEl._keyHandler) {
+    textEl.removeEventListener("keydown", textEl._keyHandler);
+    delete textEl._keyHandler;
+  }
+  const editControls = card.querySelector(".seg-edit-controls");
+  editControls.classList.remove("visible");
+}
+
+// ── Confirm handler ───────────────────────────────────────────────────────────
+
 async function handleConfirm(segmentId, personId, cardEl) {
   const btn = cardEl?.querySelector(".seg-confirm-btn");
   if (btn) { btn.textContent = "…"; btn.disabled = true; }
 
   try {
-    const assignment = await confirmAssignment(segmentId, personId);
+    await confirmAssignment(segmentId, personId);
 
-    // Update just this card immediately — don't reload all 1700 segments
+    // Track as confirmed so polling won't overwrite this card
+    _confirmedThisSession.add(segmentId);
+
+    // Update the card in-place immediately
     const person = people.find(p => p.person_id === personId);
     if (cardEl && person) {
-      const nameEl = cardEl.querySelector(".seg-speaker-name");
-      const badgeEl = cardEl.querySelector(".seg-badge");
-      if (nameEl) nameEl.textContent = person.canonical_name;
-      if (badgeEl) {
-        badgeEl.textContent = "✓ verified";
-        badgeEl.className = "seg-badge badge-verified";
-      }
       cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-verified");
+      const badge = cardEl.querySelector(".seg-badge");
+      if (badge) {
+        badge.className = "seg-badge badge-verified";
+        badge.textContent = "✓ verified";
+      }
+      const nameEl = cardEl.querySelector(".seg-speaker-name");
+      if (nameEl) nameEl.textContent = person.canonical_name;
+      if (btn) {
+        btn.textContent = "✓";
+        btn.classList.add("confirmed");
+        btn.disabled = false;
+      }
     }
-    if (btn) { btn.textContent = "✓"; btn.disabled = false; btn.classList.add("confirmed"); }
 
-    // Update the segment in local state
-    const seg = segments.find(s => s.segment_id === segmentId);
-    if (seg) {
-      seg.assignment = assignment;
+    // Update local segment state
+    const localSeg = segments.find(s => s.segment_id === segmentId);
+    if (localSeg) {
+      if (!localSeg.assignment) localSeg.assignment = {};
+      localSeg.assignment.verified = true;
+      localSeg.assignment.predicted_person_id = personId;
     }
+
     updateStats();
 
-    // No auto-reprocess — use the "Process Assignments" button when ready
+    // Background task is now running — show indicator and poll for updates
+    // to OTHER unverified segments, but never overwrite confirmed ones
+    showReprocessIndicator();
 
   } catch (err) {
     alert(`Failed to confirm: ${err.message}`);
@@ -266,16 +410,7 @@ async function handleConfirm(segmentId, personId, cardEl) {
   }
 }
 
-// Show indicator briefly — no segment polling, user hits Process when ready
-function showReprocessIndicator() {
-  const indicator = document.getElementById("reprocess-indicator");
-  if (indicator) {
-    indicator.classList.add("visible");
-    setTimeout(() => indicator.classList.remove("visible"), 4000);
-  }
-}
-
-// ── Stats bar ──────────────────────────────────────────────────────────────────
+// ── Stats bar ─────────────────────────────────────────────────────────────────
 
 function updateStats() {
   const total    = segments.length;
@@ -285,6 +420,35 @@ function updateStats() {
   const el = document.getElementById("segment-stats");
   if (total === 0) { el.textContent = "—"; return; }
   el.textContent = `${verified}/${total} verified · ${unknown} unknown`;
+}
+
+// ── Reprocess indicator ───────────────────────────────────────────────────────
+
+function showReprocessIndicator() {
+  const el = document.getElementById("reprocess-indicator");
+  el.classList.add("visible");
+
+  let attempts = 0;
+  const MAX = 6;
+  const timer = setInterval(async () => {
+    attempts++;
+    const fresh = await fetchSegments();
+    if (fresh) {
+      // Merge: keep confirmed-this-session cards, update everything else
+      segments = fresh.map(s => {
+        if (_confirmedThisSession.has(s.segment_id)) {
+          return segments.find(x => x.segment_id === s.segment_id) || s;
+        }
+        return s;
+      });
+      renderTranscript();
+      updateStats();
+    }
+    if (attempts >= MAX) {
+      clearInterval(timer);
+      el.classList.remove("visible");
+    }
+  }, 5000);
 }
 
 // ── Video synchronisation ─────────────────────────────────────────────────────
@@ -329,9 +493,7 @@ function syncActiveCard(t, scrollIntoView) {
   const card = transcriptList().querySelector(`[data-idx="${idx}"]`);
   if (card) {
     card.classList.add("is-active");
-    if (scrollIntoView) {
-      card.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
+    if (scrollIntoView) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   const seg    = segments[idx];
@@ -339,14 +501,14 @@ function syncActiveCard(t, scrollIntoView) {
   const person = assign?.predicted_person_id
     ? people.find(p => p.person_id === assign.predicted_person_id)
     : null;
-  const label  = person?.canonical_name ?? seg.raw_speaker_label ?? "";
-  document.getElementById("active-speaker-label").textContent = label;
+  document.getElementById("active-speaker-label").textContent =
+    person?.canonical_name ?? seg.raw_speaker_label ?? "";
 }
 
 // ── Pipeline polling ──────────────────────────────────────────────────────────
 
 async function checkPipelineAndPoll() {
-  const status  = await fetchStatus();
+  const status   = await fetchStatus();
   const hasVideo = await fetchHasVideo();
 
   if (!hasVideo) {
@@ -356,30 +518,59 @@ async function checkPipelineAndPoll() {
 
   setVideoSource();
 
-  if (!status || status.status === "complete") {
-    hidePipelineBanner();
+  if (!status || status.status === "processing" || status.segment_count === 0) {
+    updateBannerProgress(status);
+    showPipelineBanner("Pipeline processing…");
+    startPipelinePoll();
     return;
   }
 
-  // Pipeline still running — show banner with progress
-  // BUT also show any segments already in DB (raw transcript)
-  showPipelineBanner(status);
+  hidePipelineBanner();
+}
 
+function startPipelinePoll() {
+  if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     const s = await fetchStatus();
-    if (!s) return;
-
     updateBannerProgress(s);
-
-    // Reload segments as they become available (e.g. after transcription commits)
-    await loadSegments();
-
-    if (s.status === "complete") {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      hidePipelineBanner();
+    if (s && (s.status === "complete" || s.segment_count > 0)) {
+      // Load segments if we have any (show transcript as soon as transcription is done)
+      if (s.segment_count > 0) await loadSegments();
+      if (s.status === "complete") {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        hidePipelineBanner();
+      }
     }
   }, 4000);
+}
+
+function updateBannerProgress(status) {
+  if (!status) return;
+  const stageEl  = document.getElementById("banner-stage");
+  const pctEl    = document.getElementById("banner-pct");
+  const fillEl   = document.getElementById("banner-bar-fill");
+  const detailEl = document.getElementById("banner-detail");
+  const progressEl = document.getElementById("banner-progress");
+
+  if (!stageEl) return;
+
+  const stage  = status.stage || "";
+  const pct    = status.progress_pct ?? 0;
+  const detail = status.detail || "";
+
+  progressEl.style.display = stage ? "block" : "none";
+  stageEl.textContent  = stage;
+  pctEl.textContent    = pct > 0 ? `${pct}%` : "";
+  detailEl.textContent = detail;
+
+  if (pct > 0) {
+    fillEl.classList.remove("indeterminate");
+    fillEl.style.width = `${pct}%`;
+  } else {
+    fillEl.classList.add("indeterminate");
+    fillEl.style.width = "35%";
+  }
 }
 
 async function fetchStatus() {
@@ -404,43 +595,10 @@ function setVideoSource() {
   v.src = `/media/${meetingId}/video`;
 }
 
-function showPipelineBanner(status) {
+function showPipelineBanner(msg) {
   const banner = document.getElementById("pipeline-banner");
+  document.getElementById("pipeline-banner-text").textContent = msg;
   banner.hidden = false;
-  updateBannerProgress(status);
-}
-
-function updateBannerProgress(status) {
-  const pct     = status.progress_pct ?? 0;
-  const stage   = status.stage || "Processing…";
-  const detail  = status.detail || "";
-  const indeterminate = pct === 0 && stage !== "";
-
-  document.getElementById("pipeline-banner-text").textContent =
-    status.segment_count > 0
-      ? `Processing — ${status.segment_count} segments available below`
-      : "Processing — transcript will appear when ready";
-
-  const progressEl = document.getElementById("banner-progress");
-  if (progressEl) progressEl.style.display = "block";
-
-  const stageEl = document.getElementById("banner-stage");
-  const pctEl   = document.getElementById("banner-pct");
-  const fillEl  = document.getElementById("banner-bar-fill");
-  const detailEl = document.getElementById("banner-detail");
-
-  if (stageEl) stageEl.textContent = stage;
-  if (pctEl)   pctEl.textContent   = pct ? `${pct}%` : "";
-  if (detailEl) detailEl.textContent = detail;
-  if (fillEl) {
-    if (indeterminate) {
-      fillEl.classList.add("indeterminate");
-      fillEl.style.width = "35%";
-    } else {
-      fillEl.classList.remove("indeterminate");
-      fillEl.style.width = `${pct}%`;
-    }
-  }
 }
 
 function hidePipelineBanner() {
@@ -456,24 +614,108 @@ function setupControls() {
   document.getElementById("reprocess-btn")
     .addEventListener("click", async () => {
       const btn = document.getElementById("reprocess-btn");
-      btn.textContent = "↻ Queuing…";
+      btn.textContent = "↻ Running…";
       btn.disabled = true;
       try {
         await reprocessAll();
         showReprocessIndicator();
-
-        // Single reload after Celery task completes — not a polling loop
-        setTimeout(async () => {
-          await loadSegments();
-          const indicator = document.getElementById("reprocess-indicator");
-          if (indicator) indicator.classList.remove("visible");
-        }, 8000);
-
+      } catch (err) {
+        alert(`Reprocess failed: ${err.message}`);
       } finally {
-        btn.textContent = "↻ Process Assignments";
+        btn.textContent = "↻ Reprocess";
         btn.disabled = false;
       }
     });
+}
+
+// ── Export dropdown ───────────────────────────────────────────────────────────
+
+function setupExportDropdown() {
+  const btn  = document.getElementById("export-btn");
+  const menu = document.getElementById("export-menu");
+
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    menu.classList.toggle("open");
+  });
+
+  document.addEventListener("click", () => menu.classList.remove("open"));
+
+  document.getElementById("export-srt").addEventListener("click", () => {
+    triggerExport("srt");
+    menu.classList.remove("open");
+  });
+  document.getElementById("export-txt").addEventListener("click", () => {
+    triggerExport("txt");
+    menu.classList.remove("open");
+  });
+  document.getElementById("export-json").addEventListener("click", () => {
+    triggerExport("json");
+    menu.classList.remove("open");
+  });
+}
+
+function triggerExport(format) {
+  const url = `/api/segments/${meetingId}/export?format=${format}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ── Rerun pipeline dialog ─────────────────────────────────────────────────────
+
+function setupRerunDialog() {
+  const dialog    = document.getElementById("rerun-dialog");
+  const rerunBtn  = document.getElementById("rerun-btn");
+  const cancelBtn = document.getElementById("cancel-rerun-btn");
+  const closeBtn  = document.getElementById("close-rerun-dialog");
+  const confirmBtn = document.getElementById("confirm-rerun-btn");
+
+  rerunBtn.addEventListener("click", () => {
+    dialog.showModal();
+    document.getElementById("overlay").classList.add("active");
+  });
+
+  const closeDialog = () => {
+    dialog.close();
+    document.getElementById("overlay").classList.remove("active");
+  };
+
+  cancelBtn.addEventListener("click", closeDialog);
+  closeBtn.addEventListener("click", closeDialog);
+
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.textContent = "Starting…";
+    confirmBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/media/${meetingId}/rerun`, { method: "POST" });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${r.status}`);
+      }
+      closeDialog();
+      // Clear local state
+      segments = [];
+      _confirmedThisSession.clear();
+      renderTranscript();
+      updateStats();
+      // Reload video source (video file is preserved)
+      const v = video();
+      if (v) { v.removeAttribute("src"); v.load(); }
+      setVideoSource();
+      // Show banner and start polling
+      showPipelineBanner("Re-running pipeline…");
+      startPipelinePoll();
+    } catch (err) {
+      alert(`Re-run failed: ${err.message}`);
+    } finally {
+      confirmBtn.textContent = "Yes, Re-run";
+      confirmBtn.disabled = false;
+    }
+  });
 }
 
 // ── Video upload ──────────────────────────────────────────────────────────────
@@ -540,21 +782,9 @@ async function uploadVideo(file, btn) {
       throw new Error(err.detail || `HTTP ${r.status}`);
     }
     document.getElementById("upload-bar").hidden = true;
-    const fakeStatus = { status: "processing", stage: "Starting…", progress_pct: 0, detail: "", segment_count: 0 };
-    showPipelineBanner(fakeStatus);
+    showPipelineBanner("Processing started… transcript will appear when ready.");
     setVideoSource();
-
-    pollTimer = setInterval(async () => {
-      const s = await fetchStatus();
-      if (!s) return;
-      updateBannerProgress(s);
-      await loadSegments();
-      if (s.status === "complete") {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        hidePipelineBanner();
-      }
-    }, 4000);
+    startPipelinePoll();
   } catch (err) {
     alert(`Upload failed: ${err.message}`);
   } finally {
@@ -593,7 +823,7 @@ function renderDocuments() {
   documents.forEach(doc => {
     const item = document.createElement("div");
     item.className = "doc-item";
-    const hasText = doc.ocr_text && doc.ocr_text.trim().length > 0;
+    const hasText  = doc.ocr_text && doc.ocr_text.trim().length > 0;
     const filename = doc.file_path.split("/").pop();
 
     item.innerHTML = `
@@ -620,7 +850,10 @@ function setupPersonDialog() {
   document.getElementById("cancel-person-btn")
     .addEventListener("click", () => dialog.close());
   document.getElementById("overlay")
-    .addEventListener("click", () => dialog.close());
+    .addEventListener("click", () => {
+      dialog.close();
+      document.getElementById("rerun-dialog")?.close();
+    });
 
   input.addEventListener("keydown", e => {
     if (e.key === "Enter") handleCreatePerson();
@@ -651,13 +884,6 @@ async function handleCreatePerson() {
     if (!person) {
       person = await createPerson(name);
       people.push(person);
-      // Add new person to all existing segment dropdowns
-      document.querySelectorAll(".seg-select").forEach(sel => {
-        const opt = document.createElement("option");
-        opt.value = person.person_id;
-        opt.textContent = person.canonical_name;
-        sel.appendChild(opt);
-      });
     }
 
     document.getElementById("new-person-dialog").close();
@@ -684,9 +910,7 @@ function fmtTime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 

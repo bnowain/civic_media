@@ -10,8 +10,12 @@ torchcodec backend on PyTorch nightly (2.12.0.dev+cu128). This mirrors
 the patch applied to pyannote/audio/core/io.py.
 
 The full waveform is cached in memory after the first load so that
-processing 7000+ segments does not re-read the WAV file from disk on
+processing 1700+ segments does not re-read the WAV file from disk on
 every call.
+
+Batch extraction runs ECAPA in chunks of BATCH_SIZE segments, padding
+shorter slices to match the longest in each chunk. This keeps the GPU
+fully utilised rather than running 1700 sequential single-item passes.
 """
 
 from __future__ import annotations
@@ -30,6 +34,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _classifier: "_EC | None" = None
+
+# Segments per GPU forward pass. 32 is a safe default for 24GB+ VRAM.
+# Lower to 16 if you see OOM errors during the embedding phase.
+BATCH_SIZE = 32
 
 # ── Audio cache ───────────────────────────────────────────────────────────────
 # Keyed by audio_path so the waveform is only read from disk once per pipeline
@@ -81,29 +89,49 @@ def _get_classifier() -> "_EC":
     return _classifier
 
 
-# ── Extraction ────────────────────────────────────────────────────────────────
+# ── Single extraction (kept for compatibility / reprocess single segment) ─────
 
 def extract_embedding(audio_path: str, start: float, end: float) -> np.ndarray | None:
     """
     Extract a speaker embedding for the audio slice [start, end] seconds.
 
-    Uses a cached in-memory waveform — the audio file is only read from
-    disk once regardless of how many segments are processed.
+    Uses the cached in-memory waveform. Returns None if the segment is
+    too short or extraction fails.
+    """
+    results = extract_embeddings_batch(audio_path, [(start, end)])
+    return results[0]
+
+
+# ── Batch extraction ──────────────────────────────────────────────────────────
+
+def extract_embeddings_batch(
+    audio_path: str,
+    segments: list[tuple[float, float]],
+) -> list[np.ndarray | None]:
+    """
+    Extract speaker embeddings for a list of (start, end) segments in batches.
+
+    Segments shorter than MIN_EMBED_DURATION return None. All valid slices in
+    each batch are padded to the length of the longest slice in that batch,
+    then run through ECAPA in a single GPU forward pass.
+
+    Args:
+        audio_path: Path to the 16kHz mono WAV file.
+        segments:   List of (start_sec, end_sec) tuples.
 
     Returns:
-        1-D numpy float32 array, or None if segment is too short or fails.
+        List of numpy float32 arrays (or None) in the same order as input.
     """
     import torch
 
-    duration = end - start
-    if duration < MIN_EMBED_DURATION:
-        return None
+    if not segments:
+        return []
 
     try:
         waveform_np, sr = _load_audio(audio_path)
     except Exception as exc:
-        logger.warning("Could not load audio for embedding: %s", exc)
-        return None
+        logger.warning("Could not load audio for batch embedding: %s", exc)
+        return [None] * len(segments)
 
     # Resample if needed (should be 16kHz already from audio_extractor)
     if sr != 16000:
@@ -116,28 +144,64 @@ def extract_embedding(audio_path: str, start: float, end: float) -> np.ndarray |
         except Exception as exc:
             logger.warning("Resample failed, using original sr=%d: %s", sr, exc)
 
-    start_frame = int(start * sr)
-    end_frame   = int(end   * sr)
-    slice_np    = waveform_np[:, start_frame:end_frame]
-
-    if slice_np.shape[1] < int(MIN_EMBED_DURATION * sr):
-        return None
-
-    slice_wav = torch.from_numpy(slice_np)
-
-    # SpeechBrain expects shape (batch, time) — take first channel
-    if slice_wav.dim() == 2:
-        slice_wav = slice_wav[0:1]  # (1, samples)
-
+    min_frames = int(MIN_EMBED_DURATION * sr)
     classifier = _get_classifier()
+    results: list[np.ndarray | None] = [None] * len(segments)
 
-    try:
-        with torch.no_grad():
-            embedding = classifier.encode_batch(slice_wav)
-        return embedding.squeeze().cpu().numpy().astype(np.float32)
-    except Exception as exc:
-        logger.warning("Embedding extraction failed for [%.2f, %.2f]: %s", start, end, exc)
-        return None
+    # Build index of valid segments
+    valid: list[tuple[int, np.ndarray]] = []  # (original_index, slice)
+    for idx, (start, end) in enumerate(segments):
+        duration = end - start
+        if duration < MIN_EMBED_DURATION:
+            continue
+        start_frame = int(start * sr)
+        end_frame   = int(end   * sr)
+        slice_np    = waveform_np[0, start_frame:end_frame]  # mono, shape (samples,)
+        if slice_np.shape[0] < min_frames:
+            continue
+        valid.append((idx, slice_np))
+
+    if not valid:
+        return results
+
+    # Process in chunks of BATCH_SIZE
+    for chunk_start in range(0, len(valid), BATCH_SIZE):
+        chunk = valid[chunk_start : chunk_start + BATCH_SIZE]
+
+        # Pad all slices to the length of the longest in this chunk
+        max_len = max(s.shape[0] for _, s in chunk)
+        padded = []
+        for _, s in chunk:
+            pad = max_len - s.shape[0]
+            padded.append(np.pad(s, (0, pad), mode="constant") if pad > 0 else s)
+
+        # Stack to (batch, time) tensor
+        batch_tensor = torch.from_numpy(np.stack(padded, axis=0))  # (B, T)
+
+        try:
+            with torch.no_grad():
+                embeddings = classifier.encode_batch(batch_tensor)  # (B, 1, D)
+            embeddings_np = embeddings.squeeze(1).cpu().numpy().astype(np.float32)  # (B, D)
+
+            for i, (orig_idx, _) in enumerate(chunk):
+                results[orig_idx] = embeddings_np[i]
+
+        except Exception as exc:
+            logger.warning(
+                "Batch embedding failed for chunk %d-%d: %s",
+                chunk_start, chunk_start + len(chunk), exc,
+            )
+            # Fall back to single extraction for failed chunks
+            for orig_idx, slice_np in chunk:
+                try:
+                    t = torch.from_numpy(slice_np).unsqueeze(0)  # (1, T)
+                    with torch.no_grad():
+                        emb = classifier.encode_batch(t)
+                    results[orig_idx] = emb.squeeze().cpu().numpy().astype(np.float32)
+                except Exception as exc2:
+                    logger.warning("Single fallback also failed for segment %d: %s", orig_idx, exc2)
+
+    return results
 
 
 # ── Serialisation ─────────────────────────────────────────────────────────────

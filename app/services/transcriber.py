@@ -1,5 +1,14 @@
 """
 Transcription service using faster-whisper.
+
+Changes from original:
+  - beam_size raised to 10 (max accuracy; safe on RTX 5090)
+  - language forced to "en" (removes auto-detect non-determinism)
+  - temperature=0 (fully deterministic greedy/beam decoding)
+  - VAD parameters set explicitly (deterministic chunking across reruns)
+  - initial_prompt loaded from config/vocab_hints.yml (improves proper noun accuracy)
+  - avg_logprob and no_speech_prob stored per segment (enables confidence-based review)
+
 Model is loaded once and cached for the lifetime of the worker process.
 """
 
@@ -16,6 +25,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _model: "_WhisperModelType | None" = None
+
+# ── Decoding settings ─────────────────────────────────────────────────────────
+
+# Beam size: higher = more accurate, slower. 10 is the practical ceiling for
+# large-v3. Diminishing returns beyond this.
+BEAM_SIZE = 10
+
+# Force English. For Redding civic meetings this is always correct and removes
+# a source of non-determinism (auto-detect can flip on noisy/silent segments).
+LANGUAGE = "en"
+
+# temperature=0 means deterministic greedy/beam decoding. No sampling noise.
+TEMPERATURE = 0
+
+# ── VAD parameters ────────────────────────────────────────────────────────────
+# Set ALL parameters explicitly so chunking is identical across reruns.
+# These are tuned for webcast audio with occasional silence/applause gaps.
+#
+# threshold:               speech probability to consider a frame "speech"
+# min_speech_duration_ms:  shortest segment to keep (filters mic pops)
+# max_speech_duration_s:   force-split very long unbroken speech blocks
+# min_silence_duration_ms: silence gap required to end a speech segment
+# speech_pad_ms:           padding added to each side of a speech segment
+
+VAD_PARAMETERS = {
+    "threshold":               0.5,
+    "min_speech_duration_ms":  250,
+    "max_speech_duration_s":   30,   # consistent chunk ceiling
+    "min_silence_duration_ms": 500,  # matches original; good for civic meetings
+    "speech_pad_ms":           400,  # 400ms of context on each side
+}
+
+# ── Suspicious segment thresholds (for flagging in review UI) ─────────────────
+# Segments below these values are candidates for manual review.
+LOW_CONFIDENCE_LOGPROB    = -1.0   # avg_logprob below this = low confidence
+HIGH_NO_SPEECH_PROB       = 0.6    # no_speech_prob above this = likely silence
 
 
 def _get_model() -> "_WhisperModelType":
@@ -37,35 +82,86 @@ def _get_model() -> "_WhisperModelType":
 
 def transcribe(audio_path: str) -> list[dict]:
     """
-    Transcribe a WAV file.
+    Transcribe a preprocessed WAV file.
 
     Returns a list of segment dicts:
-        [{"start": float, "end": float, "text": str}, ...]
+        [
+            {
+                "start":         float,   # seconds
+                "end":           float,   # seconds
+                "text":          str,
+                "avg_logprob":   float,   # confidence proxy (0 = perfect, -inf = bad)
+                "no_speech_prob": float,  # probability this segment is silence
+            },
+            ...
+        ]
 
     Segments with empty text are excluded.
+    Suspicious segments (low confidence or high no_speech_prob) are logged
+    as warnings so they show up clearly in Celery task output.
     """
-    model = _get_model()
+    from app.services.vocab import load_initial_prompt
 
-    logger.info("Transcribing %s ...", audio_path)
+    model = _get_model()
+    initial_prompt = load_initial_prompt()
+
+    logger.info(
+        "Transcribing %s  [beam=%d, lang=%s, temp=%s, vad=True]",
+        audio_path, BEAM_SIZE, LANGUAGE, TEMPERATURE,
+    )
+    if initial_prompt:
+        logger.info("Using vocab prompt (%d chars)", len(initial_prompt))
 
     segments_gen, info = model.transcribe(
         audio_path,
-        beam_size=5,
+        beam_size=BEAM_SIZE,
+        language=LANGUAGE,
+        temperature=TEMPERATURE,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
+        vad_parameters=VAD_PARAMETERS,
         word_timestamps=False,
-        language=None,   # auto-detect
+        initial_prompt=initial_prompt or None,
+    )
+
+    logger.info(
+        "Detected language: %s (prob=%.2f)",
+        info.language, info.language_probability,
     )
 
     results = []
+    suspicious_count = 0
+
     for seg in segments_gen:
         text = seg.text.strip()
-        if text:
-            results.append({
-                "start": round(seg.start, 3),
-                "end":   round(seg.end,   3),
-                "text":  text,
-            })
+        if not text:
+            continue
 
-    logger.info("Transcription complete: %d segments", len(results))
+        avg_logprob    = round(seg.avg_logprob,    4)
+        no_speech_prob = round(seg.no_speech_prob, 4)
+
+        # Flag suspicious segments in the log
+        is_suspicious = (
+            avg_logprob    < LOW_CONFIDENCE_LOGPROB or
+            no_speech_prob > HIGH_NO_SPEECH_PROB
+        )
+        if is_suspicious:
+            suspicious_count += 1
+            logger.warning(
+                "Suspicious segment [%.1f–%.1f]: logprob=%.3f no_speech=%.3f | %r",
+                seg.start, seg.end, avg_logprob, no_speech_prob, text[:80],
+            )
+
+        results.append({
+            "start":          round(seg.start, 3),
+            "end":            round(seg.end,   3),
+            "text":           text,
+            "avg_logprob":    avg_logprob,
+            "no_speech_prob": no_speech_prob,
+        })
+
+    logger.info(
+        "Transcription complete: %d segments (%d suspicious)",
+        len(results), suspicious_count,
+    )
+
     return results

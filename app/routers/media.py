@@ -3,6 +3,7 @@ Media upload endpoints.
 
 POST /api/media/{meeting_id}/upload  — accepts a video file, saves it,
                                        enqueues the processing pipeline.
+POST /api/media/{meeting_id}/rerun   — wipe segments/cache and reprocess.
 GET  /api/media/{meeting_id}/status  — poll pipeline readiness + progress.
 GET  /api/media/{meeting_id}         — list media files for a meeting.
 GET  /media/{meeting_id}/video       — stream video with range request support.
@@ -57,9 +58,8 @@ async def stream_video(meeting_id: str, request: Request):
     if not video_path:
         raise HTTPException(404, "Video file not found")
 
-    file_size = video_path.stat().st_size
+    file_size  = video_path.stat().st_size
     media_type = _MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
-
     range_header = request.headers.get("range")
 
     if not range_header:
@@ -69,7 +69,6 @@ async def stream_video(meeting_id: str, request: Request):
             headers={"Accept-Ranges": "bytes"},
         )
 
-    # Parse "bytes=start-end"
     try:
         range_val = range_header.strip().replace("bytes=", "")
         start_str, _, end_str = range_val.partition("-")
@@ -91,7 +90,7 @@ async def stream_video(meeting_id: str, request: Request):
         with video_path.open("rb") as f:
             f.seek(start)
             remaining = chunk_size
-            buf = 1024 * 256  # 256 KB chunks
+            buf = 1024 * 256
             while remaining > 0:
                 data = f.read(min(buf, remaining))
                 if not data:
@@ -139,7 +138,7 @@ async def upload_video(
             f"Allowed: {', '.join(sorted(_ALLOWED_VIDEO_SUFFIXES))}",
         )
 
-    dest_dir = MEDIA_DIR / meeting_id
+    dest_dir  = MEDIA_DIR / meeting_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"video{suffix}"
 
@@ -157,39 +156,88 @@ async def upload_video(
     db.refresh(media)
 
     process_video_task.delay(meeting_id, media.media_id)
-
     return media
 
 
-# ── Reprocess ─────────────────────────────────────────────────────────────────
+# ── Rerun pipeline ────────────────────────────────────────────────────────────
 
-@router.post("/api/media/{meeting_id}/reprocess", status_code=202)
-def reprocess_video(meeting_id: str, db: Session = Depends(get_db)):
+@router.post("/api/media/{meeting_id}/rerun", status_code=202)
+def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
     """
-    Re-queue the video pipeline for a meeting that already has a video uploaded.
-    Safe to call at any time — the pipeline skips steps already completed.
-    Use this to resume after a crash or to re-run the embedding step.
+    Wipe all transcript segments, voiceprints, and cached pipeline files
+    for a meeting, then requeue the full ingestion pipeline.
+
+    This preserves:
+      - The meeting record and metadata
+      - The uploaded video file
+      - People records (speaker names)
+
+    This deletes:
+      - All TranscriptSegment rows (and their assignments via cascade)
+      - All Voiceprint rows for this meeting's speakers (embeddings only —
+        voiceprints from other meetings are unaffected)
+      - diarization.json, progress.json cache files
+      - audio.wav (will be re-extracted so transcription uses a clean slate)
+      - The audio MediaFile record
     """
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    media = (
+    video_media = (
         db.query(models.MediaFile)
         .filter_by(meeting_id=meeting_id, file_type="video")
         .first()
     )
-    if not media:
-        raise HTTPException(404, "No video uploaded for this meeting — upload first.")
+    if not video_media:
+        raise HTTPException(400, "No video found for this meeting — upload a video first")
 
-    process_video_task.delay(meeting_id, media.media_id)
-    return {"meeting_id": meeting_id, "status": "queued"}
+    # Delete assignments first (bulk delete bypasses ORM cascade)
+    segment_ids = [
+        row.segment_id for row in
+        db.query(models.TranscriptSegment.segment_id)
+        .filter_by(meeting_id=meeting_id)
+        .all()
+    ]
+    if segment_ids:
+        db.query(models.SegmentAssignment).filter(
+            models.SegmentAssignment.segment_id.in_(segment_ids)
+        ).delete(synchronize_session=False)
+
+    # Now safe to delete segments
+    deleted = (
+        db.query(models.TranscriptSegment)
+        .filter_by(meeting_id=meeting_id)
+        .delete(synchronize_session=False)
+    )
+
+    # Delete audio MediaFile record (audio.wav will be re-extracted)
+    db.query(models.MediaFile).filter_by(
+        meeting_id=meeting_id, file_type="audio"
+    ).delete(synchronize_session=False)
+
+    db.commit()
+
+    # Delete cache files — audio.wav, diarization.json, progress.json
+    meeting_dir = MEDIA_DIR / meeting_id
+    for fname in ("audio.wav", "diarization.json", "progress.json"):
+        p = meeting_dir / fname
+        if p.exists():
+            p.unlink()
+
+    # Requeue pipeline
+    process_video_task.delay(meeting_id, video_media.media_id)
+
+    return {
+        "meeting_id": meeting_id,
+        "segments_deleted": deleted,
+        "status": "queued",
+    }
 
 
 # ── Status / list ─────────────────────────────────────────────────────────────
 
 def _read_progress(meeting_id: str) -> dict:
-    """Read progress.json written by the pipeline. Returns empty dict if absent."""
     p = MEDIA_DIR / meeting_id / "progress.json"
     if p.exists():
         try:
@@ -201,7 +249,6 @@ def _read_progress(meeting_id: str) -> dict:
 
 @router.get("/api/media/{meeting_id}/status", response_model=schemas.PipelineStatus)
 def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
-    """Poll pipeline status and progress for a meeting."""
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
@@ -219,24 +266,24 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     )
 
     progress = _read_progress(meeting_id)
-    stage = progress.get("stage")
-    pct = progress.get("pct")
+    stage  = progress.get("stage")
+    pct    = progress.get("pct")
     detail = progress.get("detail", "")
 
     if not has_video:
         status = "pending"
-        stage = stage or "Waiting for upload"
-        pct = pct or 0
+        stage  = stage or "Waiting for upload"
+        pct    = pct or 0
     elif stage == "Complete" or pct == 100:
         status = "complete"
-        pct = 100
+        pct    = 100
     elif segment_count > 0 or stage:
         status = "processing"
-        pct = pct or 10
+        pct    = pct or 10
     else:
         status = "processing"
-        stage = stage or "Starting..."
-        pct = pct or 0
+        stage  = stage or "Starting..."
+        pct    = pct or 0
 
     return schemas.PipelineStatus(
         meeting_id=meeting_id,
