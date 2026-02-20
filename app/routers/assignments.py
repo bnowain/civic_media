@@ -56,33 +56,35 @@ def confirm_assignment(
     assign = segment.assignment
 
     # ── Handle re-confirmation to a DIFFERENT person ──────────────────────
-    # Delete the old voiceprint that was created from this segment so it
-    # doesn't poison the previous person's voiceprint pool.
+    # Delete ALL old voiceprints created from this segment (including
+    # multi-clip extras) so they don't poison the previous person's pool.
     if assign and assign.verified and assign.predicted_person_id != payload.person_id:
         old_person_id = assign.predicted_person_id
-        # Strategy 1: lookup by source_segment_id (post-migration voiceprints)
-        old_vp = db.query(models.Voiceprint).filter_by(
+        # Strategy 1: delete all by source_segment_id (post-migration voiceprints)
+        deleted_count = db.query(models.Voiceprint).filter_by(
             source_segment_id=segment_id,
             person_id=old_person_id,
-        ).first()
+        ).delete(synchronize_session="fetch")
 
-        # Strategy 2: byte-equality fallback (pre-migration voiceprints)
-        if old_vp is None and segment.embedding:
+        # Strategy 2: byte-equality fallback (pre-migration voiceprints without source_segment_id)
+        if deleted_count == 0 and segment.embedding:
             old_vp = db.query(models.Voiceprint).filter_by(
                 person_id=old_person_id,
                 embedding=segment.embedding,
             ).first()
+            if old_vp:
+                db.delete(old_vp)
+                deleted_count = 1
 
-        if old_vp:
-            db.delete(old_vp)
+        if deleted_count:
             logger.info(
-                "Deleted old voiceprint %s from person %s (re-confirm segment %s)",
-                old_vp.voiceprint_id, old_person_id, segment_id,
+                "Deleted %d old voiceprint(s) from person %s (re-confirm segment %s)",
+                deleted_count, old_person_id, segment_id,
             )
         else:
             logger.warning(
-                "Re-confirm: could not find old voiceprint for segment %s / person %s "
-                "(segment may have been too short to create one)",
+                "Re-confirm: could not find old voiceprints for segment %s / person %s "
+                "(segment may have been too short to create any)",
                 segment_id, old_person_id,
             )
 
@@ -124,8 +126,20 @@ def confirm_assignment(
     db.commit()
     db.refresh(assign)
 
-    # 3. Dispatch re-evaluation to background — returns immediately to UI
-    from app.tasks import rerun_voiceprints_task
+    # 3. Dispatch background tasks — returns immediately to UI.
+    #    Multi-clip extraction is queued BEFORE rerun so that with
+    #    concurrency=1 the extra voiceprints exist by the time
+    #    re-evaluation starts.
+    from app.config import MULTI_CLIP_MIN_SEGMENT
+    from app.tasks import extract_multi_voiceprints_task, rerun_voiceprints_task
+
+    if segment.embedding and seg_duration >= MULTI_CLIP_MIN_SEGMENT:
+        extract_multi_voiceprints_task.delay(segment_id, payload.person_id)
+        logger.info(
+            "Queued multi-clip voiceprint extraction for segment %s (%.1fs)",
+            segment_id, seg_duration,
+        )
+
     rerun_voiceprints_task.delay(segment.meeting_id)
     logger.info(
         "Queued background voiceprint re-evaluation for meeting %s",

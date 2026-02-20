@@ -30,6 +30,11 @@ VOICEPRINT_COHERENCE_THRESHOLD = 0.6
 # 32-bit index overflow on large batches.
 MAX_EMBED_AUDIO_SEC = 10.0
 
+# Multi-clip voiceprints: for long confirmed segments, extract additional
+# embeddings from non-overlapping windows beyond the first MAX_EMBED_AUDIO_SEC.
+MULTI_CLIP_DURATION    = 8.0    # seconds per extra clip
+MULTI_CLIP_MIN_SEGMENT = 20.0   # only extract multi-clips from segments >= this long
+
 # Whisper: tiny | base | small | medium | large-v3
 # large-v3 recommended for RTX 5090
 WHISPER_MODEL    = os.environ.get("WHISPER_MODEL", "large-v3")

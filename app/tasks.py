@@ -1,10 +1,11 @@
 """
 Celery task definitions.
 
-Three tasks:
-  - process_video_task:     Full video ingestion pipeline.
-  - process_pdf_task:       PDF text extraction (native + OCR fallback).
-  - rerun_voiceprints_task: Background voiceprint re-evaluation after confirmation.
+Four tasks:
+  - process_video_task:            Full video ingestion pipeline.
+  - process_pdf_task:              PDF text extraction (native + OCR fallback).
+  - extract_multi_voiceprints_task: Extra voiceprints from long confirmed segments.
+  - rerun_voiceprints_task:        Background voiceprint re-evaluation after confirmation.
 
 All tasks use their own DB sessions (never share across task boundaries).
 """
@@ -89,6 +90,86 @@ def process_pdf_task(self, document_id: str) -> dict:
         db.rollback()
         logger.exception("process_pdf_task failed for document %s", document_id)
         raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="tasks.extract_multi_voiceprints",
+    max_retries=0,
+)
+def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
+    """
+    Extract additional voiceprints from non-overlapping windows of a long
+    confirmed segment.  The pipeline's embedding phase only uses the first
+    MAX_EMBED_AUDIO_SEC of audio; this task harvests the rest so the person's
+    voiceprint pool captures more vocal diversity.
+
+    Dispatched after a human confirmation for segments longer than
+    MULTI_CLIP_MIN_SEGMENT.  Runs before the rerun_voiceprints_task in the
+    Celery queue (FIFO with concurrency=1) so the new voiceprints are
+    available when re-evaluation starts.
+    """
+    from app.database import SessionLocal
+    from app.config import MAX_EMBED_AUDIO_SEC, MEDIA_DIR, MULTI_CLIP_DURATION
+    from app.services.voiceprint import MIN_VOICEPRINT_DURATION
+    from app.services import embedder
+    from app import models
+
+    db = SessionLocal()
+    try:
+        segment = db.query(models.TranscriptSegment).filter_by(
+            segment_id=segment_id,
+        ).first()
+        if not segment:
+            logger.warning("extract_multi_voiceprints: segment %s not found", segment_id)
+            return {"error": "segment not found"}
+
+        audio_path = str(MEDIA_DIR / segment.meeting_id / "audio.wav")
+        if not Path(audio_path).exists():
+            logger.warning("extract_multi_voiceprints: audio not found at %s", audio_path)
+            return {"error": "audio not found"}
+
+        # Build windows starting after the region already covered
+        clip_start = segment.start_time + MAX_EMBED_AUDIO_SEC
+        windows: list[tuple[float, float]] = []
+        while clip_start < segment.end_time:
+            clip_end = min(clip_start + MULTI_CLIP_DURATION, segment.end_time)
+            if clip_end - clip_start >= MIN_VOICEPRINT_DURATION:
+                windows.append((clip_start, clip_end))
+            clip_start = clip_end
+
+        if not windows:
+            return {"segment_id": segment_id, "extra_voiceprints": 0}
+
+        embeddings = embedder.extract_embeddings_batch(audio_path, windows)
+
+        added = 0
+        for emb in embeddings:
+            if emb is not None:
+                vp = models.Voiceprint(
+                    person_id=person_id,
+                    embedding=embedder.serialize(emb),
+                    source_segment_id=segment_id,
+                )
+                db.add(vp)
+                added += 1
+
+        db.commit()
+        logger.info(
+            "extract_multi_voiceprints: added %d extra voiceprints for segment %s "
+            "(%d windows from %.1fs segment)",
+            added, segment_id, len(windows),
+            segment.end_time - segment.start_time,
+        )
+        return {"segment_id": segment_id, "extra_voiceprints": added}
+
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "extract_multi_voiceprints failed for segment %s", segment_id,
+        )
+        raise
     finally:
         db.close()
 
