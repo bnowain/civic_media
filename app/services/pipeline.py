@@ -5,14 +5,15 @@ Runs the full sequence for a single video:
   1. Extract audio → preprocessed WAV (loudnorm + high-pass)
   2. Transcribe audio → text segments with timestamps + confidence metadata
   3. Diarize audio → speaker turn labels
-  4. Align transcript + diarization
+  4. Align transcript + diarization (word-level when available)
   5. Extract speaker embeddings (batched — BATCH_SIZE segments per GPU pass)
   6. Match against voiceprint library
   7. Persist everything to the database
 
 Checkpoints (each step is skipped on retry if already complete):
   - audio.wav on disk + MediaFile(audio) in DB     → skip audio extraction
-  - TranscriptSegment rows in DB (embedding=None)  → skip transcription
+  - transcription.json on disk OR TranscriptSegment rows in DB
+                                                    → skip transcription
   - diarization.json on disk                       → skip diarization (~10-20 min)
   - Any segment with embedding != None             → pipeline already complete
 
@@ -81,6 +82,39 @@ def _load_diarization(meeting_id: str) -> list[dict] | None:
         return data
     except Exception as exc:
         logger.warning("[%s] Diarization cache corrupt, re-running: %s", meeting_id, exc)
+        return None
+
+
+# ── Transcription cache helpers ──────────────────────────────────────────────
+
+def _transcription_cache_path(meeting_id: str) -> Path:
+    return MEDIA_DIR / meeting_id / "transcription.json"
+
+
+def _save_transcription(meeting_id: str, segments: list[dict]) -> None:
+    """Cache full transcription (with word timestamps) to disk."""
+    p = _transcription_cache_path(meeting_id)
+    try:
+        p.write_text(json.dumps(segments))
+        logger.info("[%s] Transcription cached to %s (%d segments)", meeting_id, p, len(segments))
+    except Exception as exc:
+        logger.warning("[%s] Could not cache transcription: %s", meeting_id, exc)
+
+
+def _load_transcription(meeting_id: str) -> list[dict] | None:
+    """Load cached transcription with word data. Returns None if unavailable."""
+    p = _transcription_cache_path(meeting_id)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        logger.info(
+            "[%s] Loaded %d transcript segments from cache (with word data).",
+            meeting_id, len(data),
+        )
+        return data
+    except Exception as exc:
+        logger.warning("[%s] Transcription cache corrupt: %s", meeting_id, exc)
         return None
 
 
@@ -154,22 +188,35 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             )
             _write_progress(meeting_id, "Complete", 100)
             return
-        else:
-            logger.info(
-                "[%s] %d raw transcript segments found - skipping transcription.",
-                meeting_id,
-                len(existing_segments),
-            )
-            raw_segments = [
-                {
-                    "start":          s.start_time,
-                    "end":            s.end_time,
-                    "text":           s.text,
-                    "avg_logprob":    s.avg_logprob,
-                    "no_speech_prob": s.no_speech_prob,
-                }
-                for s in existing_segments
-            ]
+
+    # Try loading cached transcription (preserves word timestamps for
+    # word-level diarization alignment on resume)
+    raw_segments = _load_transcription(meeting_id)
+
+    if raw_segments is not None:
+        logger.info(
+            "[%s] Using cached transcription (%d segments).",
+            meeting_id, len(raw_segments),
+        )
+    elif existing_segments:
+        # Fall back to DB reconstruction (no word data — aligner will
+        # use segment-level alignment instead of word-level)
+        logger.info(
+            "[%s] %d raw transcript segments in DB (no word data) - "
+            "skipping transcription.",
+            meeting_id,
+            len(existing_segments),
+        )
+        raw_segments = [
+            {
+                "start":          s.start_time,
+                "end":            s.end_time,
+                "text":           s.text,
+                "avg_logprob":    s.avg_logprob,
+                "no_speech_prob": s.no_speech_prob,
+            }
+            for s in existing_segments
+        ]
     else:
         _write_progress(
             meeting_id, "Transcribing", 10,
@@ -179,6 +226,10 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         raw_segments = transcriber.transcribe(audio_path)
         logger.info("[%s] %d transcript segments", meeting_id, len(raw_segments))
 
+        # Cache to disk (with word data) for resume
+        _save_transcription(meeting_id, raw_segments)
+
+        # Also save to DB for the checkpoint check
         for seg_data in raw_segments:
             segment = models.TranscriptSegment(
                 meeting_id=meeting_id,
@@ -222,16 +273,19 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     )
     _write_progress(meeting_id, "Extracting voice embeddings", 61, f"0/{total} segments")
 
-    db_segments = (
-        db.query(models.TranscriptSegment)
-        .filter_by(meeting_id=meeting_id)
-        .order_by(models.TranscriptSegment.start_time)
-        .all()
-    )
-    seg_map = {(s.start_time, s.end_time): s for s in db_segments}
+    # Delete the original raw transcript segments — they will be replaced by
+    # the aligned (merged) segments below.  Without this, both the originals
+    # and the merged versions remain in the DB, producing duplicate lines in
+    # the UI.  SegmentAssignment cascade-deletes automatically.
+    db.query(models.TranscriptSegment).filter_by(meeting_id=meeting_id).delete()
+    db.flush()
 
     segment_times = [(s["start"], s["end"]) for s in aligned_segments]
     all_embeddings = embedder.extract_embeddings_batch(audio_path, segment_times)
+
+    # Pre-load voiceprints once for matching (avoids per-segment DB queries)
+    preloaded  = voiceprint._load_all_voiceprints(db)
+    person_map = {p.person_id: p for p in db.query(models.Person).all()}
 
     for i, (seg_data, emb_array) in enumerate(zip(aligned_segments, all_embeddings)):
         if i % 50 == 0:
@@ -241,26 +295,23 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
                 f"{i}/{total} segments"
             )
 
-        key = (seg_data["start"], seg_data["end"])
-        segment = seg_map.get(key)
-        if segment is None:
-            segment = models.TranscriptSegment(
-                meeting_id=meeting_id,
-                start_time=seg_data["start"],
-                end_time=seg_data["end"],
-                text=seg_data["text"],
-                avg_logprob=seg_data.get("avg_logprob"),
-                no_speech_prob=seg_data.get("no_speech_prob"),
-            )
-            db.add(segment)
-            db.flush()
-
-        segment.raw_speaker_label = seg_data.get("raw_speaker_label")
-        segment.embedding = embedder.serialize(emb_array) if emb_array is not None else None
+        segment = models.TranscriptSegment(
+            meeting_id=meeting_id,
+            start_time=seg_data["start"],
+            end_time=seg_data["end"],
+            text=seg_data["text"],
+            raw_speaker_label=seg_data.get("raw_speaker_label"),
+            avg_logprob=seg_data.get("avg_logprob"),
+            no_speech_prob=seg_data.get("no_speech_prob"),
+            embedding=embedder.serialize(emb_array) if emb_array is not None else None,
+        )
+        db.add(segment)
         db.flush()
 
         if emb_array is not None:
-            voiceprint.run_voiceprint_matching(db, segment)
+            voiceprint.run_voiceprint_matching(
+                db, segment, preloaded=preloaded, person_map=person_map,
+            )
 
     db.commit()
 

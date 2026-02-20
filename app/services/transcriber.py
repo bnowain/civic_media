@@ -8,6 +8,8 @@ Changes from original:
   - VAD parameters set explicitly (deterministic chunking across reruns)
   - initial_prompt loaded from config/vocab_hints.yml (improves proper noun accuracy)
   - avg_logprob and no_speech_prob stored per segment (enables confidence-based review)
+  - word_timestamps=True for word-level diarization alignment
+  - hallucination filtering (high compression ratio, very high no-speech prob)
 
 Model is loaded once and cached for the lifetime of the worker process.
 """
@@ -62,6 +64,13 @@ VAD_PARAMETERS = {
 LOW_CONFIDENCE_LOGPROB    = -1.0   # avg_logprob below this = low confidence
 HIGH_NO_SPEECH_PROB       = 0.6    # no_speech_prob above this = likely silence
 
+# ── Hallucination filtering ──────────────────────────────────────────────────
+# Segments exceeding these thresholds are dropped entirely (not just flagged).
+# compression_ratio measures text repetitiveness (zlib). Values above ~2.4
+# almost always indicate Whisper looping on the same phrase.
+HALLUCINATION_COMPRESSION_RATIO = 2.4
+HALLUCINATION_NO_SPEECH_PROB    = 0.9   # near-certain silence → drop
+
 
 def _get_model() -> "_WhisperModelType":
     global _model
@@ -87,18 +96,20 @@ def transcribe(audio_path: str) -> list[dict]:
     Returns a list of segment dicts:
         [
             {
-                "start":         float,   # seconds
-                "end":           float,   # seconds
-                "text":          str,
-                "avg_logprob":   float,   # confidence proxy (0 = perfect, -inf = bad)
-                "no_speech_prob": float,  # probability this segment is silence
+                "start":          float,   # seconds
+                "end":            float,   # seconds
+                "text":           str,
+                "avg_logprob":    float,   # confidence proxy (0 = perfect, -inf = bad)
+                "no_speech_prob": float,   # probability this segment is silence
+                "words":          list,    # word-level timestamps for diarization
             },
             ...
         ]
 
     Segments with empty text are excluded.
-    Suspicious segments (low confidence or high no_speech_prob) are logged
-    as warnings so they show up clearly in Celery task output.
+    Hallucinated segments (high compression ratio or very high no-speech
+    probability) are filtered out.
+    Suspicious segments (low confidence) are logged as warnings.
     """
     from app.services.vocab import load_initial_prompt
 
@@ -106,7 +117,7 @@ def transcribe(audio_path: str) -> list[dict]:
     initial_prompt = load_initial_prompt()
 
     logger.info(
-        "Transcribing %s  [beam=%d, lang=%s, temp=%s, vad=True]",
+        "Transcribing %s  [beam=%d, lang=%s, temp=%s, vad=True, word_timestamps=True]",
         audio_path, BEAM_SIZE, LANGUAGE, TEMPERATURE,
     )
     if initial_prompt:
@@ -119,7 +130,7 @@ def transcribe(audio_path: str) -> list[dict]:
         temperature=TEMPERATURE,
         vad_filter=True,
         vad_parameters=VAD_PARAMETERS,
-        word_timestamps=False,
+        word_timestamps=True,
         initial_prompt=initial_prompt or None,
     )
 
@@ -130,6 +141,7 @@ def transcribe(audio_path: str) -> list[dict]:
 
     results = []
     suspicious_count = 0
+    hallucination_count = 0
 
     for seg in segments_gen:
         text = seg.text.strip()
@@ -138,8 +150,26 @@ def transcribe(audio_path: str) -> list[dict]:
 
         avg_logprob    = round(seg.avg_logprob,    4)
         no_speech_prob = round(seg.no_speech_prob, 4)
+        compression    = getattr(seg, "compression_ratio", 0.0) or 0.0
 
-        # Flag suspicious segments in the log
+        # Filter hallucinations — drop entirely, don't just flag
+        if compression > HALLUCINATION_COMPRESSION_RATIO:
+            hallucination_count += 1
+            logger.warning(
+                "Filtered hallucination [%.1f-%.1f]: compression=%.2f | %r",
+                seg.start, seg.end, compression, text[:80],
+            )
+            continue
+
+        if no_speech_prob > HALLUCINATION_NO_SPEECH_PROB:
+            hallucination_count += 1
+            logger.warning(
+                "Filtered silence hallucination [%.1f-%.1f]: no_speech=%.3f | %r",
+                seg.start, seg.end, no_speech_prob, text[:80],
+            )
+            continue
+
+        # Flag suspicious (but keep) — logged for review
         is_suspicious = (
             avg_logprob    < LOW_CONFIDENCE_LOGPROB or
             no_speech_prob > HIGH_NO_SPEECH_PROB
@@ -147,9 +177,22 @@ def transcribe(audio_path: str) -> list[dict]:
         if is_suspicious:
             suspicious_count += 1
             logger.warning(
-                "Suspicious segment [%.1f–%.1f]: logprob=%.3f no_speech=%.3f | %r",
+                "Suspicious segment [%.1f-%.1f]: logprob=%.3f no_speech=%.3f | %r",
                 seg.start, seg.end, avg_logprob, no_speech_prob, text[:80],
             )
+
+        # Build word-level data for diarization alignment
+        words = []
+        if seg.words:
+            words = [
+                {
+                    "start":       round(w.start, 3),
+                    "end":         round(w.end,   3),
+                    "word":        w.word,
+                    "probability": round(w.probability, 4),
+                }
+                for w in seg.words
+            ]
 
         results.append({
             "start":          round(seg.start, 3),
@@ -157,11 +200,12 @@ def transcribe(audio_path: str) -> list[dict]:
             "text":           text,
             "avg_logprob":    avg_logprob,
             "no_speech_prob": no_speech_prob,
+            "words":          words,
         })
 
     logger.info(
-        "Transcription complete: %d segments (%d suspicious)",
-        len(results), suspicious_count,
+        "Transcription complete: %d segments (%d suspicious, %d hallucinations filtered)",
+        len(results), suspicious_count, hallucination_count,
     )
 
     return results

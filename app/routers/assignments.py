@@ -51,15 +51,27 @@ def confirm_assignment(
         raise HTTPException(404, "Person not found")
 
     # 1. Add embedding as a new voiceprint (additive — never overwrites)
-    if segment.embedding:
+    #    Quality gate: skip segments shorter than MIN_VOICEPRINT_DURATION —
+    #    ECAPA-TDNN needs ~2s of speech to produce a reliable embedding.
+    from app.services.voiceprint import MIN_VOICEPRINT_DURATION
+
+    seg_duration = segment.end_time - segment.start_time
+
+    if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION:
         new_vp = models.Voiceprint(
             person_id=payload.person_id,
             embedding=segment.embedding,
         )
         db.add(new_vp)
         logger.info(
-            "Added voiceprint for person '%s' from segment %s",
-            person.canonical_name, segment_id,
+            "Added voiceprint for person '%s' from segment %s (%.1fs)",
+            person.canonical_name, segment_id, seg_duration,
+        )
+    elif segment.embedding:
+        logger.info(
+            "Segment %s too short for voiceprint (%.1fs < %.1fs) — "
+            "assignment confirmed but voiceprint not added.",
+            segment_id, seg_duration, MIN_VOICEPRINT_DURATION,
         )
     else:
         logger.warning(
