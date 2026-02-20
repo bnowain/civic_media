@@ -51,7 +51,7 @@ async function init() {
   setupExportDropdown();
   setupRerunDialog();
 
-  checkPipelineAndPoll();
+  await checkPipelineAndPoll();
   seekToSpeakerFromURL();
 }
 
@@ -545,9 +545,9 @@ function seekToSpeakerFromURL() {
 
 async function checkPipelineAndPoll() {
   const status   = await fetchStatus();
-  const hasVideo = await fetchHasVideo();
+  const hasMedia = await fetchHasMedia();
 
-  if (!hasVideo) {
+  if (!hasMedia) {
     document.getElementById("upload-bar").hidden = false;
     return;
   }
@@ -628,12 +628,12 @@ async function fetchStatus() {
   } catch { return null; }
 }
 
-async function fetchHasVideo() {
+async function fetchHasMedia() {
   try {
     const r = await fetch(`/api/media/${meetingId}`);
     if (!r.ok) return false;
     const files = await r.json();
-    return files.some(f => f.file_type === "video");
+    return files.some(f => f.file_type === "video" || f.file_type === "audio");
   } catch { return false; }
 }
 
