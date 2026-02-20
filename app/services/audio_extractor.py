@@ -149,7 +149,9 @@ def _run_with_progress(
 
         # Split on \r or \n to get progress lines
         while "\r" in buf or "\n" in buf:
-            line, _, buf = re.split(r"[\r\n]", buf, maxsplit=1)
+            parts = re.split(r"[\r\n]", buf, maxsplit=1)
+            line = parts[0]
+            buf = parts[1] if len(parts) > 1 else ""
             m = _TIME_RE.search(line)
             if m and total_duration > 0:
                 h, mn, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
