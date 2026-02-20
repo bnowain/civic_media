@@ -14,10 +14,11 @@ from pydantic import BaseModel, field_validator
 # ── Meetings ──────────────────────────────────────────────────────────────────
 
 class MeetingCreate(BaseModel):
-    governing_body: str
-    meeting_type: str
+    governing_body: str = ""
+    meeting_type: str = ""
     meeting_date: str   # YYYY-MM-DD
     title: str
+    category: str = "meeting"
 
     @field_validator("meeting_date")
     @classmethod
@@ -62,6 +63,18 @@ class DocumentOut(BaseModel):
 
 
 # ── People ────────────────────────────────────────────────────────────────────
+
+class PersonAppearance(BaseModel):
+    meeting_id: str
+    title: Optional[str]
+    governing_body: Optional[str]
+    meeting_type: Optional[str]
+    meeting_date: Optional[str]
+    category: str
+    segment_count: int
+
+    model_config = {"from_attributes": True}
+
 
 class PersonCreate(BaseModel):
     canonical_name: str

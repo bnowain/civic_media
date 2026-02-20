@@ -52,6 +52,11 @@ def review_page(meeting_id: str):
     return FileResponse(str(_static_dir / "review.html"))
 
 
+@app.get("/speakers", include_in_schema=False)
+def speakers_page():
+    return FileResponse(str(_static_dir / "speakers.html"))
+
+
 # ── Favicon ───────────────────────────────────────────────────────────────────
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():

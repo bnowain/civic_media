@@ -832,6 +832,310 @@ html, body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
 
+/* ── Header Nav ──────────────────────────────────────────────────────────── */
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.nav-link {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color 0.12s, background 0.12s;
+}
+
+.nav-link:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.nav-link.active {
+  color: var(--accent-blue);
+  background: var(--accent-blue-dim);
+}
+
+/* ── Category Toggle (Upload Dialog) ─────────────────────────────────────── */
+
+.category-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.cat-btn {
+  flex: 1;
+  padding: 7px 14px;
+  border: none;
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.cat-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+
+.cat-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.cat-btn.active {
+  background: var(--accent-blue-dim);
+  color: var(--accent-blue);
+}
+
+/* ── Speakers Page Layout ────────────────────────────────────────────────── */
+
+.speakers-layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 0;
+  max-width: 1200px;
+  margin: 0 auto;
+  height: calc(100vh - var(--header-h) - 56px);
+}
+
+.speakers-sidebar {
+  border-right: 1px solid var(--border);
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.speakers-sidebar .section-header {
+  margin-top: 0;
+  padding-top: 4px;
+}
+
+/* ── Search Bar ──────────────────────────────────────────────────────────── */
+
+.search-bar {
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.search-input {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+/* ── People List ─────────────────────────────────────────────────────────── */
+
+.people-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.person-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.person-card:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-light);
+}
+
+.person-card.selected {
+  background: var(--accent-blue-dim);
+  border-color: var(--accent-blue);
+}
+
+.person-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.person-card-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.person-card-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.person-card-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.person-card:hover .person-card-actions {
+  opacity: 1;
+}
+
+/* ── Appearances Panel ───────────────────────────────────────────────────── */
+
+.appearances-panel {
+  padding: 0 20px;
+  overflow-y: auto;
+}
+
+.appearances-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-muted);
+}
+
+.appearances-empty p {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.appearances-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.appearances-header h3 {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.appearances-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.form-input-sm {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.appearances-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.appearance-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.appearance-item:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-light);
+}
+
+.appearance-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.appearance-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.appearance-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+
+.appearance-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.appearance-date {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.appearance-segs {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent-blue);
+  white-space: nowrap;
+}
+
+/* ── Danger button style ─────────────────────────────────────────────────── */
+
+.btn-danger {
+  color: var(--accent-red);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
 /* ── Utility ──────────────────────────────────────────────────────────────── */
 
 [hidden] { display: none !important; }

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Speakers — Civic Media</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-index">
+
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">&#x2b21;</span>
+      <span class="brand-name">CIVIC MEDIA</span>
+      <span class="brand-sub">Meeting Processing Tool</span>
+    </div>
+    <div class="header-nav">
+      <a href="/" class="nav-link">Home</a>
+      <a href="/speakers" class="nav-link active">Speakers</a>
+    </div>
+  </header>
+
+  <main class="index-main">
+    <div class="speakers-layout">
+
+      <!-- Left: People list -->
+      <div class="speakers-sidebar">
+        <div class="section-header">
+          <h2>Speakers</h2>
+          <span class="meeting-count" id="speaker-count">&mdash;</span>
+        </div>
+
+        <div class="search-bar">
+          <input type="text" id="search-input" class="form-input search-input"
+                 placeholder="Search speakers..." autocomplete="off">
+        </div>
+
+        <div id="people-list" class="people-list">
+          <div class="loading-state">Loading speakers...</div>
+        </div>
+      </div>
+
+      <!-- Right: Appearances panel -->
+      <div class="appearances-panel" id="appearances-panel">
+        <div class="appearances-empty" id="appearances-empty">
+          <span class="empty-icon">&#x2b21;</span>
+          <p>Select a speaker to see their meeting appearances.</p>
+        </div>
+
+        <div id="appearances-content" style="display:none">
+          <div class="appearances-header">
+            <h3 id="appearances-name">&mdash;</h3>
+            <div class="appearances-filters">
+              <input type="date" id="date-from" class="form-input form-input-sm" title="From date">
+              <span class="filter-sep">&ndash;</span>
+              <input type="date" id="date-to" class="form-input form-input-sm" title="To date">
+            </div>
+          </div>
+          <div id="appearances-list" class="appearances-list"></div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <script src="/static/speakers.js"></script>
+</body>
+</html>

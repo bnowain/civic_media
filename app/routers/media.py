@@ -24,7 +24,9 @@ from app.tasks import process_video_task
 
 router = APIRouter(tags=["media"])
 
-_ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+_AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".wma"}
+_ALLOWED_SUFFIXES = _VIDEO_SUFFIXES | _AUDIO_SUFFIXES
 
 _MIME_TYPES = {
     ".mp4":  "video/mp4",
@@ -33,30 +35,39 @@ _MIME_TYPES = {
     ".avi":  "video/x-msvideo",
     ".webm": "video/webm",
     ".m4v":  "video/mp4",
+    ".mp3":  "audio/mpeg",
+    ".m4a":  "audio/mp4",
+    ".wav":  "audio/wav",
+    ".aac":  "audio/aac",
+    ".flac": "audio/flac",
+    ".ogg":  "audio/ogg",
+    ".wma":  "audio/x-ms-wma",
 }
 
 
-def _find_video_file(meeting_id: str) -> Path | None:
-    """Return the video file path regardless of extension, or None."""
+def _find_media_file(meeting_id: str) -> Path | None:
+    """Return the uploaded media file (video or audio) regardless of extension, or None."""
     d = MEDIA_DIR / meeting_id
-    for suffix in _ALLOWED_VIDEO_SUFFIXES:
-        p = d / f"video{suffix}"
-        if p.exists():
-            return p
+    # Check video files first, then audio source files
+    for prefix, suffixes in [("video", _VIDEO_SUFFIXES), ("audio_source", _AUDIO_SUFFIXES)]:
+        for suffix in suffixes:
+            p = d / f"{prefix}{suffix}"
+            if p.exists():
+                return p
     return None
 
 
 # ── Video streaming ───────────────────────────────────────────────────────────
 
 @router.get("/media/{meeting_id}/video")
-async def stream_video(meeting_id: str, request: Request):
+async def stream_media(meeting_id: str, request: Request):
     """
-    Stream a meeting video with HTTP 206 range request support.
-    Browsers require range responses to seek in large video files.
+    Stream a meeting's media file (video or audio) with HTTP 206 range request support.
+    Browsers require range responses to seek in large media files.
     """
-    video_path = _find_video_file(meeting_id)
+    video_path = _find_media_file(meeting_id)
     if not video_path:
-        raise HTTPException(404, "Video file not found")
+        raise HTTPException(404, "Media file not found")
 
     file_size  = video_path.stat().st_size
     media_type = _MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
@@ -123,7 +134,7 @@ async def upload_video(
     db: Session = Depends(get_db),
 ):
     """
-    Upload a video file for a meeting and trigger the ingestion pipeline.
+    Upload a video or audio file for a meeting and trigger the ingestion pipeline.
     Returns immediately (202) — pipeline runs asynchronously.
     """
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
@@ -131,23 +142,27 @@ async def upload_video(
         raise HTTPException(404, "Meeting not found")
 
     suffix = Path(file.filename or "video.mp4").suffix.lower()
-    if suffix not in _ALLOWED_VIDEO_SUFFIXES:
+    if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(
             400,
-            f"Unsupported video format '{suffix}'. "
-            f"Allowed: {', '.join(sorted(_ALLOWED_VIDEO_SUFFIXES))}",
+            f"Unsupported format '{suffix}'. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_SUFFIXES))}",
         )
+
+    is_audio = suffix in _AUDIO_SUFFIXES
+    file_prefix = "audio_source" if is_audio else "video"
+    file_type = "audio" if is_audio else "video"
 
     dest_dir  = MEDIA_DIR / meeting_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"video{suffix}"
+    dest_path = dest_dir / f"{file_prefix}{suffix}"
 
     with dest_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
     media = models.MediaFile(
         meeting_id=meeting_id,
-        file_type="video",
+        file_type=file_type,
         file_path=str(dest_path),
         duration=None,
     )
@@ -184,13 +199,20 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    video_media = (
+    # Find the source media file (video or audio upload).
+    # Uploaded audio files are saved as "audio_source.*", whereas the
+    # pipeline-extracted audio lives at "audio.wav".
+    source_media = (
         db.query(models.MediaFile)
-        .filter_by(meeting_id=meeting_id, file_type="video")
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%audio.wav"),
+        )
         .first()
     )
-    if not video_media:
-        raise HTTPException(400, "No video found for this meeting — upload a video first")
+    if not source_media:
+        raise HTTPException(400, "No media found for this meeting — upload a file first")
 
     # Delete assignments first (bulk delete bypasses ORM cascade)
     segment_ids = [
@@ -211,9 +233,11 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
         .delete(synchronize_session=False)
     )
 
-    # Delete audio MediaFile record (audio.wav will be re-extracted)
-    db.query(models.MediaFile).filter_by(
-        meeting_id=meeting_id, file_type="audio"
+    # Delete extracted audio.wav MediaFile record (will be re-extracted).
+    # Keep uploaded audio source files intact.
+    db.query(models.MediaFile).filter(
+        models.MediaFile.meeting_id == meeting_id,
+        models.MediaFile.file_path.like("%audio.wav"),
     ).delete(synchronize_session=False)
 
     db.commit()
@@ -226,7 +250,7 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
             p.unlink()
 
     # Requeue pipeline
-    process_video_task.delay(meeting_id, video_media.media_id)
+    process_video_task.delay(meeting_id, source_media.media_id)
 
     return {
         "meeting_id": meeting_id,
@@ -259,9 +283,12 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         .count()
     )
 
-    has_video = (
+    has_media = (
         db.query(models.MediaFile)
-        .filter_by(meeting_id=meeting_id, file_type="video")
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+        )
         .first()
     )
 
@@ -270,7 +297,7 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     pct    = progress.get("pct")
     detail = progress.get("detail", "")
 
-    if not has_video:
+    if not has_media:
         status = "pending"
         stage  = stage or "Waiting for upload"
         pct    = pct or 0

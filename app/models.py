@@ -31,6 +31,7 @@ class Meeting(Base):
     meeting_type    = Column(String, nullable=False)
     meeting_date    = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
     title           = Column(String, nullable=False)
+    category        = Column(String, nullable=False, default="meeting")  # "meeting" | "audio"
     media_directory = Column(String)
     created_at      = Column(DateTime, default=datetime.utcnow)
 

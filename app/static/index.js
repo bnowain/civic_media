@@ -1,24 +1,26 @@
 /**
  * index.js — Meeting list page logic.
- * Creates meetings, displays them as cards, navigates to review page.
+ * Creates meetings & audio transcriptions, displays them as cards,
+ * navigates to review page.
  */
 
 "use strict";
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let meetings = [];
-let speakers = [];
+let allItems = [];
+let selectedCategory = "meeting";   // "meeting" | "audio"
 const activePollers = {}; // meetingId -> intervalId
 const POLL_INTERVAL = 4000;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const dateInput = document.getElementById("f-meeting-date");
-  dateInput.value = new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById("f-meeting-date").value = today;
+  document.getElementById("f-audio-date").value = today;
 
-  await Promise.all([loadMeetings(), loadSpeakers()]);
+  await loadMeetings();
 
   document.getElementById("new-meeting-btn")
     .addEventListener("click", openDialog);
@@ -33,6 +35,23 @@ async function init() {
 
   document.getElementById("f-title")
     .addEventListener("keydown", e => { if (e.key === "Enter") handleCreateMeeting(); });
+
+  // Category toggle
+  document.getElementById("category-toggle").addEventListener("click", e => {
+    const btn = e.target.closest(".cat-btn");
+    if (!btn) return;
+    selectedCategory = btn.dataset.cat;
+    document.querySelectorAll(".cat-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+
+    const isMeeting = selectedCategory === "meeting";
+    document.getElementById("meeting-fields").style.display = isMeeting ? "" : "none";
+    document.getElementById("audio-fields").style.display = isMeeting ? "none" : "";
+    document.getElementById("dialog-title").textContent =
+      isMeeting ? "New Meeting" : "New Audio Transcription";
+    document.getElementById("f-title").placeholder =
+      isMeeting ? "e.g. January Regular Meeting" : "e.g. KQED Forum - Feb 19";
+  });
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -41,11 +60,11 @@ async function loadMeetings() {
   try {
     const r = await fetch("/api/meetings/");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    meetings = await r.json();
-    renderMeetings();
+    allItems = await r.json();
+    renderAll();
   } catch (err) {
     console.error("Failed to load meetings:", err);
-    document.getElementById("meetings-list").innerHTML =
+    document.getElementById("meetings-grid").innerHTML =
       `<div class="loading-state">Failed to load meetings. Is the server running?</div>`;
   }
 }
@@ -74,19 +93,9 @@ async function getMeetingStatus(meetingId) {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
-function renderMeetings() {
-  const list = document.getElementById("meetings-list");
-  const count = document.getElementById("meeting-count");
-
-  count.textContent = `${meetings.length} meeting${meetings.length !== 1 ? "s" : ""}`;
-
-  if (meetings.length === 0) {
-    list.innerHTML = `
-      <div class="loading-state">
-        No meetings yet. Create your first meeting to get started.
-      </div>`;
-    return;
-  }
+function renderAll() {
+  const meetingItems = allItems.filter(m => (m.category || "meeting") === "meeting");
+  const audioItems = allItems.filter(m => m.category === "audio");
 
   // Stop any existing pollers before re-rendering
   Object.keys(activePollers).forEach(id => {
@@ -94,14 +103,33 @@ function renderMeetings() {
     delete activePollers[id];
   });
 
-  list.innerHTML = "";
-  meetings.forEach(m => {
-    const card = createMeetingCard(m);
-    list.appendChild(card);
-  });
+  renderSection("meetings-grid", "meeting-count", meetingItems, "meeting");
+  renderSection("audio-grid", "audio-count", audioItems, "audio");
 
   // Kick off status checks for all cards
-  meetings.forEach(m => updateCardStatus(m.meeting_id));
+  allItems.forEach(m => updateCardStatus(m.meeting_id));
+}
+
+function renderSection(gridId, countId, items, type) {
+  const grid = document.getElementById(gridId);
+  const countEl = document.getElementById(countId);
+
+  const label = type === "meeting" ? "meeting" : "item";
+  countEl.textContent = `${items.length} ${label}${items.length !== 1 ? "s" : ""}`;
+
+  if (items.length === 0) {
+    const emptyMsg = type === "meeting"
+      ? "No meetings yet. Create your first meeting to get started."
+      : "No audio transcriptions yet.";
+    grid.innerHTML = `<div class="loading-state">${emptyMsg}</div>`;
+    return;
+  }
+
+  grid.innerHTML = "";
+  items.forEach(m => {
+    const card = createMeetingCard(m);
+    grid.appendChild(card);
+  });
 }
 
 function createMeetingCard(m) {
@@ -109,18 +137,23 @@ function createMeetingCard(m) {
   card.className = "meeting-card";
   card.dataset.meetingId = m.meeting_id;
 
-  const date = m.meeting_date || "—";
+  const date = m.meeting_date || "\u2014";
   const displayDate = formatDate(date);
+  const isAudio = m.category === "audio";
+
+  const subLine = isAudio
+    ? (m.governing_body ? esc(m.governing_body) : "Audio Transcription")
+    : `${esc(m.governing_body)} \u00b7 ${esc(m.meeting_type)}`;
 
   card.innerHTML = `
     <span class="meeting-card-date">${esc(displayDate)}</span>
     <div class="meeting-card-body">
       <div class="meeting-card-title">${esc(m.title)}</div>
-      <div class="meeting-card-sub">${esc(m.governing_body)} · ${esc(m.meeting_type)}</div>
+      <div class="meeting-card-sub">${subLine}</div>
       <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
-    <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">—</span>
-    <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete meeting">✕</button>
+    <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">\u2014</span>
+    <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete">\u2715</button>
   `;
 
   card.addEventListener("click", e => {
@@ -159,7 +192,7 @@ function renderProgressBar(progressEl, status) {
     <div class="pipeline-progress">
       <div class="progress-header">
         <span class="progress-stage">${esc(stage)}</span>
-        <span class="progress-pct">${isComplete ? "✓ done" : pct ? pct + "%" : ""}</span>
+        <span class="progress-pct">${isComplete ? "\u2713 done" : pct ? pct + "%" : ""}</span>
       </div>
       <div class="progress-bar-track">
         <div class="progress-bar-fill${indeterminate ? " indeterminate" : ""}"
@@ -179,7 +212,7 @@ function applyStatusToBadge(badge, status) {
     badge.textContent = "processing";
     badge.className = "meeting-card-badge badge-processing";
   } else {
-    badge.textContent = "no video";
+    badge.textContent = "no media";
     badge.className = "meeting-card-badge badge-pending";
   }
 }
@@ -237,110 +270,18 @@ function startPolling(meetingId) {
   }, POLL_INTERVAL);
 }
 
-// ── Speakers ──────────────────────────────────────────────────────────────
-
-async function loadSpeakers() {
-  try {
-    const r = await fetch("/api/people/");
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    speakers = await r.json();
-    renderSpeakers();
-  } catch (err) {
-    console.error("Failed to load speakers:", err);
-    document.getElementById("speakers-list").innerHTML =
-      `<div class="loading-state">Failed to load speakers.</div>`;
-  }
-}
-
-function renderSpeakers() {
-  const list = document.getElementById("speakers-list");
-  const count = document.getElementById("speaker-count");
-
-  count.textContent = `${speakers.length} speaker${speakers.length !== 1 ? "s" : ""}`;
-
-  if (speakers.length === 0) {
-    list.innerHTML = `
-      <div class="loading-state">
-        No speakers yet. Confirm speaker assignments in the review page to build voiceprints.
-      </div>`;
-    return;
-  }
-
-  list.innerHTML = "";
-  speakers.forEach(s => {
-    const card = createSpeakerCard(s);
-    list.appendChild(card);
-  });
-}
-
-function createSpeakerCard(s) {
-  const card = document.createElement("div");
-  card.className = "meeting-card speaker-card";
-  card.dataset.personId = s.person_id;
-
-  const vpLabel = s.voiceprint_count === 1 ? "voiceprint" : "voiceprints";
-
-  card.innerHTML = `
-    <span class="speaker-card-icon">&#9673;</span>
-    <div class="meeting-card-body">
-      <div class="meeting-card-title speaker-name" data-person-id="${s.person_id}">${esc(s.canonical_name)}</div>
-      <div class="meeting-card-sub">${s.voiceprint_count} ${vpLabel}</div>
-    </div>
-    <button class="btn btn-ghost btn-sm rename-btn" data-person-id="${s.person_id}" title="Rename speaker">&#9998;</button>
-    <button class="btn btn-ghost btn-sm delete-btn" data-person-id="${s.person_id}" title="Delete speaker">&#10005;</button>
-  `;
-
-  card.querySelector(".rename-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    handleRenameSpeaker(s);
-  });
-
-  card.querySelector(".delete-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    handleDeleteSpeaker(s);
-  });
-
-  return card;
-}
-
-async function handleRenameSpeaker(s) {
-  const newName = prompt(`Rename "${s.canonical_name}" to:`, s.canonical_name);
-  if (!newName || newName.trim() === s.canonical_name) return;
-
-  try {
-    const r = await fetch(`/api/people/${s.person_id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ canonical_name: newName.trim() }),
-    });
-    if (r.status === 409) {
-      alert("A speaker with that name already exists.");
-      return;
-    }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    await loadSpeakers();
-  } catch (err) {
-    alert(`Failed to rename: ${err.message}`);
-  }
-}
-
-async function handleDeleteSpeaker(s) {
-  if (!confirm(
-    `Delete "${s.canonical_name}" and all ${s.voiceprint_count} voiceprints?\n\nThis cannot be undone.`
-  )) return;
-
-  try {
-    const r = await fetch(`/api/people/${s.person_id}`, { method: "DELETE" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    await loadSpeakers();
-  } catch (err) {
-    alert(`Failed to delete: ${err.message}`);
-  }
-}
-
 // ── Dialog ────────────────────────────────────────────────────────────────────
 
 function openDialog() {
+  // Reset to meeting mode
+  selectedCategory = "meeting";
+  document.querySelectorAll(".cat-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector('.cat-btn[data-cat="meeting"]').classList.add("active");
+  document.getElementById("meeting-fields").style.display = "";
+  document.getElementById("audio-fields").style.display = "none";
+  document.getElementById("dialog-title").textContent = "New Meeting";
+  document.getElementById("f-title").placeholder = "e.g. January Regular Meeting";
+
   document.getElementById("new-meeting-dialog").showModal();
   document.getElementById("overlay").classList.add("active");
   document.getElementById("f-governing-body").focus();
@@ -352,14 +293,23 @@ function closeDialog() {
 }
 
 async function handleCreateMeeting() {
-  const body  = document.getElementById("f-governing-body").value.trim();
-  const type  = document.getElementById("f-meeting-type").value;
-  const date  = document.getElementById("f-meeting-date").value;
+  const isMeeting = selectedCategory === "meeting";
   const title = document.getElementById("f-title").value.trim();
+  const date = isMeeting
+    ? document.getElementById("f-meeting-date").value
+    : document.getElementById("f-audio-date").value;
 
-  if (!body || !date || !title) {
-    alert("Please fill in Governing Body, Date, and Title.");
-    return;
+  if (isMeeting) {
+    const body = document.getElementById("f-governing-body").value.trim();
+    if (!body || !date || !title) {
+      alert("Please fill in Governing Body, Date, and Title.");
+      return;
+    }
+  } else {
+    if (!date || !title) {
+      alert("Please fill in Date and Title.");
+      return;
+    }
   }
 
   const btn = document.getElementById("create-meeting-btn");
@@ -367,18 +317,21 @@ async function handleCreateMeeting() {
   btn.disabled = true;
 
   try {
-    const meeting = await createMeeting({
-      governing_body: body,
-      meeting_type:   type,
-      meeting_date:   date,
-      title:          title,
-    });
+    const payload = {
+      title,
+      meeting_date: date,
+      category: selectedCategory,
+      governing_body: isMeeting ? document.getElementById("f-governing-body").value.trim() : "",
+      meeting_type: isMeeting ? document.getElementById("f-meeting-type").value : "",
+    };
+
+    const meeting = await createMeeting(payload);
     closeDialog();
     window.location.href = `/review/${meeting.meeting_id}`;
   } catch (err) {
-    alert(`Failed to create meeting: ${err.message}`);
+    alert(`Failed to create: ${err.message}`);
   } finally {
-    btn.textContent = "Create Meeting";
+    btn.textContent = "Create";
     btn.disabled = false;
   }
 }
@@ -393,7 +346,7 @@ function esc(str) {
 }
 
 function formatDate(iso) {
-  if (!iso || iso === "—") return "—";
+  if (!iso || iso === "\u2014") return "\u2014";
   try {
     const [y, m, d] = iso.split("-");
     return new Date(+y, +m - 1, +d).toLocaleDateString("en-US", {

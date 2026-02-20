@@ -19,13 +19,18 @@ router = APIRouter(prefix="/api/people", tags=["people"])
 
 
 @router.get("/", response_model=list[schemas.PersonSummary])
-def list_people(db: Session = Depends(get_db)):
-    rows = (
+def list_people(q: str = "", db: Session = Depends(get_db)):
+    query = (
         db.query(
             models.Person,
             func.count(models.Voiceprint.voiceprint_id).label("voiceprint_count"),
         )
         .outerjoin(models.Voiceprint)
+    )
+    if q.strip():
+        query = query.filter(models.Person.canonical_name.ilike(f"%{q.strip()}%"))
+    rows = (
+        query
         .group_by(models.Person.person_id)
         .order_by(models.Person.canonical_name)
         .all()
@@ -106,3 +111,53 @@ def voiceprint_count(person_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Person not found")
     count = db.query(models.Voiceprint).filter_by(person_id=person_id).count()
     return {"person_id": person_id, "voiceprint_count": count}
+
+
+@router.get("/{person_id}/appearances", response_model=list[schemas.PersonAppearance])
+def get_person_appearances(
+    person_id: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """List meetings where a person appears, newest first, with segment counts."""
+    p = db.query(models.Person).filter_by(person_id=person_id).first()
+    if not p:
+        raise HTTPException(404, "Person not found")
+
+    query = (
+        db.query(
+            models.Meeting,
+            func.count(models.TranscriptSegment.segment_id).label("segment_count"),
+        )
+        .join(
+            models.TranscriptSegment,
+            models.TranscriptSegment.meeting_id == models.Meeting.meeting_id,
+        )
+        .join(
+            models.SegmentAssignment,
+            models.SegmentAssignment.segment_id == models.TranscriptSegment.segment_id,
+        )
+        .filter(models.SegmentAssignment.predicted_person_id == person_id)
+        .group_by(models.Meeting.meeting_id)
+    )
+
+    if date_from:
+        query = query.filter(models.Meeting.meeting_date >= date_from)
+    if date_to:
+        query = query.filter(models.Meeting.meeting_date <= date_to)
+
+    rows = query.order_by(models.Meeting.meeting_date.desc()).all()
+
+    return [
+        schemas.PersonAppearance(
+            meeting_id=meeting.meeting_id,
+            title=meeting.title,
+            governing_body=meeting.governing_body,
+            meeting_type=meeting.meeting_type,
+            meeting_date=meeting.meeting_date,
+            category=meeting.category,
+            segment_count=count,
+        )
+        for meeting, count in rows
+    ]

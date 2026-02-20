@@ -61,18 +61,6 @@
       color: #555;
       margin-top: 4px;
     }
-    .speaker-card {
-      cursor: default;
-    }
-    .speaker-card:hover {
-      cursor: default;
-    }
-    .speaker-card-icon {
-      font-size: 16px;
-      color: var(--accent-blue);
-      min-width: 24px;
-      text-align: center;
-    }
   </style>
 </head>
 <body class="page-index">
@@ -83,7 +71,10 @@
       <span class="brand-name">CIVIC MEDIA</span>
       <span class="brand-sub">Meeting Processing Tool</span>
     </div>
-    <button class="btn btn-primary" id="new-meeting-btn">+ New Meeting</button>
+    <div class="header-nav">
+      <a href="/speakers" class="nav-link">Speakers</a>
+      <button class="btn btn-primary" id="new-meeting-btn">+ New Meeting</button>
+    </div>
   </header>
 
   <main class="index-main">
@@ -94,17 +85,17 @@
         <span class="meeting-count" id="meeting-count">—</span>
       </div>
 
-      <div id="meetings-list" class="meetings-grid">
+      <div id="meetings-grid" class="meetings-grid">
         <div class="loading-state">Loading meetings...</div>
       </div>
 
       <div class="section-header" style="margin-top: 36px;">
-        <h2>Speakers</h2>
-        <span class="meeting-count" id="speaker-count">—</span>
+        <h2>Audio Transcriptions</h2>
+        <span class="meeting-count" id="audio-count">—</span>
       </div>
 
-      <div id="speakers-list" class="meetings-grid">
-        <div class="loading-state">Loading speakers...</div>
+      <div id="audio-grid" class="meetings-grid">
+        <div class="loading-state">Loading audio...</div>
       </div>
 
     </div>
@@ -113,30 +104,45 @@
   <!-- New Meeting Dialog -->
   <dialog id="new-meeting-dialog" class="modal">
     <div class="modal-header">
-      <h3>New Meeting</h3>
+      <h3 id="dialog-title">New Meeting</h3>
       <button class="modal-close" id="close-dialog-btn">✕</button>
     </div>
     <div class="modal-body">
       <div class="form-group">
-        <label class="form-label">Governing Body</label>
-        <input type="text" id="f-governing-body" class="form-input"
-               placeholder="e.g. Shasta County Board of Supervisors" autocomplete="off">
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Meeting Type</label>
-          <select id="f-meeting-type" class="form-input">
-            <option value="Regular">Regular</option>
-            <option value="Special">Special</option>
-            <option value="Workshop">Workshop</option>
-            <option value="Closed Session">Closed Session</option>
-            <option value="Emergency">Emergency</option>
-            <option value="Other">Other</option>
-          </select>
+        <label class="form-label">Type</label>
+        <div class="category-toggle" id="category-toggle">
+          <button type="button" class="cat-btn active" data-cat="meeting">Meeting</button>
+          <button type="button" class="cat-btn" data-cat="audio">Audio Transcription</button>
         </div>
+      </div>
+      <div id="meeting-fields">
         <div class="form-group">
-          <label class="form-label">Meeting Date</label>
-          <input type="date" id="f-meeting-date" class="form-input">
+          <label class="form-label">Governing Body</label>
+          <input type="text" id="f-governing-body" class="form-input"
+                 placeholder="e.g. Shasta County Board of Supervisors" autocomplete="off">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Meeting Type</label>
+            <select id="f-meeting-type" class="form-input">
+              <option value="Regular">Regular</option>
+              <option value="Special">Special</option>
+              <option value="Workshop">Workshop</option>
+              <option value="Closed Session">Closed Session</option>
+              <option value="Emergency">Emergency</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Meeting Date</label>
+            <input type="date" id="f-meeting-date" class="form-input">
+          </div>
+        </div>
+      </div>
+      <div id="audio-fields" style="display:none">
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input type="date" id="f-audio-date" class="form-input">
         </div>
       </div>
       <div class="form-group">
@@ -147,7 +153,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="cancel-dialog-btn">Cancel</button>
-      <button class="btn btn-primary" id="create-meeting-btn">Create Meeting</button>
+      <button class="btn btn-primary" id="create-meeting-btn">Create</button>
     </div>
   </dialog>
 
