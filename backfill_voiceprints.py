@@ -53,6 +53,7 @@ for assign in verified:
     vp = models.Voiceprint(
         person_id=assign.predicted_person_id,
         embedding=segment.embedding,
+        source_segment_id=assign.segment_id,
     )
     db.add(vp)
     added += 1

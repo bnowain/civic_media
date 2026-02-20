@@ -50,17 +50,50 @@ def confirm_assignment(
     if not person:
         raise HTTPException(404, "Person not found")
 
-    # 1. Add embedding as a new voiceprint (additive — never overwrites)
-    #    Quality gate: skip segments shorter than MIN_VOICEPRINT_DURATION —
-    #    ECAPA-TDNN needs ~2s of speech to produce a reliable embedding.
     from app.services.voiceprint import MIN_VOICEPRINT_DURATION
 
     seg_duration = segment.end_time - segment.start_time
+    assign = segment.assignment
 
+    # ── Handle re-confirmation to a DIFFERENT person ──────────────────────
+    # Delete the old voiceprint that was created from this segment so it
+    # doesn't poison the previous person's voiceprint pool.
+    if assign and assign.verified and assign.predicted_person_id != payload.person_id:
+        old_person_id = assign.predicted_person_id
+        # Strategy 1: lookup by source_segment_id (post-migration voiceprints)
+        old_vp = db.query(models.Voiceprint).filter_by(
+            source_segment_id=segment_id,
+            person_id=old_person_id,
+        ).first()
+
+        # Strategy 2: byte-equality fallback (pre-migration voiceprints)
+        if old_vp is None and segment.embedding:
+            old_vp = db.query(models.Voiceprint).filter_by(
+                person_id=old_person_id,
+                embedding=segment.embedding,
+            ).first()
+
+        if old_vp:
+            db.delete(old_vp)
+            logger.info(
+                "Deleted old voiceprint %s from person %s (re-confirm segment %s)",
+                old_vp.voiceprint_id, old_person_id, segment_id,
+            )
+        else:
+            logger.warning(
+                "Re-confirm: could not find old voiceprint for segment %s / person %s "
+                "(segment may have been too short to create one)",
+                segment_id, old_person_id,
+            )
+
+    # ── Create new voiceprint ─────────────────────────────────────────────
+    #    Quality gate: skip segments shorter than MIN_VOICEPRINT_DURATION —
+    #    ECAPA-TDNN needs ~2s of speech to produce a reliable embedding.
     if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION:
         new_vp = models.Voiceprint(
             person_id=payload.person_id,
             embedding=segment.embedding,
+            source_segment_id=segment_id,
         )
         db.add(new_vp)
         logger.info(
@@ -79,8 +112,7 @@ def confirm_assignment(
             segment_id,
         )
 
-    # 2. Create or update the assignment row
-    assign = segment.assignment
+    # ── Update assignment row ─────────────────────────────────────────────
     if assign is None:
         assign = models.SegmentAssignment(segment_id=segment_id)
         db.add(assign)

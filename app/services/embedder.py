@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from app.config import EMBEDDING_DEVICE, EMBEDDING_MODEL, MIN_EMBED_DURATION
+from app.config import EMBEDDING_DEVICE, EMBEDDING_MODEL, MAX_EMBED_AUDIO_SEC, MIN_EMBED_DURATION
 
 if TYPE_CHECKING:
     from speechbrain.inference.speaker import EncoderClassifier as _EC
@@ -145,6 +145,7 @@ def extract_embeddings_batch(
             logger.warning("Resample failed, using original sr=%d: %s", sr, exc)
 
     min_frames = int(MIN_EMBED_DURATION * sr)
+    max_frames = int(MAX_EMBED_AUDIO_SEC * sr)
     classifier = _get_classifier()
     results: list[np.ndarray | None] = [None] * len(segments)
 
@@ -159,10 +160,17 @@ def extract_embeddings_batch(
         slice_np    = waveform_np[0, start_frame:end_frame]  # mono, shape (samples,)
         if slice_np.shape[0] < min_frames:
             continue
+        # Cap audio length — ECAPA-TDNN doesn't benefit from > ~10s
+        if slice_np.shape[0] > max_frames:
+            slice_np = slice_np[:max_frames]
         valid.append((idx, slice_np))
 
     if not valid:
         return results
+
+    # Sort by duration to minimize padding waste within each batch.
+    # Similar-length segments grouped together → less wasted VRAM.
+    valid.sort(key=lambda x: x[1].shape[0])
 
     # Process in chunks of BATCH_SIZE
     for chunk_start in range(0, len(valid), BATCH_SIZE):

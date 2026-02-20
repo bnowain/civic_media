@@ -109,10 +109,11 @@ class Person(Base):
 class Voiceprint(Base):
     __tablename__ = "voiceprints"
 
-    voiceprint_id = Column(String, primary_key=True, default=_gen_id)
-    person_id     = Column(String, ForeignKey("people.person_id"), nullable=False)
-    embedding     = Column(LargeBinary, nullable=False)   # serialised numpy
-    created_at    = Column(DateTime, default=datetime.utcnow)
+    voiceprint_id    = Column(String, primary_key=True, default=_gen_id)
+    person_id        = Column(String, ForeignKey("people.person_id"), nullable=False)
+    embedding        = Column(LargeBinary, nullable=False)   # serialised numpy
+    source_segment_id = Column(String, nullable=True)        # segment that created this VP
+    created_at       = Column(DateTime, default=datetime.utcnow)
 
     person = relationship("Person", back_populates="voiceprints")
 

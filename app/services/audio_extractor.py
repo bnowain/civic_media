@@ -11,12 +11,15 @@ Preprocessing chain (webcast-optimised):
   3. Mono, 16 kHz, PCM s16le    — Whisper's native format
 
 The exact ffmpeg command is logged at INFO level for reproducibility.
+Progress is reported via an optional callback during extraction.
 """
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +34,15 @@ LOUDNORM_I   = -16    # integrated loudness target (LUFS)
 LOUDNORM_TP  = -1.5   # true peak ceiling (dBTP)
 LOUDNORM_LRA = 11     # loudness range target (LU)
 
+# Regex to extract the time= field from ffmpeg's progress output
+_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
-def extract_audio(video_path: str, output_path: str) -> float:
+
+def extract_audio(
+    video_path: str,
+    output_path: str,
+    on_progress: Callable[[float], None] | None = None,
+) -> float:
     """
     Extract preprocessed mono 16kHz PCM WAV from a video or audio file.
 
@@ -44,6 +54,9 @@ def extract_audio(video_path: str, output_path: str) -> float:
     Args:
         video_path:  Absolute path to the source video/audio file.
         output_path: Absolute path for the output WAV file.
+        on_progress: Optional callback receiving a float 0.0–1.0 representing
+                     extraction progress (based on ffmpeg's time output vs
+                     total duration).
 
     Returns:
         Duration of the extracted audio in seconds.
@@ -74,16 +87,20 @@ def extract_audio(video_path: str, output_path: str) -> float:
 
     logger.info("Audio extraction command: %s", " ".join(cmd))
 
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    if on_progress and duration > 0:
+        returncode, stderr_text = _run_with_progress(cmd, duration, on_progress)
+    else:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        returncode = result.returncode
+        stderr_text = result.stderr.decode(errors="replace")
 
-    if result.returncode != 0:
+    if returncode != 0:
         raise RuntimeError(
-            f"ffmpeg failed (exit {result.returncode}):\n"
-            f"{result.stderr.decode(errors='replace')}"
+            f"ffmpeg failed (exit {returncode}):\n{stderr_text}"
         )
 
     # Use WAV duration as ground truth (more accurate than container metadata)
@@ -97,6 +114,53 @@ def extract_audio(video_path: str, output_path: str) -> float:
     )
 
     return actual_duration
+
+
+def _run_with_progress(
+    cmd: list[str],
+    total_duration: float,
+    on_progress: Callable[[float], None],
+) -> tuple[int, str]:
+    """
+    Run ffmpeg via Popen, parse stderr for time= progress, and call
+    on_progress(fraction) periodically.
+
+    Returns (returncode, stderr_text).
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    stderr_chunks = []
+    last_pct = -1
+
+    # ffmpeg writes progress to stderr. Read it character-by-character
+    # and parse line-by-line. ffmpeg uses \r for progress lines.
+    buf = ""
+    while True:
+        chunk = proc.stderr.read(256)
+        if not chunk:
+            break
+        text = chunk.decode(errors="replace")
+        stderr_chunks.append(text)
+        buf += text
+
+        # Split on \r or \n to get progress lines
+        while "\r" in buf or "\n" in buf:
+            line, _, buf = re.split(r"[\r\n]", buf, maxsplit=1)
+            m = _TIME_RE.search(line)
+            if m and total_duration > 0:
+                h, mn, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                elapsed = h * 3600 + mn * 60 + s
+                pct = int(min(elapsed / total_duration, 1.0) * 100)
+                if pct != last_pct:
+                    last_pct = pct
+                    on_progress(elapsed / total_duration)
+
+    proc.wait()
+    return proc.returncode, "".join(stderr_chunks)
 
 
 def _probe_duration(video_path: str) -> float:

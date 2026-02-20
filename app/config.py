@@ -20,6 +20,16 @@ CELERY_BACKEND = os.environ.get("CELERY_BACKEND", "redis://localhost:6379/1")
 SIMILARITY_HIGH   = 0.92
 SIMILARITY_MEDIUM = 0.75
 
+# Coherence gate: exclude voiceprints below this cosine similarity
+# to their person's centroid. Prevents bad confirmations from polluting
+# matching without deleting the voiceprint (it may be from a different venue).
+VOICEPRINT_COHERENCE_THRESHOLD = 0.6
+
+# Maximum audio (seconds) fed to ECAPA-TDNN per segment.
+# Longer audio doesn't improve embedding quality and causes CUDA
+# 32-bit index overflow on large batches.
+MAX_EMBED_AUDIO_SEC = 10.0
+
 # Whisper: tiny | base | small | medium | large-v3
 # large-v3 recommended for RTX 5090
 WHISPER_MODEL    = os.environ.get("WHISPER_MODEL", "large-v3")

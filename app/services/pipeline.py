@@ -157,9 +157,17 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         logger.info("[%s] Audio already extracted - skipping.", meeting_id)
         duration = audio_record.duration
     else:
-        _write_progress(meeting_id, "Extracting audio", 5)
+        _write_progress(meeting_id, "Extracting audio", 1)
         logger.info("[%s] Extracting audio...", meeting_id)
-        duration = audio_extractor.extract_audio(video_path, audio_path)
+
+        def _audio_progress(fraction: float) -> None:
+            # Map ffmpeg's 0.0–1.0 to pipeline's 1–9%
+            pct = 1 + int(fraction * 8)
+            _write_progress(meeting_id, "Extracting audio", pct)
+
+        duration = audio_extractor.extract_audio(
+            video_path, audio_path, on_progress=_audio_progress,
+        )
         media.duration = duration
         audio_record = models.MediaFile(
             meeting_id=meeting_id,
@@ -218,12 +226,19 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             for s in existing_segments
         ]
     else:
-        _write_progress(
-            meeting_id, "Transcribing", 10,
-            "This step takes 10-15 minutes"
-        )
+        _write_progress(meeting_id, "Transcribing", 10)
         logger.info("[%s] Transcribing...", meeting_id)
-        raw_segments = transcriber.transcribe(audio_path)
+
+        def _transcribe_progress(fraction: float) -> None:
+            # Map transcription 0.0–1.0 to pipeline's 10–39%
+            pct = 10 + int(fraction * 29)
+            _write_progress(meeting_id, "Transcribing", pct)
+
+        raw_segments = transcriber.transcribe(
+            audio_path,
+            audio_duration=duration or 0.0,
+            on_progress=_transcribe_progress,
+        )
         logger.info("[%s] %d transcript segments", meeting_id, len(raw_segments))
 
         # Cache to disk (with word data) for resume

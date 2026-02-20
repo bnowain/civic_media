@@ -92,9 +92,18 @@ def _get_model() -> "_WhisperModelType":
     return _model
 
 
-def transcribe(audio_path: str) -> list[dict]:
+def transcribe(
+    audio_path: str,
+    audio_duration: float = 0.0,
+    on_progress: "Callable[[float], None] | None" = None,
+) -> list[dict]:
     """
     Transcribe a preprocessed WAV file.
+
+    Args:
+        audio_path:     Path to the 16kHz mono WAV.
+        audio_duration: Total audio duration in seconds (for progress reporting).
+        on_progress:    Optional callback receiving a float 0.0–1.0.
 
     Returns a list of segment dicts:
         [
@@ -145,8 +154,16 @@ def transcribe(audio_path: str) -> list[dict]:
     results = []
     suspicious_count = 0
     hallucination_count = 0
+    last_progress_pct = -1
 
     for seg in segments_gen:
+        # Report progress based on how far through the audio we are
+        if on_progress and audio_duration > 0:
+            pct = int(min(seg.end / audio_duration, 1.0) * 100)
+            if pct > last_progress_pct:
+                last_progress_pct = pct
+                on_progress(seg.end / audio_duration)
+
         text = seg.text.strip()
         if not text:
             continue
