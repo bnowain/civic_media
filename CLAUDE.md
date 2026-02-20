@@ -102,3 +102,24 @@ Two-page vanilla JS SPA served from `app/static/`:
 ## Vocab Hints
 
 `config/vocab_hints.yml` contains domain-specific terms (people, places, agencies) fed to Whisper's `initial_prompt` via `app/services/vocab.py`. Each term has an `active` flag. The prompt is capped at 850 chars.
+
+## Atlas Integration
+
+This project is a spoke in the **Atlas** hub-and-spoke ecosystem. Atlas is a central orchestration hub that routes queries across spoke apps. It lives in a sibling directory (`E:\0-Automated-Apps\Atlas`).
+
+**Rules:**
+
+1. Only modify **this** project by default. Do not modify other spoke projects or Atlas unless explicitly asked.
+2. If approved, changes to other projects are allowed — but always propose first and wait for approval.
+3. Suggest API endpoint changes in other spokes if they would improve integration, but never write code in another project without explicit approval.
+4. This app must remain **independently functional** — it works on its own without Atlas or any other spoke.
+5. **No spoke-to-spoke dependencies.** All cross-app communication goes through Atlas.
+6. If modifying or removing an API endpoint that Atlas may depend on, **stop and warn** before proceeding.
+7. New endpoints added for Atlas integration should be general-purpose and useful standalone, not tightly coupled to Atlas internals.
+
+**Spoke projects** (sibling directories, may be loaded via `--add-dir` for reference):
+
+- **civic_media** — meeting transcription, diarization, voiceprint learning (this project)
+- **article-tracker** — local news aggregation and monitoring
+- **Shasta-DB** — civic media archive browser and metadata editor (FastAPI/HTMX)
+- **Facebook-Offline** — local personal Facebook archive for LLM querying (private, local only)
