@@ -40,6 +40,9 @@
   --confidence-medium:  #f59e0b;
   --confidence-unknown: #545870;
   --confidence-verified: #22c55e;
+  --confidence-tagged:  #a855f7;
+  --accent-purple:      #a855f7;
+  --accent-purple-dim:  #3b0764;
 
   --font-sans: "IBM Plex Sans", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", "Consolas", monospace;
@@ -711,6 +714,7 @@ html, body {
 }
 
 .segment-card.conf-verified   { border-left-color: var(--confidence-verified); }
+.segment-card.conf-tagged     { border-left-color: var(--confidence-tagged); }
 .segment-card.conf-high       { border-left-color: var(--confidence-high); }
 .segment-card.conf-medium     { border-left-color: var(--confidence-medium); }
 .segment-card.conf-unknown    { border-left-color: var(--confidence-unknown); }
@@ -740,6 +744,7 @@ html, body {
 }
 
 .badge-verified  { background: var(--accent-green-dim);  color: var(--accent-green); }
+.badge-tagged    { background: var(--accent-purple-dim); color: var(--accent-purple); }
 .badge-high      { background: var(--accent-blue-dim);   color: var(--accent-blue);  }
 .badge-medium    { background: var(--accent-amber-dim);  color: var(--accent-amber); }
 .badge-unknown   { background: var(--bg-overlay);        color: var(--text-muted);   }
@@ -806,6 +811,30 @@ html, body {
   background: var(--accent-green-dim);
   color: var(--accent-green);
   border-color: var(--accent-green-dim);
+}
+
+.seg-tag-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.seg-tag-btn:hover {
+  background: var(--accent-purple-dim);
+  color: var(--accent-purple);
+  border-color: var(--accent-purple-dim);
+}
+.seg-tag-btn.is-tagged {
+  background: var(--accent-purple-dim);
+  color: var(--accent-purple);
+  border-color: var(--accent-purple-dim);
 }
 
 .seg-new-btn {
@@ -1414,5 +1443,33 @@ html, body {
 }
 
 /* ── Utility ──────────────────────────────────────────────────────────────── */
+
+/* ── Segment Groups (visual grouping) ─────────────────────────────────────── */
+
+.segment-group {
+  border-left: 3px solid var(--accent-blue);
+  margin-bottom: 4px;
+  padding-left: 6px;
+  border-radius: var(--radius-sm);
+}
+
+.segment-group-header {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text-secondary);
+  padding: 4px 4px 2px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.segment-group .segment-card {
+  border-left: none;
+  margin-bottom: 2px;
+}
+
+.segment-group .segment-card.grouped {
+  border-left: none;
+}
 
 [hidden] { display: none !important; }

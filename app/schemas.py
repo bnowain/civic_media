@@ -99,11 +99,16 @@ class AssignmentOut(BaseModel):
     predicted_person_id: Optional[str]
     similarity_score: Optional[float]
     verified: bool
+    tagged: bool = False
 
     model_config = {"from_attributes": True}
 
 
 class ConfirmAssignment(BaseModel):
+    person_id: str
+
+
+class TagAssignment(BaseModel):
     person_id: str
 
 

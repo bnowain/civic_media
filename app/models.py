@@ -130,6 +130,7 @@ class SegmentAssignment(Base):
     predicted_person_id = Column(String, ForeignKey("people.person_id"))
     similarity_score    = Column(Float)
     verified            = Column(Boolean, default=False)
+    tagged              = Column(Boolean, default=False)
 
     segment          = relationship("TranscriptSegment", back_populates="assignment")
     predicted_person = relationship("Person",            back_populates="assignments")

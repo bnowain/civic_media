@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 #   - the gap between them is under this threshold (seconds), OR
 #   - either segment is shorter than MIN_SEGMENT_DURATION
 MAX_MERGE_GAP        = 1.5   # seconds
-MIN_SEGMENT_DURATION = 2.0   # seconds
-MAX_MERGE_SENTENCES  = 3     # stop merging once block has this many sentences
+MIN_SEGMENT_DURATION = 3.0   # seconds — absorb more short fragments
+MAX_MERGE_SENTENCES  = 5     # allow 3-5 sentence segments
 
 
 def align(
@@ -64,6 +64,7 @@ def align(
         mode = "segment-level"
 
     merged = _merge_adjacent(assigned)
+    merged = _absorb_runts(merged)
 
     logger.info(
         "Alignment complete (%s): %d input → %d assigned → %d after merging",
@@ -71,6 +72,33 @@ def align(
     )
 
     return merged
+
+
+# ── Post-merge runt absorption ──────────────────────────────────────────────
+
+def _absorb_runts(segments: list[dict]) -> list[dict]:
+    """
+    Second pass: merge segments shorter than MIN_SEGMENT_DURATION
+    into their nearest same-speaker neighbor.
+    Prefer merging into the previous segment; fall back to next.
+    """
+    if len(segments) <= 1:
+        return segments
+
+    result = [dict(segments[0])]
+    for curr in segments[1:]:
+        duration = curr["end"] - curr["start"]
+        prev = result[-1]
+        same_as_prev = (
+            curr["raw_speaker_label"] is not None
+            and curr["raw_speaker_label"] == prev["raw_speaker_label"]
+        )
+        if duration < MIN_SEGMENT_DURATION and same_as_prev:
+            prev["end"] = curr["end"]
+            prev["text"] = prev["text"].rstrip() + " " + curr["text"].lstrip()
+        else:
+            result.append(dict(curr))
+    return result
 
 
 # ── Word-level speaker assignment ────────────────────────────────────────────

@@ -27,7 +27,7 @@ def list_segments(
     meeting_id: str,
     filter: str | None = Query(
         None,
-        description="Filter preset: 'unknown' | 'low_confidence'",
+        description="Filter preset: 'unknown' | 'low_confidence' | 'tagged'",
     ),
     db: Session = Depends(get_db),
 ):
@@ -63,6 +63,11 @@ def list_segments(
                 and s.assignment.similarity_score is not None
                 and s.assignment.similarity_score < SIMILARITY_MEDIUM
             )
+        ]
+    elif filter == "tagged":
+        segments = [
+            s for s in segments
+            if s.assignment and s.assignment.tagged
         ]
 
     return segments

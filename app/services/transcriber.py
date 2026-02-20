@@ -57,7 +57,7 @@ TEMPERATURE = (0, 0.2, 0.4, 0.6, 0.8, 1.0)
 VAD_PARAMETERS = {
     "threshold":               0.5,
     "min_speech_duration_ms":  250,
-    "max_speech_duration_s":   30,   # consistent chunk ceiling
+    "max_speech_duration_s":   15,   # tighter chunks for manageable segments
     "min_silence_duration_ms": 500,  # matches original; good for civic meetings
     "speech_pad_ms":           400,  # 400ms of context on each side
 }

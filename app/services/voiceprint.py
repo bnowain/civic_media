@@ -228,8 +228,8 @@ def run_voiceprint_matching(
         assign = SegmentAssignment(segment_id=segment.segment_id)
         db.add(assign)
 
-    # Only auto-update if NOT verified by a human
-    if not assign.verified:
+    # Only auto-update if NOT verified or tagged by a human
+    if not assign.verified and not assign.tagged:
         if best_person and best_score >= SIMILARITY_MEDIUM:
             assign.predicted_person_id = best_person.person_id
             assign.similarity_score    = round(best_score, 4)
@@ -285,8 +285,11 @@ def rerun_unverified_segments(
         .outerjoin(SegmentAssignment,
                    TranscriptSegment.segment_id == SegmentAssignment.segment_id)
         .filter(
-            (SegmentAssignment.verified.is_(False)) |
-            (SegmentAssignment.assignment_id.is_(None))
+            (SegmentAssignment.assignment_id.is_(None)) |
+            (
+                (SegmentAssignment.verified.is_(False)) &
+                (SegmentAssignment.tagged.is_(False))
+            )
         )
     )
 

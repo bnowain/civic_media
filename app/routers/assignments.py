@@ -122,6 +122,7 @@ def confirm_assignment(
     assign.predicted_person_id = payload.person_id
     assign.similarity_score    = 1.0   # human-confirmed = perfect confidence
     assign.verified            = True
+    assign.tagged              = False  # upgrade from tag to confirm
 
     db.commit()
     db.refresh(assign)
@@ -146,6 +147,40 @@ def confirm_assignment(
         segment.meeting_id,
     )
 
+    return assign
+
+
+@router.post("/{segment_id}/tag", response_model=schemas.AssignmentOut)
+def tag_assignment(
+    segment_id: str,
+    payload: schemas.TagAssignment,
+    db: Session = Depends(get_db),
+):
+    """
+    Tag a speaker for display only — no voiceprint created, no rerun triggered.
+    Tagged segments are protected from auto-overwrite but can be upgraded to
+    confirmed later.
+    """
+    segment = db.query(models.TranscriptSegment).filter_by(segment_id=segment_id).first()
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    person = db.query(models.Person).filter_by(person_id=payload.person_id).first()
+    if not person:
+        raise HTTPException(404, "Person not found")
+
+    assign = segment.assignment
+    if assign is None:
+        assign = models.SegmentAssignment(segment_id=segment_id)
+        db.add(assign)
+
+    assign.predicted_person_id = payload.person_id
+    assign.similarity_score = None    # no voiceprint match — manual tag
+    assign.tagged = True
+    assign.verified = False           # tagged is NOT confirmed
+
+    db.commit()
+    db.refresh(assign)
     return assign
 
 

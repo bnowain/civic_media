@@ -139,6 +139,19 @@ async function confirmAssignment(segmentId, personId) {
   return r.json();
 }
 
+async function tagAssignment(segmentId, personId) {
+  const r = await fetch(`/api/assignments/${segmentId}/tag`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ person_id: personId }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
 async function createPerson(name) {
   const r = await fetch("/api/people/", {
     method: "POST",
@@ -186,9 +199,31 @@ function renderTranscript() {
   const scrollTop = list.scrollTop;
   list.innerHTML = "";
 
-  segments.forEach((seg, idx) => {
-    const card = buildSegmentCard(seg, idx);
-    list.appendChild(card);
+  const groups = groupConsecutiveSpeakers(segments);
+
+  groups.forEach(group => {
+    if (group.speakerId && group.segments.length > 1) {
+      // Grouped: shared header + contained segments
+      const wrapper = document.createElement("div");
+      wrapper.className = "segment-group";
+
+      const header = document.createElement("div");
+      header.className = "segment-group-header";
+      header.textContent = group.speakerName;
+      wrapper.appendChild(header);
+
+      group.segments.forEach(seg => {
+        const idx = segments.indexOf(seg);
+        wrapper.appendChild(buildSegmentCard(seg, idx, true));
+      });
+      list.appendChild(wrapper);
+    } else {
+      // Ungrouped (no speaker or single segment): render individually
+      group.segments.forEach(seg => {
+        const idx = segments.indexOf(seg);
+        list.appendChild(buildSegmentCard(seg, idx, false));
+      });
+    }
   });
 
   list.scrollTop = scrollTop;
@@ -196,13 +231,34 @@ function renderTranscript() {
   syncActiveCard(video()?.currentTime ?? 0, false);
 }
 
-function buildSegmentCard(seg, idx) {
+function groupConsecutiveSpeakers(segs) {
+  const groups = [];
+  for (const seg of segs) {
+    const personId = seg.assignment?.predicted_person_id || null;
+    const last = groups[groups.length - 1];
+    if (last && last.speakerId === personId && personId !== null) {
+      last.segments.push(seg);
+    } else {
+      const person = personId ? people.find(p => p.person_id === personId) : null;
+      groups.push({
+        speakerId: personId,
+        speakerName: person?.canonical_name || seg.raw_speaker_label || "Unknown",
+        segments: [seg],
+      });
+    }
+  }
+  return groups;
+}
+
+function buildSegmentCard(seg, idx, grouped = false) {
   const assign   = seg.assignment;
   const verified = assign?.verified ?? false;
+  const tagged   = assign?.tagged ?? false;
   const score    = assign?.similarity_score ?? null;
   const personId = assign?.predicted_person_id ?? null;
 
   const confClass = verified ? "verified"
+    : tagged                  ? "tagged"
     : score === null          ? "unknown"
     : score >= 0.92           ? "high"
     : score >= 0.75           ? "medium"
@@ -213,22 +269,30 @@ function buildSegmentCard(seg, idx) {
 
   const scoreStr = score !== null ? `${Math.round(score * 100)}%` : "—";
   const badgeText = verified ? "✓ verified"
+    : tagged ? "tagged"
     : confClass === "unknown" ? "unknown"
     : `${confClass} ${scoreStr}`;
 
   const card = document.createElement("div");
-  card.className = `segment-card conf-${confClass}`;
+  card.className = `segment-card conf-${confClass}${grouped ? " grouped" : ""}`;
   card.dataset.segmentId = seg.segment_id;
   card.dataset.idx       = idx;
   card.dataset.start     = seg.start_time;
   card.dataset.end       = seg.end_time;
 
+  const metaHtml = grouped
+    ? `<div class="seg-meta">
+        <span class="seg-time">${fmtTime(seg.start_time)}</span>
+        <span class="seg-badge badge-${confClass}">${esc(badgeText)}</span>
+      </div>`
+    : `<div class="seg-meta">
+        <span class="seg-time">${fmtTime(seg.start_time)}</span>
+        <span class="seg-badge badge-${confClass}">${esc(badgeText)}</span>
+        <span class="seg-speaker-name">${esc(speakerName)}</span>
+      </div>`;
+
   card.innerHTML = `
-    <div class="seg-meta">
-      <span class="seg-time">${fmtTime(seg.start_time)}</span>
-      <span class="seg-badge badge-${confClass}">${esc(badgeText)}</span>
-      <span class="seg-speaker-name">${esc(speakerName)}</span>
-    </div>
+    ${metaHtml}
     <div class="seg-text" title="Double-click to edit">${esc(seg.text)}</div>
     <div class="seg-edit-controls" id="edit-controls-${seg.segment_id}">
       <button class="btn btn-primary btn-xs seg-save-btn" data-seg="${seg.segment_id}">Save</button>
@@ -242,6 +306,10 @@ function buildSegmentCard(seg, idx) {
             ${esc(p.canonical_name)}
           </option>`).join("")}
       </select>
+      <button class="seg-tag-btn${tagged ? " is-tagged" : ""}"
+              data-seg="${seg.segment_id}">
+        ${tagged ? "✦ Tagged" : "Tag"}
+      </button>
       <button class="seg-confirm-btn ${verified ? "confirmed" : ""}"
               data-seg="${seg.segment_id}">
         ${verified ? "✓" : "Confirm"}
@@ -277,6 +345,13 @@ function buildSegmentCard(seg, idx) {
   card.querySelector(".seg-cancel-btn").addEventListener("click", e => {
     e.stopPropagation();
     cancelTextEdit(card, seg, textEl);
+  });
+
+  // Tag button
+  card.querySelector(".seg-tag-btn").addEventListener("click", async () => {
+    const sel = card.querySelector(".seg-select");
+    if (!sel.value) { alert("Select a speaker first."); return; }
+    await handleTag(seg.segment_id, sel.value, card);
   });
 
   // Confirm button
@@ -416,16 +491,67 @@ async function handleConfirm(segmentId, personId, cardEl) {
   }
 }
 
+// ── Tag handler ──────────────────────────────────────────────────────────────
+
+async function handleTag(segmentId, personId, cardEl) {
+  const btn = cardEl?.querySelector(".seg-tag-btn");
+  if (btn) { btn.textContent = "…"; btn.disabled = true; }
+
+  try {
+    await tagAssignment(segmentId, personId);
+
+    // Track so polling won't overwrite
+    _confirmedThisSession.add(segmentId);
+
+    // Update the card in-place
+    const person = people.find(p => p.person_id === personId);
+    if (cardEl && person) {
+      cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-tagged");
+      const badge = cardEl.querySelector(".seg-badge");
+      if (badge) {
+        badge.className = "seg-badge badge-tagged";
+        badge.textContent = "tagged";
+      }
+      const nameEl = cardEl.querySelector(".seg-speaker-name");
+      if (nameEl) nameEl.textContent = person.canonical_name;
+      if (btn) {
+        btn.textContent = "✦ Tagged";
+        btn.classList.add("is-tagged");
+        btn.disabled = false;
+      }
+    }
+
+    // Update local segment state
+    const localSeg = segments.find(s => s.segment_id === segmentId);
+    if (localSeg) {
+      if (!localSeg.assignment) localSeg.assignment = {};
+      localSeg.assignment.tagged = true;
+      localSeg.assignment.verified = false;
+      localSeg.assignment.predicted_person_id = personId;
+      localSeg.assignment.similarity_score = null;
+    }
+
+    updateStats();
+  } catch (err) {
+    alert(`Failed to tag: ${err.message}`);
+    if (btn) { btn.textContent = "Tag"; btn.disabled = false; }
+  }
+}
+
 // ── Stats bar ─────────────────────────────────────────────────────────────────
 
 function updateStats() {
   const total    = segments.length;
   const verified = segments.filter(s => s.assignment?.verified).length;
+  const tagged   = segments.filter(s => s.assignment?.tagged && !s.assignment?.verified).length;
   const unknown  = segments.filter(s => !s.assignment?.predicted_person_id).length;
 
   const el = document.getElementById("segment-stats");
   if (total === 0) { el.textContent = "—"; return; }
-  el.textContent = `${verified}/${total} verified · ${unknown} unknown`;
+  const parts = [`${verified}/${total} verified`];
+  if (tagged > 0) parts.push(`${tagged} tagged`);
+  parts.push(`${unknown} unknown`);
+  el.textContent = parts.join(" · ");
 }
 
 // ── Reprocess indicator ───────────────────────────────────────────────────────
