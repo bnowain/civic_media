@@ -1,6 +1,6 @@
 /**
  * speakers.js — Speakers page logic.
- * Lists all people, search/filter, shows meeting appearances per person.
+ * Split-view directory with search, sort, keyboard nav, and detail panel.
  */
 
 "use strict";
@@ -8,7 +8,10 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let people = [];
+let sortedPeople = [];
 let selectedPersonId = null;
+let selectedPerson = null;
+let focusIndex = -1;
 let searchDebounce = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -22,12 +25,26 @@ async function init() {
     searchDebounce = setTimeout(() => loadPeople(searchInput.value), 300);
   });
 
+  document.getElementById("sort-select").addEventListener("change", () => {
+    applySortAndRender();
+  });
+
   document.getElementById("date-from").addEventListener("change", () => {
     if (selectedPersonId) loadAppearances(selectedPersonId);
   });
   document.getElementById("date-to").addEventListener("change", () => {
     if (selectedPersonId) loadAppearances(selectedPersonId);
   });
+
+  document.getElementById("detail-rename-btn").addEventListener("click", () => {
+    if (selectedPerson) handleRename(selectedPerson);
+  });
+  document.getElementById("detail-delete-btn").addEventListener("click", () => {
+    if (selectedPerson) handleDelete(selectedPerson);
+  });
+
+  // Keyboard navigation
+  document.addEventListener("keydown", handleKeyNav);
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -38,11 +55,11 @@ async function loadPeople(q = "") {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     people = await r.json();
-    renderPeople();
+    applySortAndRender();
   } catch (err) {
     console.error("Failed to load people:", err);
     document.getElementById("people-list").innerHTML =
-      `<div class="loading-state">Failed to load speakers.</div>`;
+      `<div class="spk-empty-state">Failed to load speakers.</div>`;
   }
 }
 
@@ -61,84 +78,121 @@ async function loadAppearances(personId) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const appearances = await r.json();
     renderAppearances(appearances);
+    // Update meetings pill
+    document.getElementById("detail-mtg-pill").textContent =
+      `${appearances.length} meeting${appearances.length !== 1 ? "s" : ""}`;
   } catch (err) {
     console.error("Failed to load appearances:", err);
     document.getElementById("appearances-list").innerHTML =
-      `<div class="loading-state">Failed to load appearances.</div>`;
+      `<div class="spk-empty-state">Failed to load appearances.</div>`;
   }
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// ── Sort ──────────────────────────────────────────────────────────────────────
+
+function applySortAndRender() {
+  const sortBy = document.getElementById("sort-select").value;
+  sortedPeople = [...people];
+
+  if (sortBy === "voiceprints") {
+    sortedPeople.sort((a, b) => b.voiceprint_count - a.voiceprint_count);
+  } else if (sortBy === "az") {
+    sortedPeople.sort((a, b) => a.canonical_name.localeCompare(b.canonical_name));
+  } else if (sortBy === "za") {
+    sortedPeople.sort((a, b) => b.canonical_name.localeCompare(a.canonical_name));
+  }
+
+  renderPeople();
+}
+
+// ── Render: People List ───────────────────────────────────────────────────────
 
 function renderPeople() {
   const list = document.getElementById("people-list");
-  const count = document.getElementById("speaker-count");
+  const subtitle = document.getElementById("speakers-subtitle");
 
-  count.textContent = `${people.length} speaker${people.length !== 1 ? "s" : ""}`;
+  subtitle.textContent = people.length === 0
+    ? "No speakers found."
+    : `${people.length} speaker${people.length !== 1 ? "s" : ""} \u00b7 Select a speaker to see their meeting appearances.`;
 
-  if (people.length === 0) {
+  if (sortedPeople.length === 0) {
     list.innerHTML = `
-      <div class="loading-state">
+      <div class="spk-empty-state">
         No speakers found. Confirm speaker assignments in the review page to build voiceprints.
       </div>`;
+    focusIndex = -1;
     return;
   }
 
   list.innerHTML = "";
-  people.forEach(p => {
-    const card = createPersonCard(p);
+  sortedPeople.forEach((p, i) => {
+    const card = createPersonCard(p, i);
     list.appendChild(card);
   });
+
+  // Restore focus index
+  if (selectedPersonId) {
+    focusIndex = sortedPeople.findIndex(p => p.person_id === selectedPersonId);
+  }
 }
 
-function createPersonCard(p) {
-  const card = document.createElement("div");
-  card.className = "person-card" + (p.person_id === selectedPersonId ? " selected" : "");
-  card.dataset.personId = p.person_id;
+function getInitials(name) {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  return name.slice(0, 2).toUpperCase();
+}
 
-  const vpLabel = p.voiceprint_count === 1 ? "voiceprint" : "voiceprints";
+function createPersonCard(p, index) {
+  const card = document.createElement("div");
+  const isSelected = p.person_id === selectedPersonId;
+  card.className = "spk-card" + (isSelected ? " selected" : "");
+  card.dataset.personId = p.person_id;
+  card.dataset.index = index;
+  card.tabIndex = -1;
+
+  const initials = getInitials(p.canonical_name);
 
   card.innerHTML = `
-    <div class="person-card-body">
-      <div class="person-card-name">${esc(p.canonical_name)}</div>
-      <div class="person-card-sub">${p.voiceprint_count} ${vpLabel}</div>
+    <div class="spk-card-avatar">${initials}</div>
+    <div class="spk-card-body">
+      <div class="spk-card-name">${esc(p.canonical_name)}</div>
+      <div class="spk-card-meta">${p.voiceprint_count} voiceprint${p.voiceprint_count !== 1 ? "s" : ""}</div>
     </div>
-    <div class="person-card-actions">
-      <button class="btn btn-ghost btn-sm rename-btn" title="Rename">&#9998;</button>
-      <button class="btn btn-ghost btn-sm delete-btn" title="Delete">&#10005;</button>
+    <div class="spk-card-right">
+      <span class="pill pill-green pill-sm">${p.voiceprint_count}</span>
+      <span class="spk-card-chevron">&#8250;</span>
     </div>
   `;
 
-  card.addEventListener("click", e => {
-    if (e.target.closest(".rename-btn") || e.target.closest(".delete-btn")) return;
+  card.addEventListener("click", () => {
+    focusIndex = index;
     selectPerson(p);
-  });
-
-  card.querySelector(".rename-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    handleRename(p);
-  });
-
-  card.querySelector(".delete-btn").addEventListener("click", e => {
-    e.stopPropagation();
-    handleDelete(p);
   });
 
   return card;
 }
 
+// ── Render: Detail Panel ──────────────────────────────────────────────────────
+
 function selectPerson(p) {
   selectedPersonId = p.person_id;
+  selectedPerson = p;
 
-  // Update selection highlight
-  document.querySelectorAll(".person-card").forEach(c => {
+  // Update card highlights
+  document.querySelectorAll(".spk-card").forEach(c => {
     c.classList.toggle("selected", c.dataset.personId === p.person_id);
   });
 
-  // Show appearances panel
-  document.getElementById("appearances-empty").style.display = "none";
-  document.getElementById("appearances-content").style.display = "";
-  document.getElementById("appearances-name").textContent = p.canonical_name;
+  // Populate detail header
+  document.getElementById("detail-empty").style.display = "none";
+  document.getElementById("detail-content").style.display = "";
+  document.getElementById("detail-avatar").textContent = getInitials(p.canonical_name);
+  document.getElementById("detail-name").textContent = p.canonical_name;
+  document.getElementById("detail-vp-pill").textContent =
+    `${p.voiceprint_count} voiceprint${p.voiceprint_count !== 1 ? "s" : ""}`;
+  document.getElementById("detail-mtg-pill").textContent = "loading...";
 
   loadAppearances(p.person_id);
 }
@@ -147,37 +201,79 @@ function renderAppearances(appearances) {
   const list = document.getElementById("appearances-list");
 
   if (appearances.length === 0) {
-    list.innerHTML = `<div class="loading-state">No meeting appearances found.</div>`;
+    list.innerHTML = `<div class="spk-empty-state">No meeting appearances found.</div>`;
     return;
   }
 
   list.innerHTML = "";
   appearances.forEach(a => {
-    const item = document.createElement("a");
-    item.className = "appearance-item";
-    item.href = `/review/${a.meeting_id}`;
+    const card = document.createElement("div");
+    card.className = "spk-appearance-card";
 
     const displayDate = formatDate(a.meeting_date);
     const segLabel = a.segment_count === 1 ? "segment" : "segments";
     const isAudio = a.category === "audio";
 
-    const subLine = isAudio
-      ? "Audio Transcription"
-      : [a.governing_body, a.meeting_type].filter(Boolean).join(" \u00b7 ");
+    const metaParts = [displayDate];
+    if (!isAudio && a.governing_body) metaParts.push(a.governing_body);
+    if (!isAudio && a.meeting_type) metaParts.push(a.meeting_type);
+    if (isAudio) metaParts.push("Audio");
+    const metaLine = metaParts.join(" \u00b7 ");
 
-    item.innerHTML = `
-      <div class="appearance-info">
-        <div class="appearance-title">${esc(a.title || "Untitled")}</div>
-        <div class="appearance-sub">${esc(subLine)}</div>
+    card.innerHTML = `
+      <div class="spk-appearance-body">
+        <div class="spk-appearance-title">${esc(a.title || "Untitled")}</div>
+        <div class="spk-appearance-meta">${esc(metaLine)}</div>
       </div>
-      <div class="appearance-meta">
-        <span class="appearance-date">${esc(displayDate)}</span>
-        <span class="appearance-segs">${a.segment_count} ${segLabel}</span>
+      <div class="spk-appearance-right">
+        <span class="pill pill-blue pill-sm">${a.segment_count} ${segLabel}</span>
+      </div>
+      <div class="spk-appearance-actions">
+        <a href="/review/${a.meeting_id}" class="spk-appearance-link">Open meeting</a>
       </div>
     `;
 
-    list.appendChild(item);
+    card.addEventListener("click", () => {
+      window.location.href = `/review/${a.meeting_id}`;
+    });
+
+    list.appendChild(card);
   });
+}
+
+// ── Keyboard Navigation ───────────────────────────────────────────────────────
+
+function handleKeyNav(e) {
+  // Only handle when not focused on an input
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
+
+  if (e.key === "ArrowDown" || e.key === "j") {
+    e.preventDefault();
+    if (focusIndex < sortedPeople.length - 1) {
+      focusIndex++;
+      selectPerson(sortedPeople[focusIndex]);
+      scrollCardIntoView(focusIndex);
+    }
+  } else if (e.key === "ArrowUp" || e.key === "k") {
+    e.preventDefault();
+    if (focusIndex > 0) {
+      focusIndex--;
+      selectPerson(sortedPeople[focusIndex]);
+      scrollCardIntoView(focusIndex);
+    }
+  } else if (e.key === "Enter" && selectedPerson) {
+    // Could open first meeting, but for now just focus search
+  } else if (e.key === "/" || e.key === "s") {
+    if (!e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      document.getElementById("search-input").focus();
+    }
+  }
+}
+
+function scrollCardIntoView(index) {
+  const card = document.querySelector(`.spk-card[data-index="${index}"]`);
+  if (card) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -197,10 +293,15 @@ async function handleRename(p) {
       return;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+
+    // Refresh list and re-select
     const searchVal = document.getElementById("search-input").value;
     await loadPeople(searchVal);
+
+    // Update detail panel name
     if (selectedPersonId === p.person_id) {
-      document.getElementById("appearances-name").textContent = newName.trim();
+      const updated = sortedPeople.find(sp => sp.person_id === p.person_id);
+      if (updated) selectPerson(updated);
     }
   } catch (err) {
     alert(`Failed to rename: ${err.message}`);
@@ -218,8 +319,10 @@ async function handleDelete(p) {
 
     if (selectedPersonId === p.person_id) {
       selectedPersonId = null;
-      document.getElementById("appearances-empty").style.display = "";
-      document.getElementById("appearances-content").style.display = "none";
+      selectedPerson = null;
+      focusIndex = -1;
+      document.getElementById("detail-empty").style.display = "";
+      document.getElementById("detail-content").style.display = "none";
     }
 
     const searchVal = document.getElementById("search-input").value;

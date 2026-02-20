@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="page-index">
+<body class="page-speakers">
 
   <header class="app-header">
     <div class="header-brand">
@@ -23,43 +23,78 @@
     </div>
   </header>
 
-  <main class="index-main">
-    <div class="speakers-layout">
+  <main class="speakers-main">
 
-      <!-- Left: People list -->
-      <div class="speakers-sidebar">
-        <div class="section-header">
-          <h2>Speakers</h2>
-          <span class="meeting-count" id="speaker-count">&mdash;</span>
-        </div>
+    <!-- Title row -->
+    <div class="speakers-title-row">
+      <div>
+        <h1 class="speakers-h1">Speakers</h1>
+        <p class="speakers-subtitle" id="speakers-subtitle">Loading speakers...</p>
+      </div>
+    </div>
 
-        <div class="search-bar">
-          <input type="text" id="search-input" class="form-input search-input"
-                 placeholder="Search speakers..." autocomplete="off">
-        </div>
+    <!-- Controls row -->
+    <div class="speakers-controls">
+      <input type="text" id="search-input" class="spk-search-input"
+             placeholder="Search speakers..." autocomplete="off">
+      <select id="sort-select" class="spk-sort-select">
+        <option value="voiceprints">Most voiceprints</option>
+        <option value="az">A &ndash; Z</option>
+        <option value="za">Z &ndash; A</option>
+      </select>
+    </div>
 
-        <div id="people-list" class="people-list">
-          <div class="loading-state">Loading speakers...</div>
+    <!-- Split view -->
+    <div class="speakers-split">
+
+      <!-- Left: Speaker directory -->
+      <div class="spk-directory" id="spk-directory">
+        <div id="people-list" class="spk-list">
+          <div class="spk-empty-state">Loading speakers...</div>
         </div>
       </div>
 
-      <!-- Right: Appearances panel -->
-      <div class="appearances-panel" id="appearances-panel">
-        <div class="appearances-empty" id="appearances-empty">
-          <span class="empty-icon">&#x2b21;</span>
-          <p>Select a speaker to see their meeting appearances.</p>
+      <!-- Right: Detail panel -->
+      <div class="spk-detail" id="spk-detail">
+        <div class="spk-detail-empty" id="detail-empty">
+          <div class="spk-detail-empty-icon">&#x2b21;</div>
+          <p class="spk-detail-empty-title">Select a speaker</p>
+          <p class="spk-detail-empty-hint">View meeting appearances, jump to transcript moments, and manage voiceprints.</p>
         </div>
 
-        <div id="appearances-content" style="display:none">
-          <div class="appearances-header">
-            <h3 id="appearances-name">&mdash;</h3>
-            <div class="appearances-filters">
+        <div id="detail-content" style="display:none">
+          <!-- Speaker header -->
+          <div class="spk-detail-header">
+            <div class="spk-detail-avatar" id="detail-avatar">--</div>
+            <div class="spk-detail-info">
+              <h2 class="spk-detail-name" id="detail-name">&mdash;</h2>
+              <div class="spk-detail-pills">
+                <span class="pill pill-green" id="detail-vp-pill">&mdash;</span>
+                <span class="pill pill-blue" id="detail-mtg-pill">&mdash;</span>
+              </div>
+            </div>
+            <div class="spk-detail-actions">
+              <button class="btn btn-ghost btn-sm" id="detail-rename-btn" title="Rename speaker">&#9998; Rename</button>
+              <button class="btn btn-ghost btn-sm btn-danger" id="detail-delete-btn" title="Delete speaker">&#10005; Delete</button>
+            </div>
+          </div>
+
+          <!-- Tabs -->
+          <div class="spk-tabs">
+            <button class="spk-tab active" data-tab="appearances">Appearances</button>
+          </div>
+
+          <!-- Appearances tab content -->
+          <div class="spk-tab-content" id="tab-appearances">
+            <div class="spk-appearances-controls">
               <input type="date" id="date-from" class="form-input form-input-sm" title="From date">
               <span class="filter-sep">&ndash;</span>
               <input type="date" id="date-to" class="form-input form-input-sm" title="To date">
             </div>
+            <div id="appearances-list" class="spk-appearances-list">
+              <div class="spk-empty-state">Select a speaker to see appearances.</div>
+            </div>
           </div>
-          <div id="appearances-list" class="appearances-list"></div>
         </div>
       </div>
 
