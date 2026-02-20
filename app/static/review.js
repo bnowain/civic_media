@@ -52,6 +52,7 @@ async function init() {
   setupRerunDialog();
 
   checkPipelineAndPoll();
+  seekToSpeakerFromURL();
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -508,6 +509,36 @@ function syncActiveCard(t, scrollIntoView) {
     : null;
   document.getElementById("active-speaker-label").textContent =
     person?.canonical_name ?? seg.raw_speaker_label ?? "";
+}
+
+// ── Deep-link: seek to first segment for a speaker ───────────────────────────
+
+function seekToSpeakerFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  const speakerId = params.get("speaker");
+  if (!speakerId || segments.length === 0) return;
+
+  // Find the first segment assigned to this speaker
+  const seg = segments.find(s =>
+    s.assignment && s.assignment.predicted_person_id === speakerId
+  );
+  if (!seg) return;
+
+  const v = video();
+  if (!v) return;
+
+  // Wait for the video to be ready enough to seek
+  function doSeek() {
+    v.currentTime = seg.start_time;
+    v.pause();
+    syncActiveCard(seg.start_time, true);
+  }
+
+  if (v.readyState >= 1) {
+    doSeek();
+  } else {
+    v.addEventListener("loadedmetadata", doSeek, { once: true });
+  }
 }
 
 // ── Pipeline polling ──────────────────────────────────────────────────────────

@@ -229,12 +229,13 @@ function renderAppearances(appearances) {
         <span class="pill pill-blue pill-sm">${a.segment_count} ${segLabel}</span>
       </div>
       <div class="spk-appearance-actions">
-        <a href="/review/${a.meeting_id}" class="spk-appearance-link">Open meeting</a>
+        <a href="/review/${a.meeting_id}?speaker=${selectedPersonId}" class="spk-appearance-link">Open meeting</a>
       </div>
     `;
 
-    card.addEventListener("click", () => {
-      window.location.href = `/review/${a.meeting_id}`;
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".spk-appearance-link")) return; // let the link handle it
+      window.location.href = `/review/${a.meeting_id}?speaker=${selectedPersonId}`;
     });
 
     list.appendChild(card);
