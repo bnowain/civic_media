@@ -59,6 +59,11 @@ async function init() {
 async function loadMeeting() {
   try {
     const r = await fetch(`/api/meetings/${meetingId}`);
+    if (r.status === 404) {
+      // Meeting was deleted — redirect to home
+      window.location.href = "/";
+      return;
+    }
     if (!r.ok) return;
     meeting = await r.json();
     document.getElementById("hdr-governing-body").textContent = meeting.governing_body;
@@ -530,10 +535,22 @@ async function checkPipelineAndPoll() {
 
 function startPipelinePoll() {
   if (pollTimer) clearInterval(pollTimer);
+  let nullCount = 0;
   pollTimer = setInterval(async () => {
     const s = await fetchStatus();
+    if (!s) {
+      // Meeting or media may have been deleted — stop after 3 consecutive nulls
+      nullCount++;
+      if (nullCount >= 3) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        hidePipelineBanner();
+      }
+      return;
+    }
+    nullCount = 0;
     updateBannerProgress(s);
-    if (s && (s.status === "complete" || s.segment_count > 0)) {
+    if (s.status === "complete" || s.segment_count > 0) {
       // Load segments if we have any (show transcript as soon as transcription is done)
       if (s.segment_count > 0) await loadSegments();
       if (s.status === "complete") {
