@@ -220,7 +220,12 @@ function startPolling(meetingId) {
     }
 
     const status = await getMeetingStatus(meetingId);
-    if (!status) return;
+    if (!status) {
+      // Meeting was deleted — stop polling
+      clearInterval(activePollers[meetingId]);
+      delete activePollers[meetingId];
+      return;
+    }
 
     applyStatusToBadge(badge, status);
     if (progressEl) renderProgressBar(progressEl, status);
