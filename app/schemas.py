@@ -74,6 +74,10 @@ class PersonOut(PersonCreate):
     model_config = {"from_attributes": True}
 
 
+class PersonSummary(PersonOut):
+    voiceprint_count: int = 0
+
+
 # ── Assignments ───────────────────────────────────────────────────────────────
 
 class AssignmentOut(BaseModel):

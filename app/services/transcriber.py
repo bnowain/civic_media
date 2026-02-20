@@ -38,8 +38,11 @@ BEAM_SIZE = 10
 # a source of non-determinism (auto-detect can flip on noisy/silent segments).
 LANGUAGE = "en"
 
-# temperature=0 means deterministic greedy/beam decoding. No sampling noise.
-TEMPERATURE = 0
+# Temperature fallback: try deterministic decoding first (temp=0), but if the
+# output has high compression ratio (repetition) or low log-prob, retry with
+# progressively higher temperatures.  Prevents Whisper from getting stuck in
+# infinite decoding loops on silence/applause/noise sections.
+TEMPERATURE = (0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 # ── VAD parameters ────────────────────────────────────────────────────────────
 # Set ALL parameters explicitly so chunking is identical across reruns.

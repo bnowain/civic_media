@@ -8,6 +8,7 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let meetings = [];
+let speakers = [];
 const activePollers = {}; // meetingId -> intervalId
 const POLL_INTERVAL = 4000;
 
@@ -17,7 +18,7 @@ async function init() {
   const dateInput = document.getElementById("f-meeting-date");
   dateInput.value = new Date().toISOString().slice(0, 10);
 
-  await loadMeetings();
+  await Promise.all([loadMeetings(), loadSpeakers()]);
 
   document.getElementById("new-meeting-btn")
     .addEventListener("click", openDialog);
@@ -229,6 +230,107 @@ function startPolling(meetingId) {
       delete activePollers[meetingId];
     }
   }, POLL_INTERVAL);
+}
+
+// ── Speakers ──────────────────────────────────────────────────────────────
+
+async function loadSpeakers() {
+  try {
+    const r = await fetch("/api/people/");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    speakers = await r.json();
+    renderSpeakers();
+  } catch (err) {
+    console.error("Failed to load speakers:", err);
+    document.getElementById("speakers-list").innerHTML =
+      `<div class="loading-state">Failed to load speakers.</div>`;
+  }
+}
+
+function renderSpeakers() {
+  const list = document.getElementById("speakers-list");
+  const count = document.getElementById("speaker-count");
+
+  count.textContent = `${speakers.length} speaker${speakers.length !== 1 ? "s" : ""}`;
+
+  if (speakers.length === 0) {
+    list.innerHTML = `
+      <div class="loading-state">
+        No speakers yet. Confirm speaker assignments in the review page to build voiceprints.
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  speakers.forEach(s => {
+    const card = createSpeakerCard(s);
+    list.appendChild(card);
+  });
+}
+
+function createSpeakerCard(s) {
+  const card = document.createElement("div");
+  card.className = "meeting-card speaker-card";
+  card.dataset.personId = s.person_id;
+
+  const vpLabel = s.voiceprint_count === 1 ? "voiceprint" : "voiceprints";
+
+  card.innerHTML = `
+    <span class="speaker-card-icon">&#9673;</span>
+    <div class="meeting-card-body">
+      <div class="meeting-card-title speaker-name" data-person-id="${s.person_id}">${esc(s.canonical_name)}</div>
+      <div class="meeting-card-sub">${s.voiceprint_count} ${vpLabel}</div>
+    </div>
+    <button class="btn btn-ghost btn-sm rename-btn" data-person-id="${s.person_id}" title="Rename speaker">&#9998;</button>
+    <button class="btn btn-ghost btn-sm delete-btn" data-person-id="${s.person_id}" title="Delete speaker">&#10005;</button>
+  `;
+
+  card.querySelector(".rename-btn").addEventListener("click", e => {
+    e.stopPropagation();
+    handleRenameSpeaker(s);
+  });
+
+  card.querySelector(".delete-btn").addEventListener("click", e => {
+    e.stopPropagation();
+    handleDeleteSpeaker(s);
+  });
+
+  return card;
+}
+
+async function handleRenameSpeaker(s) {
+  const newName = prompt(`Rename "${s.canonical_name}" to:`, s.canonical_name);
+  if (!newName || newName.trim() === s.canonical_name) return;
+
+  try {
+    const r = await fetch(`/api/people/${s.person_id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ canonical_name: newName.trim() }),
+    });
+    if (r.status === 409) {
+      alert("A speaker with that name already exists.");
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    await loadSpeakers();
+  } catch (err) {
+    alert(`Failed to rename: ${err.message}`);
+  }
+}
+
+async function handleDeleteSpeaker(s) {
+  if (!confirm(
+    `Delete "${s.canonical_name}" and all ${s.voiceprint_count} voiceprints?\n\nThis cannot be undone.`
+  )) return;
+
+  try {
+    const r = await fetch(`/api/people/${s.person_id}`, { method: "DELETE" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    await loadSpeakers();
+  } catch (err) {
+    alert(`Failed to delete: ${err.message}`);
+  }
 }
 
 // ── Dialog ────────────────────────────────────────────────────────────────────

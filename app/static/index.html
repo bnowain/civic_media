@@ -61,6 +61,18 @@
       color: #555;
       margin-top: 4px;
     }
+    .speaker-card {
+      cursor: default;
+    }
+    .speaker-card:hover {
+      cursor: default;
+    }
+    .speaker-card-icon {
+      font-size: 16px;
+      color: var(--accent-blue);
+      min-width: 24px;
+      text-align: center;
+    }
   </style>
 </head>
 <body class="page-index">
@@ -84,6 +96,15 @@
 
       <div id="meetings-list" class="meetings-grid">
         <div class="loading-state">Loading meetings...</div>
+      </div>
+
+      <div class="section-header" style="margin-top: 36px;">
+        <h2>Speakers</h2>
+        <span class="meeting-count" id="speaker-count">—</span>
+      </div>
+
+      <div id="speakers-list" class="meetings-grid">
+        <div class="loading-state">Loading speakers...</div>
       </div>
 
     </div>
