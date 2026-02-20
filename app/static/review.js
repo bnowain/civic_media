@@ -531,7 +531,11 @@ function seekToSpeakerFromURL() {
   function doSeek() {
     v.currentTime = seg.start_time;
     v.pause();
-    syncActiveCard(seg.start_time, true);
+    syncActiveCard(seg.start_time, false);
+    // Scroll the card to the top of the transcript panel
+    const idx = segments.indexOf(seg);
+    const card = transcriptList().querySelector(`[data-idx="${idx}"]`);
+    if (card) card.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
   if (v.readyState >= 1) {
