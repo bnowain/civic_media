@@ -17,6 +17,7 @@ const POLL_INTERVAL = 4000;
 
 async function init() {
   await loadNewscast();
+  setupClipBuilder();
 
   // Upload handlers
   const uploadZone = document.getElementById("upload-zone");
@@ -357,6 +358,264 @@ function fmtTime(sec) {
   return h > 0
     ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
     : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// ── Clip Builder ──────────────────────────────────────────────────────────────
+
+let clipStart = 0;
+let clipEnd = 0;
+let clipPreviewTimer = null;
+
+function setupClipBuilder() {
+  const toggleBtn = document.getElementById("clip-toggle-btn");
+  const closeBtn  = document.getElementById("clip-close-btn");
+  const panel     = document.getElementById("clip-builder");
+
+  toggleBtn.addEventListener("click", () => {
+    panel.hidden = !panel.hidden;
+  });
+  closeBtn.addEventListener("click", () => {
+    panel.hidden = true;
+    stopClipPreview();
+  });
+
+  const vid = () => document.getElementById("news-video");
+
+  document.getElementById("clip-set-start").addEventListener("click", () => {
+    const v = vid();
+    if (v) {
+      clipStart = v.currentTime;
+      document.getElementById("clip-start-input").value = fmtClipTime(clipStart);
+      updateClipDuration();
+    }
+  });
+  document.getElementById("clip-set-end").addEventListener("click", () => {
+    const v = vid();
+    if (v) {
+      clipEnd = v.currentTime;
+      document.getElementById("clip-end-input").value = fmtClipTime(clipEnd);
+      updateClipDuration();
+    }
+  });
+
+  document.getElementById("clip-start-input").addEventListener("change", e => {
+    clipStart = parseClipTime(e.target.value);
+    e.target.value = fmtClipTime(clipStart);
+    updateClipDuration();
+  });
+  document.getElementById("clip-end-input").addEventListener("change", e => {
+    clipEnd = parseClipTime(e.target.value);
+    e.target.value = fmtClipTime(clipEnd);
+    updateClipDuration();
+  });
+
+  document.querySelectorAll(".clip-adjust-buttons button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const which = btn.dataset.which;
+      const delta = parseFloat(btn.dataset.delta);
+      const v = vid();
+      const maxDur = v?.duration || Infinity;
+
+      if (which === "start") {
+        clipStart = Math.max(0, Math.min(clipStart + delta, maxDur));
+        document.getElementById("clip-start-input").value = fmtClipTime(clipStart);
+        if (v) v.currentTime = clipStart;
+      } else {
+        clipEnd = Math.max(0, Math.min(clipEnd + delta, maxDur));
+        document.getElementById("clip-end-input").value = fmtClipTime(clipEnd);
+        if (v) v.currentTime = clipEnd;
+      }
+      updateClipDuration();
+    });
+  });
+
+  document.getElementById("clip-preview-btn").addEventListener("click", () => {
+    const v = vid();
+    if (!v || clipEnd <= clipStart) return;
+    stopClipPreview();
+    v.currentTime = clipStart;
+    v.play().catch(() => {});
+
+    const loopCheck = document.getElementById("clip-loop-check");
+    function onTimeUpdate() {
+      if (v.currentTime >= clipEnd) {
+        if (loopCheck.checked) {
+          v.currentTime = clipStart;
+        } else {
+          v.pause();
+          v.removeEventListener("timeupdate", onTimeUpdate);
+        }
+      }
+    }
+    v.addEventListener("timeupdate", onTimeUpdate);
+    clipPreviewTimer = () => v.removeEventListener("timeupdate", onTimeUpdate);
+  });
+
+  document.getElementById("clip-export-btn").addEventListener("click", createNewsClip);
+
+  // Check URL params for clip deep-link
+  const params = new URLSearchParams(window.location.search);
+  const t = params.get("t");
+  const clipParam = params.get("clip");
+
+  if (clipParam) {
+    fetch(`/api/clips/${clipParam}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(clip => {
+        if (!clip) return;
+        clipStart = clip.start_time;
+        clipEnd = clip.end_time;
+        document.getElementById("clip-start-input").value = fmtClipTime(clipStart);
+        document.getElementById("clip-end-input").value = fmtClipTime(clipEnd);
+        document.getElementById("clip-title-input").value = clip.title || "";
+        document.getElementById("clip-notes-input").value = clip.notes || "";
+        updateClipDuration();
+        panel.hidden = false;
+
+        const v = vid();
+        if (v) {
+          const doSeek = () => { v.currentTime = clipStart; };
+          if (v.readyState >= 1) doSeek();
+          else v.addEventListener("loadedmetadata", doSeek, { once: true });
+        }
+      })
+      .catch(() => {});
+  } else if (t) {
+    const seconds = parseFloat(t);
+    if (!isNaN(seconds)) {
+      const v = vid();
+      if (v) {
+        const doSeek = () => { v.currentTime = seconds; };
+        if (v.readyState >= 1) doSeek();
+        else v.addEventListener("loadedmetadata", doSeek, { once: true });
+      }
+    }
+  }
+}
+
+function fmtClipTime(sec) {
+  if (sec == null || isNaN(sec) || sec < 0) sec = 0;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.round((sec % 1) * 1000);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
+}
+
+function parseClipTime(str) {
+  if (!str) return 0;
+  const parts = str.split(":");
+  let sec = 0;
+  if (parts.length === 3) {
+    sec = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+  } else if (parts.length === 2) {
+    sec = parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+  } else {
+    sec = parseFloat(parts[0]) || 0;
+  }
+  return isNaN(sec) ? 0 : Math.max(0, sec);
+}
+
+function updateClipDuration() {
+  const dur = clipEnd - clipStart;
+  const el = document.getElementById("clip-duration-display");
+  if (dur <= 0) {
+    el.textContent = "0:00";
+    el.style.color = "var(--accent-red)";
+  } else {
+    el.textContent = fmtTime(dur);
+    el.style.color = "";
+  }
+}
+
+function stopClipPreview() {
+  if (clipPreviewTimer) {
+    clipPreviewTimer();
+    clipPreviewTimer = null;
+  }
+}
+
+async function createNewsClip() {
+  if (clipEnd <= clipStart) {
+    alert("End time must be after start time.");
+    return;
+  }
+
+  const btn = document.getElementById("clip-export-btn");
+  const statusEl = document.getElementById("clip-status");
+  btn.disabled = true;
+  btn.textContent = "Exporting...";
+  statusEl.textContent = "creating...";
+  statusEl.className = "clip-status";
+
+  try {
+    const title = document.getElementById("clip-title-input").value.trim() || "Untitled clip";
+    const notes = document.getElementById("clip-notes-input").value.trim() || null;
+
+    const r = await fetch("/api/clips/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_type: "newscast",
+        source_id: newscastId,
+        start_time: clipStart,
+        end_time: clipEnd,
+        title,
+        notes,
+      }),
+    });
+
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${r.status}`);
+    }
+
+    const clip = await r.json();
+    pollNewsClipStatus(clip.clip_id, statusEl, btn);
+
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+    statusEl.className = "clip-status clip-status-error";
+    btn.disabled = false;
+    btn.textContent = "Export Clip";
+  }
+}
+
+async function pollNewsClipStatus(clipId, statusEl, btn) {
+  let attempts = 0;
+  const MAX = 120;
+
+  const timer = setInterval(async () => {
+    attempts++;
+    try {
+      const r = await fetch(`/api/clips/${clipId}`);
+      if (!r.ok) throw new Error("Poll failed");
+      const clip = await r.json();
+
+      if (clip.export_status === "ready") {
+        clearInterval(timer);
+        statusEl.innerHTML = `<a href="/api/clips/${clipId}/download" class="clip-download-link">&#8615; Download</a>`;
+        statusEl.className = "clip-status clip-status-ready";
+        btn.disabled = false;
+        btn.textContent = "Export Clip";
+      } else if (clip.export_status === "error") {
+        clearInterval(timer);
+        statusEl.textContent = `Error: ${clip.export_error || "export failed"}`;
+        statusEl.className = "clip-status clip-status-error";
+        btn.disabled = false;
+        btn.textContent = "Export Clip";
+      } else {
+        statusEl.textContent = "exporting...";
+      }
+    } catch { /* ignore */ }
+
+    if (attempts >= MAX) {
+      clearInterval(timer);
+      statusEl.textContent = "timed out";
+      btn.disabled = false;
+      btn.textContent = "Export Clip";
+    }
+  }, 2000);
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────

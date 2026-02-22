@@ -4,7 +4,8 @@ ORM table definitions for Civic Media.
 Tables: meetings, governing_bodies, media_files, documents,
 transcript_segments, people, voiceprints, segment_assignments,
 tv_newscasts, tv_news_segments, tv_news_transcription_chunks,
-tags, tag_assignments, tag_denials, people_mentions, people_mention_denials.
+tags, tag_assignments, tag_denials, people_mentions, people_mention_denials,
+clips.
 """
 
 from __future__ import annotations
@@ -282,6 +283,28 @@ class PeopleMention(Base):
     created_at   = Column(DateTime, default=datetime.utcnow)
 
     person = relationship("Person", back_populates="mentions")
+
+
+class Clip(Base):
+    __tablename__ = "clips"
+
+    clip_id           = Column(String, primary_key=True, default=_gen_id)
+    source_type       = Column(String, nullable=False)       # "meeting" | "newscast"
+    source_id         = Column(String, nullable=False)       # plain string, no FK
+    source_media_path = Column(String, nullable=False)
+    media_type        = Column(String, nullable=False)       # "video" | "audio"
+    start_time        = Column(Float, nullable=False)
+    end_time          = Column(Float, nullable=False)
+    duration          = Column(Float, nullable=False)
+    title             = Column(String, nullable=False, default="Untitled clip")
+    notes             = Column(Text)
+    thumbnail_path    = Column(String)
+    export_path       = Column(String)
+    export_status     = Column(String)                       # pending|exporting|ready|error|cleaned
+    export_error      = Column(Text)
+    cover_image_path  = Column(String)
+    downloaded_at     = Column(DateTime)
+    created_at        = Column(DateTime, default=datetime.utcnow)
 
 
 class PeopleMentionDenial(Base):

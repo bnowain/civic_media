@@ -12,6 +12,7 @@ MEDIA_DIR      = BASE_DIR / "media"
 DOCUMENTS_DIR  = BASE_DIR / "documents"
 OCR_TEXT_DIR   = BASE_DIR / "ocr_text"
 TV_NEWS_DIR    = BASE_DIR / "tv_news"
+CLIPS_DIR      = BASE_DIR / "media" / "clips"
 COMSKIP_INI_DIR = BASE_DIR / "config" / "comskip"
 
 # Atlas API (for LLM-powered story segmentation and tagging)
@@ -56,6 +57,11 @@ EMBEDDING_DEVICE = os.environ.get("EMBEDDING_DEVICE", "cuda")
 # Minimum segment duration (seconds) for embedding extraction
 MIN_EMBED_DURATION = 0.5
 
+# Clip export constraints
+CLIP_MIN_DURATION   = 0.5     # seconds
+CLIP_MAX_DURATION   = 3600.0  # seconds
+CLIP_CLEANUP_HOURS  = 24      # hours before auto-cleanup of exported files
+
 # Ensure all directories exist at import time
-for _d in [DATABASE_PATH.parent, MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR, TV_NEWS_DIR, COMSKIP_INI_DIR]:
+for _d in [DATABASE_PATH.parent, MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR, TV_NEWS_DIR, CLIPS_DIR, COMSKIP_INI_DIR]:
     _d.mkdir(parents=True, exist_ok=True)

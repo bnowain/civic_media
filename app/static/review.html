@@ -131,6 +131,7 @@
   <!-- ── Top Bar ─────────────────────────────────────────────────────────── -->
   <header class="review-header">
     <a href="/" class="back-link">&larr; Home</a>
+    <a href="/clips" class="back-link">Clips</a>
 
     <div class="review-title-block">
       <span class="review-governing-body" id="hdr-governing-body">—</span>
@@ -224,6 +225,82 @@
         <span class="video-meta-sep">/</span>
         <span id="duration-display">—</span>
         <span class="video-meta-label" id="active-speaker-label"></span>
+        <button class="btn btn-ghost btn-sm clip-toggle-btn" id="clip-toggle-btn" title="Open Clip Builder">&#9986; Clip</button>
+      </div>
+
+      <!-- Clip Builder Panel -->
+      <div class="clip-builder" id="clip-builder" hidden>
+        <div class="clip-builder-header">
+          <span class="clip-builder-title">CLIP BUILDER</span>
+          <button class="modal-close" id="clip-close-btn">&#x2715;</button>
+        </div>
+        <div class="clip-builder-body">
+          <div class="clip-time-row">
+            <label class="form-label">Start</label>
+            <input type="text" class="form-input clip-time-input" id="clip-start-input" value="0:00:00.000" autocomplete="off">
+            <button class="btn btn-ghost btn-sm" id="clip-set-start">Set Here</button>
+          </div>
+          <div class="clip-time-row">
+            <label class="form-label">End</label>
+            <input type="text" class="form-input clip-time-input" id="clip-end-input" value="0:00:00.000" autocomplete="off">
+            <button class="btn btn-ghost btn-sm" id="clip-set-end">Set Here</button>
+          </div>
+          <div class="clip-duration-row">
+            <span class="form-label">Duration</span>
+            <span id="clip-duration-display" class="clip-duration-value">0:00</span>
+          </div>
+
+          <div class="clip-adjust-section">
+            <span class="form-label">Adjust Start</span>
+            <div class="clip-adjust-buttons">
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="-5">-5s</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="-1">-1s</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="-0.1">-.1</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="-0.033">-1f</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="0.033">+1f</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="0.1">+.1</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="1">+1s</button>
+              <button class="btn btn-ghost btn-sm" data-which="start" data-delta="5">+5s</button>
+            </div>
+          </div>
+
+          <div class="clip-adjust-section">
+            <span class="form-label">Adjust End</span>
+            <div class="clip-adjust-buttons">
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="-5">-5s</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="-1">-1s</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="-0.1">-.1</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="-0.033">-1f</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="0.033">+1f</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="0.1">+.1</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="1">+1s</button>
+              <button class="btn btn-ghost btn-sm" data-which="end" data-delta="5">+5s</button>
+            </div>
+          </div>
+
+          <div class="clip-preview-row">
+            <button class="btn btn-ghost btn-sm" id="clip-preview-btn">&#9654; Preview</button>
+            <label class="clip-loop-label">
+              <input type="checkbox" id="clip-loop-check"> Loop
+            </label>
+          </div>
+
+          <div class="clip-meta-row">
+            <div class="form-group">
+              <label class="form-label">Title</label>
+              <input type="text" class="form-input" id="clip-title-input" placeholder="Untitled clip" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Notes</label>
+              <input type="text" class="form-input" id="clip-notes-input" placeholder="Optional notes..." autocomplete="off">
+            </div>
+          </div>
+
+          <div class="clip-actions-row">
+            <button class="btn btn-primary" id="clip-export-btn">Export Clip</button>
+            <span class="clip-status" id="clip-status"></span>
+          </div>
+        </div>
       </div>
 
       <div class="doc-panel" id="doc-panel">

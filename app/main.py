@@ -15,7 +15,7 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine
 from app import models
 from app.routers import (
-    assignments, documents, governing_bodies, library, media,
+    assignments, clips, documents, governing_bodies, library, media,
     meetings, mentions, news, people, segments, tags, tagging, transcribe,
 )
 
@@ -41,6 +41,7 @@ app.include_router(transcribe.router)
 app.include_router(governing_bodies.router)
 app.include_router(library.router)
 app.include_router(news.router)
+app.include_router(clips.router)
 app.include_router(tags.router)
 app.include_router(mentions.router)
 app.include_router(tagging.router)
@@ -70,6 +71,11 @@ def speakers_page():
 @app.get("/news/{newscast_id}", include_in_schema=False)
 def news_review_page(newscast_id: str):
     return FileResponse(str(_static_dir / "news_review.html"))
+
+
+@app.get("/clips", include_in_schema=False)
+def clips_page():
+    return FileResponse(str(_static_dir / "clips.html"))
 
 
 # ── Favicon ──────────────────────────────────────────────────────────────────

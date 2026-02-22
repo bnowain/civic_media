@@ -1,11 +1,13 @@
 """
 Celery task definitions.
 
-Four tasks:
+Six tasks:
   - process_video_task:            Full video ingestion pipeline.
   - process_pdf_task:              PDF text extraction (native + OCR fallback).
   - extract_multi_voiceprints_task: Extra voiceprints from long confirmed segments.
   - rerun_voiceprints_task:        Background voiceprint re-evaluation after confirmation.
+  - export_clip_task:              FFmpeg clip export (video/audio/audio-to-MP4).
+  - cleanup_clips_task:            Delete old export files, keep metadata.
 
 All tasks use their own DB sessions (never share across task boundaries).
 """
@@ -293,6 +295,166 @@ def rerun_voiceprints_task(meeting_id: str) -> dict:
     except Exception:
         db.rollback()
         logger.exception("rerun_voiceprints_task failed for meeting %s", meeting_id)
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="tasks.export_clip",
+    max_retries=1,
+    default_retry_delay=10,
+)
+def export_clip_task(self, clip_id: str) -> dict:
+    """
+    Export a clip via FFmpeg.  Supports video, audio, and audio-to-MP4
+    (when a cover image is set).
+    """
+    import subprocess
+    from app.database import SessionLocal
+    from app.config import CLIPS_DIR
+    from app import models
+
+    db = SessionLocal()
+    try:
+        clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
+        if not clip:
+            logger.error("export_clip_task: clip %s not found", clip_id)
+            return {"error": "not_found"}
+
+        clip.export_status = "exporting"
+        clip.export_error = None
+        db.commit()
+
+        clip_dir = CLIPS_DIR / clip_id
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        source = clip.source_media_path
+
+        if clip.cover_image_path and Path(clip.cover_image_path).exists():
+            # Audio-to-MP4 with cover image
+            out_path = clip_dir / "clip.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", clip.cover_image_path,
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:v", "libx264", "-tune", "stillimage",
+                "-c:a", "aac", "-b:a", "128k",
+                "-shortest", "-pix_fmt", "yuv420p",
+                str(out_path),
+            ]
+        elif clip.media_type == "video":
+            out_path = clip_dir / "clip.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ]
+        else:
+            out_path = clip_dir / "clip.mp3"
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:a", "libmp3lame", "-q:a", "2",
+                str(out_path),
+            ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+        )
+
+        if result.returncode != 0:
+            clip.export_status = "error"
+            clip.export_error = result.stderr[:500] if result.stderr else "FFmpeg failed"
+            db.commit()
+            logger.error(
+                "export_clip_task FFmpeg error for %s: %s",
+                clip_id, clip.export_error,
+            )
+            return {"clip_id": clip_id, "status": "error"}
+
+        clip.export_path = str(out_path)
+        clip.export_status = "ready"
+        db.commit()
+        logger.info("export_clip_task complete: %s → %s", clip_id, out_path)
+        return {"clip_id": clip_id, "status": "ready"}
+
+    except Exception as exc:
+        db.rollback()
+        try:
+            clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
+            if clip:
+                clip.export_status = "error"
+                clip.export_error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+        logger.exception("export_clip_task failed for clip %s", clip_id)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="tasks.cleanup_clips",
+    max_retries=0,
+)
+def cleanup_clips_task() -> dict:
+    """
+    Delete export files for downloaded or expired clips.
+    Keeps metadata and thumbnails for re-export.
+    """
+    from datetime import datetime, timedelta
+    from app.database import SessionLocal
+    from app.config import CLIP_CLEANUP_HOURS
+    from app import models
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=CLIP_CLEANUP_HOURS)
+        cleaned = 0
+
+        clips = (
+            db.query(models.Clip)
+            .filter(
+                models.Clip.export_status == "ready",
+                models.Clip.export_path.isnot(None),
+            )
+            .all()
+        )
+
+        for clip in clips:
+            should_clean = (
+                clip.downloaded_at is not None
+                or clip.created_at < cutoff
+            )
+            if not should_clean:
+                continue
+
+            if clip.export_path:
+                p = Path(clip.export_path)
+                if p.exists():
+                    p.unlink()
+
+            clip.export_status = "cleaned"
+            clip.export_path = None
+            cleaned += 1
+
+        db.commit()
+        logger.info("cleanup_clips_task: cleaned %d clips", cleaned)
+        return {"cleaned": cleaned}
+    except Exception:
+        db.rollback()
+        logger.exception("cleanup_clips_task failed")
         raise
     finally:
         db.close()

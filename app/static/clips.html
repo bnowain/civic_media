@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clips — Civic Media</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-index">
+
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">&#x2B21;</span>
+      <span class="brand-name">CIVIC MEDIA</span>
+    </div>
+    <div class="header-nav">
+      <a href="/" class="nav-link">Home</a>
+      <a href="/speakers" class="nav-link">Speakers</a>
+      <a href="/clips" class="nav-link active">Clips</a>
+    </div>
+  </header>
+
+  <main class="index-main">
+    <div class="index-content">
+      <div class="section-header">
+        <h2>Clip Library</h2>
+        <span class="meeting-count" id="clip-count">&mdash;</span>
+      </div>
+
+      <div class="clips-grid" id="clips-grid">
+        <div class="loading-state">Loading clips...</div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/clips.js"></script>
+</body>
+</html>

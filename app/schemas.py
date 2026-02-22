@@ -295,6 +295,44 @@ class PeopleMentionDenyRequest(BaseModel):
     content_id: str
 
 
+# ── Clips ───────────────────────────────────────────────────────────────
+
+class ClipCreate(BaseModel):
+    source_type: str       # "meeting" | "newscast"
+    source_id: str
+    start_time: float
+    end_time: float
+    title: str = "Untitled clip"
+    notes: Optional[str] = None
+
+
+class ClipUpdate(BaseModel):
+    title: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ClipOut(BaseModel):
+    clip_id: str
+    source_type: str
+    source_id: str
+    source_media_path: str
+    media_type: str
+    start_time: float
+    end_time: float
+    duration: float
+    title: str
+    notes: Optional[str]
+    thumbnail_path: Optional[str]
+    export_path: Optional[str]
+    export_status: Optional[str]
+    export_error: Optional[str]
+    cover_image_path: Optional[str]
+    downloaded_at: Optional[datetime]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ── Library ──────────────────────────────────────────────────────────────────
 
 class RecentMediaItem(BaseModel):
