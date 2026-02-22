@@ -1,8 +1,9 @@
 """Meeting CRUD endpoints."""
 
 import shutil
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,12 +14,30 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
 
 @router.get("/", response_model=list[schemas.MeetingOut])
-def list_meetings(db: Session = Depends(get_db)):
-    return (
-        db.query(models.Meeting)
-        .order_by(models.Meeting.meeting_date.desc(), models.Meeting.created_at.desc())
-        .all()
-    )
+def list_meetings(
+    category: Optional[str] = Query(None),
+    governing_body_id: Optional[str] = Query(None),
+    meeting_type: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    q = db.query(models.Meeting)
+
+    if category:
+        q = q.filter(models.Meeting.category == category)
+    if governing_body_id:
+        q = q.filter(models.Meeting.governing_body_id == governing_body_id)
+    if meeting_type:
+        q = q.filter(models.Meeting.meeting_type == meeting_type)
+
+    q = q.order_by(models.Meeting.meeting_date.desc(), models.Meeting.created_at.desc())
+    q = q.offset(offset)
+
+    if limit:
+        q = q.limit(limit)
+
+    return q.all()
 
 
 @router.post("/", response_model=schemas.MeetingOut, status_code=201)

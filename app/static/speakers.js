@@ -195,6 +195,71 @@ function selectPerson(p) {
   document.getElementById("detail-mtg-pill").textContent = "loading...";
 
   loadAppearances(p.person_id);
+  loadMentions(p.person_id);
+}
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+
+document.addEventListener("click", e => {
+  const tab = e.target.closest(".spk-tab");
+  if (!tab) return;
+  const tabName = tab.dataset.tab;
+
+  document.querySelectorAll(".spk-tab").forEach(t => t.classList.remove("active"));
+  tab.classList.add("active");
+
+  document.getElementById("tab-appearances").style.display = tabName === "appearances" ? "" : "none";
+  document.getElementById("tab-mentions").style.display = tabName === "mentions" ? "" : "none";
+});
+
+// ── Mentions ─────────────────────────────────────────────────────────────────
+
+async function loadMentions(personId) {
+  const list = document.getElementById("mentions-list");
+  try {
+    const r = await fetch(`/api/mentions/person/${personId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const mentions = await r.json();
+    renderMentions(mentions);
+  } catch (err) {
+    console.error("Failed to load mentions:", err);
+    list.innerHTML = '<div class="spk-empty-state">Failed to load mentions.</div>';
+  }
+}
+
+function renderMentions(mentions) {
+  const list = document.getElementById("mentions-list");
+
+  if (mentions.length === 0) {
+    list.innerHTML = '<div class="spk-empty-state">No content mentions found for this person.</div>';
+    return;
+  }
+
+  list.innerHTML = "";
+  mentions.forEach(m => {
+    const card = document.createElement("div");
+    card.className = "spk-appearance-card";
+
+    const typeLabel = m.content_type === "tv_news_segment" ? "News Segment"
+      : m.content_type === "meeting" ? "Meeting"
+      : m.content_type;
+
+    card.innerHTML = `
+      <div class="spk-appearance-body">
+        <div class="spk-appearance-title">${esc(typeLabel)}: ${esc(m.content_id.slice(0, 8))}...</div>
+        <div class="spk-appearance-meta">
+          ${m.source ? `Source: ${esc(m.source)}` : ""}
+          ${m.confidence != null ? ` \u00b7 Confidence: ${(m.confidence * 100).toFixed(0)}%` : ""}
+        </div>
+        ${m.context ? `<div class="spk-appearance-meta" style="margin-top:4px">${esc(m.context)}</div>` : ""}
+      </div>
+      <div class="spk-appearance-right">
+        <span class="mention-pill">${esc(m.source || "mention")}</span>
+      </div>
+    `;
+
+    list.appendChild(card);
+  });
 }
 
 function renderAppearances(appearances) {

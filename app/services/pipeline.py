@@ -328,6 +328,12 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
                 db, segment, preloaded=preloaded, person_map=person_map,
             )
 
+    # Set processed_at timestamp
+    from datetime import datetime
+    meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if meeting:
+        meeting.processed_at = datetime.utcnow()
+
     db.commit()
 
     embedder.clear_audio_cache()

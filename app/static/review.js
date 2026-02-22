@@ -316,7 +316,11 @@ function buildSegmentCard(seg, idx, grouped = false) {
       </button>
       <button class="seg-new-btn" data-seg="${seg.segment_id}">+ New</button>
     </div>
+    <div class="tag-pills" id="seg-tags-${seg.segment_id}"></div>
   `;
+
+  // Load tags for this segment
+  loadSegmentTags(seg.segment_id);
 
   // Seek on card body click
   card.addEventListener("click", e => {
@@ -1097,6 +1101,45 @@ function esc(str) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+// ── Tags on Segments ────────────────────────────────────────────────────────
+
+async function loadSegmentTags(segmentId) {
+  try {
+    const r = await fetch(`/api/tags/for-content?content_type=meeting_segment&content_id=${segmentId}`);
+    if (!r.ok) return;
+    const assignments = await r.json();
+    const container = document.getElementById(`seg-tags-${segmentId}`);
+    if (!container || assignments.length === 0) return;
+
+    container.innerHTML = "";
+    assignments.forEach(a => {
+      const pill = document.createElement("span");
+      const sourceClass = a.source === "confirmed" ? "confirmed" : a.source === "llm" ? "llm" : "";
+      pill.className = `tag-pill ${sourceClass}`;
+      pill.innerHTML = `
+        ${esc(a.tag?.name || "tag")}
+        <button class="pill-action" title="Confirm" onclick="event.stopPropagation(); confirmSegTag('${a.assignment_id}', '${segmentId}')">&#x2713;</button>
+        <button class="pill-action" title="Deny" onclick="event.stopPropagation(); denySegTag('${a.tag_id}','meeting_segment','${segmentId}')">&#x2715;</button>
+      `;
+      container.appendChild(pill);
+    });
+  } catch { /* ignore */ }
+}
+
+async function confirmSegTag(assignmentId, segmentId) {
+  await fetch(`/api/tags/assignments/${assignmentId}/confirm`, { method: "POST" });
+  loadSegmentTags(segmentId);
+}
+
+async function denySegTag(tagId, contentType, contentId) {
+  await fetch("/api/tags/deny", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag_id: tagId, content_type: contentType, content_id: contentId }),
+  });
+  loadSegmentTags(contentId);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

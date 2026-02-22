@@ -14,7 +14,10 @@ from fastapi.staticfiles import StaticFiles
 from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine
 from app import models
-from app.routers import assignments, documents, media, meetings, people, segments
+from app.routers import (
+    assignments, documents, governing_bodies, library, media,
+    meetings, mentions, news, people, segments, tags, tagging, transcribe,
+)
 
 # Create all tables (idempotent)
 models.Base.metadata.create_all(bind=engine)
@@ -27,21 +30,28 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
-# ── API routers ───────────────────────────────────────────────────────────────
+# ── API routers ──────────────────────────────────────────────────────────────
 app.include_router(meetings.router)
 app.include_router(media.router)
 app.include_router(documents.router)
 app.include_router(segments.router)
 app.include_router(people.router)
 app.include_router(assignments.router)
+app.include_router(transcribe.router)
+app.include_router(governing_bodies.router)
+app.include_router(library.router)
+app.include_router(news.router)
+app.include_router(tags.router)
+app.include_router(mentions.router)
+app.include_router(tagging.router)
 
-# ── Static files ──────────────────────────────────────────────────────────────
+# ── Static files ─────────────────────────────────────────────────────────────
 _static_dir = BASE_DIR / "app" / "static"
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 # /media/{meeting_id}/video is handled by media.router with range request support
 
-# ── Frontend page routes ──────────────────────────────────────────────────────
+# ── Frontend page routes ─────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(str(_static_dir / "index.html"))
@@ -57,13 +67,18 @@ def speakers_page():
     return FileResponse(str(_static_dir / "speakers.html"))
 
 
-# ── Favicon ───────────────────────────────────────────────────────────────────
+@app.get("/news/{newscast_id}", include_in_schema=False)
+def news_review_page(newscast_id: str):
+    return FileResponse(str(_static_dir / "news_review.html"))
+
+
+# ── Favicon ──────────────────────────────────────────────────────────────────
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(status_code=204)
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Health check ─────────────────────────────────────────────────────────────
 @app.get("/api/health", tags=["system"])
 def health():
     return {"status": "ok"}

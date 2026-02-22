@@ -3,123 +3,100 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Civic Media — Meetings</title>
+  <title>Civic Media — Library</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
-  <style>
-    .meeting-progress {
-      margin-top: 8px;
-    }
-    .pipeline-progress {
-      padding-top: 2px;
-    }
-    .progress-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      margin-bottom: 5px;
-    }
-    .progress-stage {
-      font-family: 'IBM Plex Mono', monospace;
-      font-size: 0.68rem;
-      color: #4aacff;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-    .progress-pct {
-      font-family: 'IBM Plex Mono', monospace;
-      font-size: 0.68rem;
-      color: #777;
-    }
-    .progress-bar-track {
-      width: 100%;
-      height: 3px;
-      background: rgba(255,255,255,0.07);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .progress-bar-fill {
-      height: 100%;
-      background: #4aacff;
-      border-radius: 2px;
-      transition: width 1.8s ease;
-      min-width: 2px;
-    }
-    .progress-bar-fill.indeterminate {
-      width: 35% !important;
-      animation: indeterminate-slide 1.8s ease-in-out infinite;
-    }
-    @keyframes indeterminate-slide {
-      0%   { transform: translateX(-150%); }
-      100% { transform: translateX(400%); }
-    }
-    .progress-detail {
-      font-family: 'IBM Plex Mono', monospace;
-      font-size: 0.62rem;
-      color: #555;
-      margin-top: 4px;
-    }
-  </style>
 </head>
 <body class="page-index">
 
   <header class="app-header">
     <div class="header-brand">
-      <span class="brand-icon">⬡</span>
+      <span class="brand-icon">&#x2B21;</span>
       <span class="brand-name">CIVIC MEDIA</span>
-      <span class="brand-sub">Meeting Processing Tool</span>
     </div>
     <div class="header-nav">
       <a href="/speakers" class="nav-link">Speakers</a>
-      <button class="btn btn-primary" id="new-meeting-btn">+ New Meeting</button>
+      <button class="btn btn-primary" id="new-item-btn">+ New</button>
     </div>
   </header>
 
-  <main class="index-main">
-    <div class="index-content">
-
-      <div class="section-header">
-        <h2>Meetings</h2>
-        <span class="meeting-count" id="meeting-count">—</span>
+  <main class="library-layout">
+    <!-- Sidebar -->
+    <aside class="library-sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-section-header">
+          <span class="sidebar-label">Recent Media</span>
+          <div class="recent-toggle" id="recent-toggle">
+            <button class="toggle-btn active" data-sort="processed">Processed</button>
+            <button class="toggle-btn" data-sort="event">Event</button>
+          </div>
+        </div>
+        <div class="recent-list" id="recent-list">
+          <div class="loading-state-sm">Loading...</div>
+        </div>
       </div>
 
-      <div id="meetings-grid" class="meetings-grid">
-        <div class="loading-state">Loading meetings...</div>
+      <div class="sidebar-section">
+        <span class="sidebar-label">Governing Bodies</span>
+        <div class="gb-list" id="gb-list">
+          <div class="gb-item active" data-gb-id="">All</div>
+        </div>
       </div>
 
-      <div class="section-header" style="margin-top: 36px;">
-        <h2>Audio Transcriptions</h2>
-        <span class="meeting-count" id="audio-count">—</span>
+      <div class="sidebar-section" id="stations-section" style="display:none">
+        <span class="sidebar-label">Stations</span>
+        <div class="station-list" id="station-list"></div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <section class="library-main">
+      <div class="library-tabs" id="library-tabs">
+        <button class="lib-tab active" data-mode="meetings">Meetings</button>
+        <button class="lib-tab" data-mode="audio">Audio</button>
+        <button class="lib-tab" data-mode="news">News</button>
       </div>
 
-      <div id="audio-grid" class="meetings-grid">
-        <div class="loading-state">Loading audio...</div>
+      <div class="library-toolbar">
+        <span class="item-count" id="item-count">&mdash;</span>
       </div>
 
-    </div>
+      <div id="content-grid" class="library-grid">
+        <div class="loading-state">Loading...</div>
+      </div>
+    </section>
   </main>
 
-  <!-- New Meeting Dialog -->
-  <dialog id="new-meeting-dialog" class="modal">
+  <!-- New Item Dialog -->
+  <dialog id="new-item-dialog" class="modal">
     <div class="modal-header">
       <h3 id="dialog-title">New Meeting</h3>
-      <button class="modal-close" id="close-dialog-btn">✕</button>
+      <button class="modal-close" id="close-dialog-btn">&#x2715;</button>
     </div>
     <div class="modal-body">
       <div class="form-group">
         <label class="form-label">Type</label>
         <div class="category-toggle" id="category-toggle">
           <button type="button" class="cat-btn active" data-cat="meeting">Meeting</button>
-          <button type="button" class="cat-btn" data-cat="audio">Audio Transcription</button>
+          <button type="button" class="cat-btn" data-cat="audio">Audio</button>
+          <button type="button" class="cat-btn" data-cat="news">News</button>
         </div>
       </div>
+
+      <!-- Meeting fields -->
       <div id="meeting-fields">
         <div class="form-group">
           <label class="form-label">Governing Body</label>
-          <input type="text" id="f-governing-body" class="form-input"
-                 placeholder="e.g. Shasta County Board of Supervisors" autocomplete="off">
+          <select id="f-governing-body" class="form-input">
+            <option value="">Select...</option>
+          </select>
+          <div class="form-inline-add">
+            <input type="text" id="f-new-gb" class="form-input form-input-sm"
+                   placeholder="Or add new..." autocomplete="off">
+            <button class="btn btn-ghost btn-sm" id="add-gb-btn">Add</button>
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -134,17 +111,39 @@
             </select>
           </div>
           <div class="form-group">
-            <label class="form-label">Meeting Date</label>
+            <label class="form-label">Date</label>
             <input type="date" id="f-meeting-date" class="form-input">
           </div>
         </div>
       </div>
+
+      <!-- Audio fields -->
       <div id="audio-fields" style="display:none">
         <div class="form-group">
           <label class="form-label">Date</label>
           <input type="date" id="f-audio-date" class="form-input">
         </div>
       </div>
+
+      <!-- News fields -->
+      <div id="news-fields" style="display:none">
+        <div class="form-group">
+          <label class="form-label">Station</label>
+          <input type="text" id="f-station" class="form-input"
+                 placeholder="e.g. KRCR, KHSL" autocomplete="off">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Air Date</label>
+            <input type="date" id="f-air-date" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Air Time</label>
+            <input type="time" id="f-air-time" class="form-input">
+          </div>
+        </div>
+      </div>
+
       <div class="form-group">
         <label class="form-label">Title</label>
         <input type="text" id="f-title" class="form-input"
@@ -153,7 +152,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="cancel-dialog-btn">Cancel</button>
-      <button class="btn btn-primary" id="create-meeting-btn">Create</button>
+      <button class="btn btn-primary" id="create-btn">Create</button>
     </div>
   </dialog>
 

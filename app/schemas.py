@@ -1,6 +1,5 @@
 """
 Pydantic schemas for API request and response validation.
-Kept minimal — exactly what each endpoint needs.
 """
 
 from __future__ import annotations
@@ -11,7 +10,23 @@ from typing import Optional
 from pydantic import BaseModel, field_validator
 
 
-# ── Meetings ──────────────────────────────────────────────────────────────────
+# ── Governing Bodies ─────────────────────────────────────────────────────────
+
+class GoverningBodyCreate(BaseModel):
+    name: str
+    display_name: Optional[str] = None
+
+
+class GoverningBodyOut(BaseModel):
+    governing_body_id: str
+    name: str
+    display_name: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Meetings ─────────────────────────────────────────────────────────────────
 
 class MeetingCreate(BaseModel):
     governing_body: str = ""
@@ -19,6 +34,7 @@ class MeetingCreate(BaseModel):
     meeting_date: str   # YYYY-MM-DD
     title: str
     category: str = "meeting"
+    governing_body_id: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
@@ -32,12 +48,13 @@ class MeetingCreate(BaseModel):
 class MeetingOut(MeetingCreate):
     meeting_id: str
     media_directory: Optional[str]
+    processed_at: Optional[datetime] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-# ── Media Files ───────────────────────────────────────────────────────────────
+# ── Media Files ──────────────────────────────────────────────────────────────
 
 class MediaFileOut(BaseModel):
     media_id: str
@@ -49,7 +66,7 @@ class MediaFileOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── Documents ─────────────────────────────────────────────────────────────────
+# ── Documents ────────────────────────────────────────────────────────────────
 
 class DocumentOut(BaseModel):
     document_id: str
@@ -62,7 +79,7 @@ class DocumentOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── People ────────────────────────────────────────────────────────────────────
+# ── People ───────────────────────────────────────────────────────────────────
 
 class PersonAppearance(BaseModel):
     meeting_id: str
@@ -91,7 +108,7 @@ class PersonSummary(PersonOut):
     voiceprint_count: int = 0
 
 
-# ── Assignments ───────────────────────────────────────────────────────────────
+# ── Assignments ──────────────────────────────────────────────────────────────
 
 class AssignmentOut(BaseModel):
     assignment_id: str
@@ -112,7 +129,7 @@ class TagAssignment(BaseModel):
     person_id: str
 
 
-# ── Transcript Segments ───────────────────────────────────────────────────────
+# ── Transcript Segments ─────────────────────────────────────────────────────
 
 class SegmentOut(BaseModel):
     segment_id: str
@@ -131,7 +148,7 @@ class SegmentEdit(BaseModel):
     text: str
 
 
-# ── Pipeline Status ───────────────────────────────────────────────────────────
+# ── Pipeline Status ──────────────────────────────────────────────────────────
 
 class PipelineStatus(BaseModel):
     meeting_id: str
@@ -141,3 +158,151 @@ class PipelineStatus(BaseModel):
     stage: Optional[str]     # Human-readable current step
     progress_pct: Optional[int]   # 0-100
     detail: Optional[str]         # Extra info e.g. "1200/1800 segments"
+
+
+# ── TV News ──────────────────────────────────────────────────────────────────
+
+class TVNewscastCreate(BaseModel):
+    title: str
+    station: str = ""
+    air_date: Optional[str] = None
+    air_time: Optional[str] = None
+
+
+class TVNewscastOut(BaseModel):
+    newscast_id: str
+    title: str
+    station: str
+    air_date: Optional[str]
+    air_time: Optional[str]
+    source_file: Optional[str]
+    cleaned_file: Optional[str]
+    duration_seconds: Optional[float]
+    status: str
+    error_detail: Optional[str]
+    processed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: Optional[datetime]
+
+    model_config = {"from_attributes": True}
+
+
+class TVNewsSegmentOut(BaseModel):
+    segment_id: str
+    newscast_id: str
+    title: Optional[str]
+    summary: Optional[str]
+    start_time: Optional[float]
+    end_time: Optional[float]
+    story_type: Optional[str]
+    transcript: Optional[str]
+    last_tagged_at: Optional[datetime]
+    tagging_version: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TVNewsChunkOut(BaseModel):
+    chunk_id: str
+    newscast_id: str
+    segment_id: Optional[str]
+    start_time: Optional[float]
+    end_time: Optional[float]
+    text: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Tags ─────────────────────────────────────────────────────────────────────
+
+class TagCreate(BaseModel):
+    name: str
+    parent_id: Optional[str] = None
+    tag_type: Optional[str] = None
+    description: Optional[str] = None
+
+
+class TagOut(BaseModel):
+    tag_id: str
+    name: str
+    parent_id: Optional[str]
+    tag_type: Optional[str]
+    description: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TagAssignmentCreate(BaseModel):
+    tag_id: str
+    content_type: str
+    content_id: str
+    source: str = "manual"
+    confidence: Optional[float] = None
+    llm_context: Optional[str] = None
+
+
+class TagAssignmentOut(BaseModel):
+    assignment_id: str
+    tag_id: str
+    content_type: str
+    content_id: str
+    source: Optional[str]
+    confidence: Optional[float]
+    llm_context: Optional[str]
+    created_at: datetime
+    tagged_at: Optional[datetime]
+    tag: Optional[TagOut] = None
+
+    model_config = {"from_attributes": True}
+
+
+class TagDenyRequest(BaseModel):
+    tag_id: str
+    content_type: str
+    content_id: str
+
+
+# ── People Mentions ──────────────────────────────────────────────────────────
+
+class PeopleMentionCreate(BaseModel):
+    person_id: str
+    content_type: str
+    content_id: str
+    source: str = "manual"
+    confidence: Optional[float] = None
+    context: Optional[str] = None
+
+
+class PeopleMentionOut(BaseModel):
+    mention_id: str
+    person_id: str
+    content_type: str
+    content_id: str
+    source: Optional[str]
+    confidence: Optional[float]
+    context: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PeopleMentionDenyRequest(BaseModel):
+    person_id: str
+    content_type: str
+    content_id: str
+
+
+# ── Library ──────────────────────────────────────────────────────────────────
+
+class RecentMediaItem(BaseModel):
+    id: str
+    title: str
+    media_type: str       # "meeting" | "audio" | "news"
+    date: Optional[str]
+    processed_at: Optional[datetime]
+    created_at: datetime
+    status: Optional[str] = None
+    subtitle: Optional[str] = None

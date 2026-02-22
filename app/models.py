@@ -1,6 +1,10 @@
 """
-ORM table definitions — exactly the schema specified in Phase 1.
-No additional tables.
+ORM table definitions for Civic Media.
+
+Tables: meetings, governing_bodies, media_files, documents,
+transcript_segments, people, voiceprints, segment_assignments,
+tv_newscasts, tv_news_segments, tv_news_transcription_chunks,
+tags, tag_assignments, tag_denials, people_mentions, people_mention_denials.
 """
 
 from __future__ import annotations
@@ -23,18 +27,36 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── Governing Bodies ─────────────────────────────────────────────────────────
+
+class GoverningBody(Base):
+    __tablename__ = "governing_bodies"
+
+    governing_body_id = Column(String, primary_key=True, default=_gen_id)
+    name              = Column(String, nullable=False, unique=True)
+    display_name      = Column(String)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+
+    meetings = relationship("Meeting", back_populates="governing_body_ref")
+
+
+# ── Meetings ─────────────────────────────────────────────────────────────────
+
 class Meeting(Base):
     __tablename__ = "meetings"
 
-    meeting_id      = Column(String, primary_key=True, default=_gen_id)
-    governing_body  = Column(String, nullable=False)
-    meeting_type    = Column(String, nullable=False)
-    meeting_date    = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
-    title           = Column(String, nullable=False)
-    category        = Column(String, nullable=False, default="meeting")  # "meeting" | "audio"
-    media_directory = Column(String)
-    created_at      = Column(DateTime, default=datetime.utcnow)
+    meeting_id        = Column(String, primary_key=True, default=_gen_id)
+    governing_body    = Column(String, nullable=False)
+    meeting_type      = Column(String, nullable=False)
+    meeting_date      = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
+    title             = Column(String, nullable=False)
+    category          = Column(String, nullable=False, default="meeting")  # "meeting" | "audio"
+    media_directory   = Column(String)
+    governing_body_id = Column(String, ForeignKey("governing_bodies.governing_body_id"), nullable=True)
+    processed_at      = Column(DateTime, nullable=True)
+    created_at        = Column(DateTime, default=datetime.utcnow)
 
+    governing_body_ref = relationship("GoverningBody", back_populates="meetings")
     media_files = relationship("MediaFile", back_populates="meeting",
                                cascade="all, delete-orphan")
     documents   = relationship("Document",  back_populates="meeting",
@@ -79,12 +101,6 @@ class TranscriptSegment(Base):
     raw_speaker_label = Column(String)                  # e.g. "SPEAKER_00"
     embedding         = Column(LargeBinary)             # serialised numpy array
 
-    # Whisper confidence metadata — populated during transcription.
-    # avg_logprob:    average log-probability of output tokens. 0 = perfect,
-    #                 more negative = less confident. Below -1.0 is suspicious.
-    # no_speech_prob: model's estimate that this segment contains no speech.
-    #                 Above 0.6 is suspicious (likely silence/noise hallucination).
-    # NULL for segments transcribed before this column was added.
     avg_logprob    = Column(Float, nullable=True)
     no_speech_prob = Column(Float, nullable=True)
 
@@ -105,6 +121,8 @@ class Person(Base):
     voiceprints = relationship("Voiceprint",        back_populates="person",
                                cascade="all, delete-orphan")
     assignments = relationship("SegmentAssignment", back_populates="predicted_person")
+    mentions    = relationship("PeopleMention",     back_populates="person",
+                               cascade="all, delete-orphan")
 
 
 class Voiceprint(Base):
@@ -134,3 +152,146 @@ class SegmentAssignment(Base):
 
     segment          = relationship("TranscriptSegment", back_populates="assignment")
     predicted_person = relationship("Person",            back_populates="assignments")
+
+
+# ── TV News ──────────────────────────────────────────────────────────────────
+
+class TVNewscast(Base):
+    __tablename__ = "tv_newscasts"
+
+    newscast_id      = Column(String, primary_key=True, default=_gen_id)
+    title            = Column(String, nullable=False)
+    station          = Column(String, nullable=False, default="")
+    air_date         = Column(String)    # YYYY-MM-DD
+    air_time         = Column(String)    # HH:MM
+    source_file      = Column(String)
+    cleaned_file     = Column(String)
+    duration_seconds = Column(Float)
+    status           = Column(String, nullable=False, default="queued")
+    error_detail     = Column(Text)
+    processed_at     = Column(DateTime)
+    created_at       = Column(DateTime, default=datetime.utcnow)
+    updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    segments = relationship("TVNewsSegment", back_populates="newscast",
+                            cascade="all, delete-orphan")
+    chunks   = relationship("TVNewsTranscriptionChunk", back_populates="newscast",
+                            cascade="all, delete-orphan")
+
+
+class TVNewsSegment(Base):
+    __tablename__ = "tv_news_segments"
+
+    segment_id      = Column(String, primary_key=True, default=_gen_id)
+    newscast_id     = Column(String, ForeignKey("tv_newscasts.newscast_id"), nullable=False)
+    title           = Column(String)
+    summary         = Column(Text)
+    start_time      = Column(Float)
+    end_time        = Column(Float)
+    story_type      = Column(String)
+    transcript      = Column(Text)
+    last_tagged_at  = Column(DateTime)
+    tagging_version = Column(String)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+    newscast = relationship("TVNewscast", back_populates="segments")
+    chunks   = relationship("TVNewsTranscriptionChunk", back_populates="segment")
+
+
+class TVNewsTranscriptionChunk(Base):
+    __tablename__ = "tv_news_transcription_chunks"
+
+    chunk_id    = Column(String, primary_key=True, default=_gen_id)
+    newscast_id = Column(String, ForeignKey("tv_newscasts.newscast_id"), nullable=False)
+    segment_id  = Column(String, ForeignKey("tv_news_segments.segment_id"), nullable=True)
+    start_time  = Column(Float)
+    end_time    = Column(Float)
+    text        = Column(Text)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+    newscast = relationship("TVNewscast", back_populates="chunks")
+    segment  = relationship("TVNewsSegment", back_populates="chunks")
+
+
+# ── Tags & Mentions ──────────────────────────────────────────────────────────
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    tag_id      = Column(String, primary_key=True, default=_gen_id)
+    name        = Column(String, nullable=False, unique=True)
+    parent_id   = Column(String, ForeignKey("tags.tag_id"), nullable=True)
+    tag_type    = Column(String)     # e.g. "topic", "entity", "category"
+    description = Column(Text)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+    parent      = relationship("Tag", remote_side=[tag_id], backref="children")
+    assignments = relationship("TagAssignment", back_populates="tag",
+                               cascade="all, delete-orphan")
+    denials     = relationship("TagDenial", back_populates="tag",
+                               cascade="all, delete-orphan")
+
+
+class TagAssignment(Base):
+    __tablename__ = "tag_assignments"
+    __table_args__ = (
+        UniqueConstraint("tag_id", "content_type", "content_id"),
+    )
+
+    assignment_id = Column(String, primary_key=True, default=_gen_id)
+    tag_id        = Column(String, ForeignKey("tags.tag_id"), nullable=False)
+    content_type  = Column(String, nullable=False)   # "meeting" | "tv_news_segment" | etc.
+    content_id    = Column(String, nullable=False)
+    source        = Column(String)                   # "llm" | "manual"
+    confidence    = Column(Float)
+    llm_context   = Column(Text)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    tagged_at     = Column(DateTime, default=datetime.utcnow)
+
+    tag = relationship("Tag", back_populates="assignments")
+
+
+class TagDenial(Base):
+    __tablename__ = "tag_denials"
+    __table_args__ = (
+        UniqueConstraint("tag_id", "content_type", "content_id"),
+    )
+
+    denial_id    = Column(String, primary_key=True, default=_gen_id)
+    tag_id       = Column(String, ForeignKey("tags.tag_id"), nullable=False)
+    content_type = Column(String, nullable=False)
+    content_id   = Column(String, nullable=False)
+    denied_at    = Column(DateTime, default=datetime.utcnow)
+
+    tag = relationship("Tag", back_populates="denials")
+
+
+class PeopleMention(Base):
+    __tablename__ = "people_mentions"
+    __table_args__ = (
+        UniqueConstraint("person_id", "content_type", "content_id"),
+    )
+
+    mention_id   = Column(String, primary_key=True, default=_gen_id)
+    person_id    = Column(String, ForeignKey("people.person_id"), nullable=False)
+    content_type = Column(String, nullable=False)
+    content_id   = Column(String, nullable=False)
+    source       = Column(String)                    # "llm" | "manual"
+    confidence   = Column(Float)
+    context      = Column(Text)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+    person = relationship("Person", back_populates="mentions")
+
+
+class PeopleMentionDenial(Base):
+    __tablename__ = "people_mention_denials"
+    __table_args__ = (
+        UniqueConstraint("person_id", "content_type", "content_id"),
+    )
+
+    denial_id    = Column(String, primary_key=True, default=_gen_id)
+    person_id    = Column(String, ForeignKey("people.person_id"), nullable=False)
+    content_type = Column(String, nullable=False)
+    content_id   = Column(String, nullable=False)
+    denied_at    = Column(DateTime, default=datetime.utcnow)

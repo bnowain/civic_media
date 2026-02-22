@@ -175,6 +175,101 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
 
 
 @celery_app.task(
+    bind=True,
+    name="tasks.process_newscast",
+    max_retries=1,
+    default_retry_delay=15,
+)
+def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = False) -> dict:
+    """Run the full TV news processing pipeline for a newscast."""
+    from app.database import SessionLocal
+    from app.services.news_pipeline import run_news_pipeline
+
+    db = SessionLocal()
+    try:
+        run_news_pipeline(db, newscast_id, skip_commercial_strip)
+
+        from app.models import TVNewsSegment
+        count = db.query(TVNewsSegment).filter_by(newscast_id=newscast_id).count()
+        return {"newscast_id": newscast_id, "segment_count": count, "status": "complete"}
+
+    except Exception as exc:
+        db.rollback()
+        # Update newscast status to error
+        try:
+            from app.models import TVNewscast
+            newscast = db.query(TVNewscast).filter_by(newscast_id=newscast_id).first()
+            if newscast:
+                newscast.status = "error"
+                newscast.error_detail = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+        logger.exception("process_newscast_task failed for newscast %s", newscast_id)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="tasks.retag_content",
+    max_retries=0,
+)
+def retag_content_task(content_type: str, content_id: str) -> dict:
+    """Re-tag a content item via Atlas LLM."""
+    from app.database import SessionLocal
+    from app.services.atlas_client import tag_content
+    from app.services.tagging import apply_tags, apply_mentions
+    from app import models
+
+    db = SessionLocal()
+    try:
+        # Get the text content to send to Atlas
+        text = ""
+        metadata = {}
+
+        if content_type == "meeting":
+            segments = (
+                db.query(models.TranscriptSegment)
+                .filter_by(meeting_id=content_id)
+                .order_by(models.TranscriptSegment.start_time)
+                .all()
+            )
+            text = " ".join(s.text for s in segments if s.text)
+            meeting = db.query(models.Meeting).filter_by(meeting_id=content_id).first()
+            if meeting:
+                metadata = {"title": meeting.title, "governing_body": meeting.governing_body}
+
+        elif content_type == "tv_news_segment":
+            segment = db.query(models.TVNewsSegment).filter_by(segment_id=content_id).first()
+            if segment:
+                text = segment.transcript or ""
+
+        if not text:
+            return {"error": "no text found", "content_type": content_type, "content_id": content_id}
+
+        result = tag_content(content_type, content_id, text, metadata)
+        if not result:
+            return {"error": "atlas unavailable", "content_type": content_type, "content_id": content_id}
+
+        tag_count = apply_tags(db, content_type, content_id, result.get("tags", []))
+        mention_count = apply_mentions(db, content_type, content_id, result.get("mentions", []))
+
+        return {
+            "content_type": content_type,
+            "content_id": content_id,
+            "tags_applied": tag_count,
+            "mentions_applied": mention_count,
+        }
+    except Exception:
+        db.rollback()
+        logger.exception("retag_content_task failed for %s/%s", content_type, content_id)
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="tasks.rerun_voiceprints",
     max_retries=0,
 )

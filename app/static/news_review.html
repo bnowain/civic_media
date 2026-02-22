@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Civic Media — News Review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .news-layout {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      height: calc(100vh - var(--header-h));
+      overflow: hidden;
+    }
+
+    .news-video-panel {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-base);
+      overflow: hidden;
+    }
+
+    .news-video-container {
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .news-video-container video {
+      width: 100%;
+      max-height: 50vh;
+    }
+
+    .news-info {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .news-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .news-meta {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .news-upload-area {
+      padding: 20px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    .news-upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius-lg);
+      padding: 32px;
+      text-align: center;
+      width: 100%;
+      max-width: 400px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .news-upload-zone:hover,
+    .news-upload-zone.dragover {
+      border-color: var(--accent-blue);
+      background: rgba(74, 124, 247, 0.05);
+    }
+
+    .news-upload-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .news-upload-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+
+    .news-segments-panel {
+      background: var(--bg-surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .news-segments-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .news-segments-header h3 {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .news-segments-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .news-segment-card {
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 6px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.12s;
+    }
+
+    .news-segment-card:hover {
+      border-color: var(--border-light);
+    }
+
+    .news-segment-card.active {
+      border-color: var(--accent-blue);
+    }
+
+    .news-segment-header {
+      padding: 10px 12px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .news-segment-title {
+      font-size: 13px;
+      font-weight: 500;
+      flex: 1;
+    }
+
+    .news-segment-type {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--accent-blue-dim);
+      color: var(--accent-blue);
+      flex-shrink: 0;
+    }
+
+    .news-segment-time {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      padding: 0 12px 6px;
+    }
+
+    .news-segment-body {
+      display: none;
+      padding: 0 12px 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .news-segment-card.expanded .news-segment-body {
+      display: block;
+      padding-top: 10px;
+    }
+
+    .news-segment-summary {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+
+    .news-segment-transcript {
+      font-size: 12px;
+      color: var(--text-primary);
+      line-height: 1.6;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .news-progress-area {
+      padding: 20px;
+    }
+
+    .skip-commercials-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 12px;
+    }
+  </style>
+</head>
+<body class="page-review">
+
+  <header class="app-header">
+    <div class="header-brand">
+      <a href="/" class="brand-back" title="Back to Library">&larr;</a>
+      <span class="brand-icon">&#x2B21;</span>
+      <span class="brand-name">CIVIC MEDIA</span>
+    </div>
+    <div class="header-nav">
+      <span class="nav-badge" id="status-badge">&mdash;</span>
+    </div>
+  </header>
+
+  <main class="news-layout">
+    <div class="news-video-panel">
+      <div class="news-info" id="news-info">
+        <div class="news-title" id="news-title">Loading...</div>
+        <div class="news-meta" id="news-meta"></div>
+      </div>
+
+      <div class="news-video-container" id="video-container" style="display:none">
+        <video id="news-video" controls></video>
+      </div>
+
+      <div class="news-upload-area" id="upload-area">
+        <div class="news-upload-zone" id="upload-zone">
+          <div class="news-upload-label">Drop video file here or click to upload</div>
+          <div class="news-upload-hint">MP4, MKV, AVI, TS, etc.</div>
+        </div>
+        <label class="skip-commercials-check">
+          <input type="checkbox" id="skip-commercials">
+          Skip commercial stripping
+        </label>
+        <input type="file" id="file-input" accept="video/*" style="display:none">
+      </div>
+
+      <div class="news-progress-area" id="progress-area" style="display:none">
+        <div class="meeting-progress" id="progress-bar"></div>
+      </div>
+    </div>
+
+    <div class="news-segments-panel">
+      <div class="news-segments-header">
+        <h3>Story Segments</h3>
+        <span class="item-count" id="segment-count">&mdash;</span>
+      </div>
+      <div class="news-segments-list" id="segments-list">
+        <div class="empty-state">No segments yet</div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/news_review.js"></script>
+</body>
+</html>

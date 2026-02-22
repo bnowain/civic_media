@@ -11,6 +11,11 @@ DATABASE_PATH  = BASE_DIR / "database" / "civic_media.db"
 MEDIA_DIR      = BASE_DIR / "media"
 DOCUMENTS_DIR  = BASE_DIR / "documents"
 OCR_TEXT_DIR   = BASE_DIR / "ocr_text"
+TV_NEWS_DIR    = BASE_DIR / "tv_news"
+COMSKIP_INI_DIR = BASE_DIR / "config" / "comskip"
+
+# Atlas API (for LLM-powered story segmentation and tagging)
+ATLAS_API_URL  = os.environ.get("ATLAS_API_URL", "http://localhost:8888/api")
 
 DATABASE_URL   = f"sqlite:///{DATABASE_PATH}"
 CELERY_BROKER  = os.environ.get("CELERY_BROKER", "redis://localhost:6379/0")
@@ -52,5 +57,5 @@ EMBEDDING_DEVICE = os.environ.get("EMBEDDING_DEVICE", "cuda")
 MIN_EMBED_DURATION = 0.5
 
 # Ensure all directories exist at import time
-for _d in [DATABASE_PATH.parent, MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR]:
+for _d in [DATABASE_PATH.parent, MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR, TV_NEWS_DIR, COMSKIP_INI_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
