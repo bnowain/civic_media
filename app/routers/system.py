@@ -55,8 +55,15 @@ def system_status():
 
 @router.post("/shutdown")
 async def system_shutdown():
-    """Kill background processes and shut down the API server."""
+    """Kill the watchdog/worker, clean up PID file, then exit the API server.
+
+    The uvicorn PID in .server.pids is the cmd.exe wrapper that launched us.
+    Killing it with /T /F would kill *this* process before we can respond or
+    clean up.  So we only kill the watchdog (worker) here, delete the PID
+    file, send the response, then os._exit after a brief delay.
+    """
     killed = []
+    pids = {}
 
     if _PID_FILE.exists():
         try:
@@ -64,20 +71,21 @@ async def system_shutdown():
         except Exception:
             pids = {}
 
-        for name, pid in pids.items():
-            if pid and _pid_alive(pid):
-                try:
-                    os.system(f"taskkill /PID {pid} /T /F >nul 2>&1")
-                    killed.append(name)
-                except Exception as exc:
-                    logger.warning("Failed to kill %s (PID %s): %s", name, pid, exc)
+        # Only kill the watchdog (celery worker tree) -- not our own uvicorn
+        watchdog_pid = pids.get("watchdog")
+        if watchdog_pid and _pid_alive(watchdog_pid):
+            try:
+                os.system(f"taskkill /PID {watchdog_pid} /T /F >nul 2>&1")
+                killed.append("watchdog")
+            except Exception as exc:
+                logger.warning("Failed to kill watchdog (PID %s): %s", watchdog_pid, exc)
 
         try:
             _PID_FILE.unlink()
         except Exception:
             pass
 
-    logger.info("Shutdown requested — killed %s, exiting in 500ms", killed)
+    logger.info("Shutdown requested -- killed %s, exiting in 500ms", killed)
 
     # Schedule hard exit after response is sent
     async def _exit_soon():
