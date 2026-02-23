@@ -38,6 +38,10 @@ class MeetingCreate(BaseModel):
     description: Optional[str] = None
     source_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    primegov_id: Optional[int] = None
+    video_url: Optional[str] = None
+    agenda_url: Optional[str] = None
+    minutes_url: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
@@ -83,6 +87,7 @@ class MediaFileOut(BaseModel):
     file_type: str
     file_path: str
     duration: Optional[float]
+    transcode_status: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -180,6 +185,7 @@ class PipelineStatus(BaseModel):
     progress_pct: Optional[int]   # 0-100
     detail: Optional[str]         # Extra info e.g. "1200/1800 segments"
     error: bool = False
+    transcode_status: Optional[str] = None  # null | "pending" | "transcoding" | "transcoded"
 
 
 # ── TV News ──────────────────────────────────────────────────────────────────

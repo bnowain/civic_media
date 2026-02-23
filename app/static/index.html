@@ -210,6 +210,31 @@
     </div>
   </dialog>
 
+  <!-- PrimeGov Discovery Dialog -->
+  <dialog id="primegov-dialog" class="modal">
+    <div class="modal-header">
+      <h3>PrimeGov Meeting Discovery</h3>
+      <button class="modal-close" id="close-primegov-btn">&#x2715;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Committees</label>
+        <div class="primegov-committees" id="primegov-committees"></div>
+      </div>
+      <div class="primegov-progress-area" id="primegov-progress" style="display:none">
+        <div class="primegov-progress-stage" id="primegov-stage"></div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill indeterminate" id="primegov-bar" style="width:35%"></div>
+        </div>
+        <div class="primegov-progress-detail" id="primegov-detail"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="cancel-primegov-btn">Close</button>
+      <button class="btn btn-primary" id="run-primegov-btn">Discover Meetings</button>
+    </div>
+  </dialog>
+
   <div class="overlay" id="overlay"></div>
 
   <script src="/static/index.js"></script>

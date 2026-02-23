@@ -1,0 +1,89 @@
+# PrimeGov API Reference — Shasta County
+# Discovered 2026-02-23.  No authentication required.
+
+base_url: https://shastacounty.primegov.com
+
+# ── Committees ────────────────────────────────────────────────────────────────
+# GET /api/committee/GetCommitteeesListByShowInPublicPortal
+committees:
+  - id: 3
+    name: Board of Supervisors
+    short: BOS
+  - id: 2
+    name: Air Pollution Control Hearing Board
+    short: AirPollution
+  - id: 4
+    name: Housing Authority
+    short: Housing
+  - id: 5
+    name: In-Home Supportive Services
+    short: IHSS
+  - id: 6
+    name: Planning Commission
+    short: Planning
+  - id: 7
+    name: Waterworks District #1
+    short: Water
+
+# ── Meeting List Endpoints ────────────────────────────────────────────────────
+# Both return arrays of meeting objects.
+endpoints:
+  archived_years:
+    method: GET
+    path: /api/v2/PublicPortal/GetArchivedMeetingYears
+    description: Returns array of integers [2026, 2025, ..., 2016]
+
+  archived_meetings:
+    method: GET
+    path: /api/v2/PublicPortal/ListArchivedMeetingsByCommitteeId
+    params:
+      year: int       # e.g. 2025
+      committeeId: int  # e.g. 3
+    description: Returns array of meeting objects for that year + committee
+
+  upcoming_meetings:
+    method: GET
+    path: /api/v2/PublicPortal/ListUpcomingMeetingsByCommitteeId
+    params:
+      committeeId: int
+    description: Returns array of upcoming meeting objects
+
+  committee_list:
+    method: GET
+    path: /api/committee/GetCommitteeesListByShowInPublicPortal
+    description: Returns all committees visible on public portal
+
+# ── Meeting Object Shape ──────────────────────────────────────────────────────
+meeting_fields:
+  - id: int                # PrimeGov meeting ID (unique per meeting)
+  - title: str             # e.g. "Board of Supervisors - Regular Meeting"
+  - dateTime: str          # ISO datetime e.g. "2025-01-14T09:00:00"
+  - videoUrl: str|null     # Swagit video page URL (null if no video yet)
+  - swagitId: str|null     # UUID for Swagit/Granicus video
+  - documentList: array    # Array of document objects
+
+# ── Document Object Shape ─────────────────────────────────────────────────────
+document_fields:
+  - templateId: int        # Used to construct PDF download URL
+  - templateName: str      # e.g. "Agenda", "Minutes", "Meeting Packet"
+  - isPublic: bool
+
+# ── Document Download ────────────────────────────────────────────────────────
+document_url_pattern: >
+  https://shastacounty.primegov.com/Public/CompiledDocument
+  ?meetingTemplateId={templateId}&compileOutputType=1
+
+# ── Video Extraction ─────────────────────────────────────────────────────────
+# videoUrl points to a Swagit page. The HLS stream URL is embedded in the page
+# HTML/JS and must be extracted via Playwright (headless Chromium).
+#
+# Pattern for the m3u8 URL:
+#   https://archive-stream.granicus.com/OnDemand/_definst_/
+#   mp4:swagitVideo/shastacountyca/{uuid}.mp4/playlist.m3u8
+#
+# Download with ffmpeg:
+#   ffmpeg -i <m3u8_url> -c copy output.mp4
+video_extraction:
+  method: playwright
+  target_pattern: "archive-stream.granicus.com.*playlist\\.m3u8"
+  download_command: "ffmpeg -i {m3u8_url} -c copy {output_path}"

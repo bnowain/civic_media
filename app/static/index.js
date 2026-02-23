@@ -18,6 +18,7 @@ let editMeetingId = null;             // meeting being edited
 const activePollers = {};
 const POLL_INTERVAL = 4000;
 let ingestPoller = null;
+let primegovPoller = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,11 @@ async function init() {
   document.getElementById("close-ingest-btn").addEventListener("click", closeAllDialogs);
   document.getElementById("cancel-ingest-btn").addEventListener("click", closeAllDialogs);
   document.getElementById("run-ingest-btn").addEventListener("click", handleRunIngest);
+
+  // PrimeGov dialog
+  document.getElementById("close-primegov-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("cancel-primegov-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("run-primegov-btn").addEventListener("click", handleRunPrimeGov);
 
   // Tabs
   document.getElementById("library-tabs").addEventListener("click", e => {
@@ -147,7 +153,10 @@ function updateToolbar() {
   const actions = document.getElementById("toolbar-actions");
   if (!actions) return;
 
-  if (activeMode === "audio") {
+  if (activeMode === "meetings") {
+    actions.innerHTML = `<button class="btn btn-amber btn-sm" id="primegov-btn">Discover BOS</button>`;
+    document.getElementById("primegov-btn").addEventListener("click", openPrimeGovDialog);
+  } else if (activeMode === "audio") {
     actions.innerHTML = `<button class="btn btn-amber btn-sm" id="ingest-btn">Ingest Radio Shows</button>`;
     document.getElementById("ingest-btn").addEventListener("click", openIngestDialog);
   } else {
@@ -360,6 +369,9 @@ function createMeetingCard(m) {
     ? `<img class="meeting-card-thumb" src="${esc(m.thumbnail_url)}" alt="" loading="lazy">`
     : "";
 
+  // Asset icons for PrimeGov meetings
+  const assetHtml = m.primegov_id ? `<div class="asset-icons" id="assets-${m.meeting_id}"></div>` : "";
+
   card.innerHTML = `
     ${thumbHtml}
     <span class="meeting-card-date">${esc(displayDate)}</span>
@@ -367,11 +379,14 @@ function createMeetingCard(m) {
       <div class="meeting-card-title">${esc(m.title)}</div>
       <div class="meeting-card-sub">${subLine}</div>
       ${descLine}
+      ${assetHtml}
       <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">\u2014</span>
     <div class="meeting-card-actions">
       <button class="btn btn-ghost btn-sm edit-btn" data-meeting-id="${m.meeting_id}" title="Edit">&#x270E;</button>
+      <button class="btn btn-amber btn-sm download-btn" data-meeting-id="${m.meeting_id}" title="Download from PrimeGov" style="display:none">&#x2B07;</button>
+      <button class="btn btn-amber btn-sm transcode-btn" data-meeting-id="${m.meeting_id}" title="Transcode to 540p" style="display:none">540p</button>
       <button class="btn btn-ghost btn-sm process-btn" data-meeting-id="${m.meeting_id}" title="Process" style="display:none">&#x25B6;</button>
       <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete">&#x2715;</button>
     </div>
@@ -380,8 +395,13 @@ function createMeetingCard(m) {
   // Store meeting data on the card for edit dialog
   card._meetingData = m;
 
+  // Fetch PrimeGov asset status
+  if (m.primegov_id) {
+    fetchAssetStatus(m.meeting_id);
+  }
+
   card.addEventListener("click", e => {
-    if (e.target.closest(".delete-btn") || e.target.closest(".edit-btn") || e.target.closest(".process-btn")) return;
+    if (e.target.closest(".delete-btn") || e.target.closest(".edit-btn") || e.target.closest(".process-btn") || e.target.closest(".download-btn") || e.target.closest(".transcode-btn")) return;
     window.location.href = `/review/${m.meeting_id}`;
   });
 
@@ -411,6 +431,57 @@ function createMeetingCard(m) {
     } else {
       const err = await r.json().catch(() => ({}));
       alert(err.detail || "Failed to start processing.");
+    }
+  });
+
+  card.querySelector(".download-btn").addEventListener("click", async e => {
+    e.stopPropagation();
+    const btn = e.target.closest(".download-btn");
+    btn.disabled = true;
+    btn.textContent = "...";
+    try {
+      const r = await fetch(`/api/primegov/download/${m.meeting_id}`, { method: "POST" });
+      if (r.ok) {
+        btn.textContent = "\u23F3";
+        // Start polling for download progress
+        startPolling(m.meeting_id);
+      } else {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to start download.");
+        btn.textContent = "\u2B07";
+        btn.disabled = false;
+      }
+    } catch {
+      btn.textContent = "\u2B07";
+      btn.disabled = false;
+    }
+  });
+
+  card.querySelector(".transcode-btn").addEventListener("click", async e => {
+    e.stopPropagation();
+    if (!confirm(`Transcode "${m.title}" to 540p? The original file will be deleted.`)) return;
+    const btn = e.target.closest(".transcode-btn");
+    btn.disabled = true;
+    btn.textContent = "...";
+    try {
+      const r = await fetch(`/api/media/${m.meeting_id}/transcode`, { method: "POST" });
+      if (r.ok) {
+        btn.style.display = "none";
+        const badge = document.getElementById(`badge-${m.meeting_id}`);
+        if (badge) {
+          badge.textContent = "transcoding";
+          badge.className = "meeting-card-badge badge-processing";
+        }
+        startPolling(m.meeting_id);
+      } else {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to start transcode.");
+        btn.textContent = "540p";
+        btn.disabled = false;
+      }
+    } catch {
+      btn.textContent = "540p";
+      btn.disabled = false;
     }
   });
 
@@ -494,37 +565,71 @@ function renderProgressBar(progressEl, status) {
 function applyStatusToBadge(badge, status, meetingId) {
   if (!badge) return;
 
+  // Handle transcode states
+  if (status.transcode_status === "transcoding") {
+    badge.textContent = "transcoding";
+    badge.className = "meeting-card-badge badge-processing";
+    hideProcessBtn(meetingId);
+    hideTranscodeBtn(meetingId);
+    return;
+  }
+
   if (status.status === "error") {
     badge.textContent = "error";
     badge.className = "meeting-card-badge badge-error";
-    showProcessBtn(meetingId);
+    // Show transcode or process depending on transcode state
+    if (status.transcode_status === "pending") {
+      showTranscodeBtn(meetingId);
+    } else {
+      showProcessBtn(meetingId);
+    }
   } else if (status.status === "complete" && status.segment_count > 0) {
     badge.textContent = `${status.segment_count} segs`;
     badge.className = "meeting-card-badge badge-complete";
     hideProcessBtn(meetingId);
+    hideTranscodeBtn(meetingId);
   } else if (status.status === "processing") {
     badge.textContent = "processing";
     badge.className = "meeting-card-badge badge-processing";
     hideProcessBtn(meetingId);
+    hideTranscodeBtn(meetingId);
   } else if (status.status === "pending" && status.segment_count === 0) {
     // Check if this meeting has media but no segments (unprocessed)
-    checkUnprocessed(meetingId, badge);
+    checkUnprocessed(meetingId, badge, status.transcode_status);
   } else {
     badge.textContent = "no media";
     badge.className = "meeting-card-badge badge-pending";
   }
 }
 
-async function checkUnprocessed(meetingId, badge) {
+async function checkUnprocessed(meetingId, badge, transcodeStatus) {
   try {
     const r = await fetch(`/api/media/${meetingId}`);
     if (!r.ok) return;
     const files = await r.json();
-    const hasMedia = files.some(f => f.file_type === "video" || f.file_type === "audio");
-    if (hasMedia) {
-      badge.textContent = "unprocessed";
-      badge.className = "meeting-card-badge badge-unprocessed";
-      showProcessBtn(meetingId);
+    const sourceMedia = files.find(f =>
+      (f.file_type === "video" || f.file_type === "audio") &&
+      !f.file_path.includes("_extracted.wav")
+    );
+    if (sourceMedia) {
+      const ts = transcodeStatus || sourceMedia.transcode_status;
+      if (ts === "pending") {
+        badge.textContent = "needs transcode";
+        badge.className = "meeting-card-badge badge-downloadable";
+        showTranscodeBtn(meetingId);
+        hideProcessBtn(meetingId);
+      } else if (ts === "transcoding") {
+        badge.textContent = "transcoding";
+        badge.className = "meeting-card-badge badge-processing";
+        hideTranscodeBtn(meetingId);
+        hideProcessBtn(meetingId);
+        startPolling(meetingId);
+      } else {
+        badge.textContent = "unprocessed";
+        badge.className = "meeting-card-badge badge-unprocessed";
+        showProcessBtn(meetingId);
+        hideTranscodeBtn(meetingId);
+      }
     } else {
       badge.textContent = "no media";
       badge.className = "meeting-card-badge badge-pending";
@@ -543,6 +648,20 @@ function hideProcessBtn(meetingId) {
   const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
   if (!card) return;
   const btn = card.querySelector(".process-btn");
+  if (btn) btn.style.display = "none";
+}
+
+function showTranscodeBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".transcode-btn");
+  if (btn) btn.style.display = "";
+}
+
+function hideTranscodeBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".transcode-btn");
   if (btn) btn.style.display = "none";
 }
 
@@ -617,10 +736,15 @@ function closeAllDialogs() {
   document.getElementById("new-item-dialog").close();
   document.getElementById("edit-dialog").close();
   document.getElementById("ingest-dialog").close();
+  document.getElementById("primegov-dialog").close();
   document.getElementById("overlay").classList.remove("active");
   if (ingestPoller) {
     clearInterval(ingestPoller);
     ingestPoller = null;
+  }
+  if (primegovPoller) {
+    clearInterval(primegovPoller);
+    primegovPoller = null;
   }
 }
 
@@ -905,6 +1029,162 @@ function startIngestPolling() {
       }
     } catch { /* ignore polling errors */ }
   }, 2000);
+}
+
+// ── PrimeGov Discovery ──────────────────────────────────────────────────────
+
+async function openPrimeGovDialog() {
+  document.getElementById("primegov-dialog").showModal();
+  document.getElementById("overlay").classList.add("active");
+  document.getElementById("primegov-progress").style.display = "none";
+  document.getElementById("run-primegov-btn").disabled = false;
+  document.getElementById("run-primegov-btn").textContent = "Discover Meetings";
+
+  // Load committees
+  const container = document.getElementById("primegov-committees");
+  container.innerHTML = '<div class="loading-state-sm">Loading committees...</div>';
+
+  try {
+    const r = await fetch("/api/primegov/committees");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const committees = await r.json();
+
+    container.innerHTML = "";
+    committees.forEach(c => {
+      const label = document.createElement("label");
+      label.className = "primegov-committee-item";
+      const checked = c.id === 3 ? "checked" : "";
+      label.innerHTML = `
+        <input type="checkbox" value="${c.id}" ${checked}>
+        <span>${esc(c.name)}</span>
+      `;
+      container.appendChild(label);
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="loading-state-sm">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+async function handleRunPrimeGov() {
+  const btn = document.getElementById("run-primegov-btn");
+  btn.disabled = true;
+  btn.textContent = "Discovering...";
+
+  const progressArea = document.getElementById("primegov-progress");
+  progressArea.style.display = "";
+  document.getElementById("primegov-stage").textContent = "Starting discovery...";
+  document.getElementById("primegov-detail").textContent = "";
+
+  // Gather selected committee IDs
+  const checkboxes = document.querySelectorAll("#primegov-committees input[type=checkbox]:checked");
+  const ids = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+  if (ids.length === 0) {
+    alert("Please select at least one committee.");
+    btn.disabled = false;
+    btn.textContent = "Discover Meetings";
+    progressArea.style.display = "none";
+    return;
+  }
+
+  try {
+    const params = ids.map(id => `committee_ids=${id}`).join("&");
+    const r = await fetch(`/api/primegov/discover?${params}`, { method: "POST" });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+
+    startPrimeGovPolling();
+  } catch (err) {
+    document.getElementById("primegov-stage").textContent = `Error: ${err.message}`;
+    btn.disabled = false;
+    btn.textContent = "Discover Meetings";
+  }
+}
+
+function startPrimeGovPolling() {
+  if (primegovPoller) clearInterval(primegovPoller);
+
+  primegovPoller = setInterval(async () => {
+    try {
+      const r = await fetch("/api/primegov/discover/status");
+      if (!r.ok) return;
+      const status = await r.json();
+
+      document.getElementById("primegov-stage").textContent = status.stage || "Working...";
+      document.getElementById("primegov-detail").textContent = status.detail || "";
+
+      const bar = document.getElementById("primegov-bar");
+      if (status.pct > 0) {
+        bar.classList.remove("indeterminate");
+        bar.style.width = status.pct + "%";
+      }
+
+      if (status.pct >= 100 || status.error) {
+        clearInterval(primegovPoller);
+        primegovPoller = null;
+        document.getElementById("run-primegov-btn").disabled = false;
+        document.getElementById("run-primegov-btn").textContent = "Discover Meetings";
+
+        if (status.error) {
+          document.getElementById("primegov-stage").style.color = "var(--accent-red)";
+        }
+
+        // Refresh content
+        loadContent();
+        loadRecent();
+      }
+    } catch { /* ignore */ }
+  }, 2000);
+}
+
+async function fetchAssetStatus(meetingId) {
+  try {
+    const r = await fetch(`/api/primegov/assets/${meetingId}`);
+    if (!r.ok) return;
+    const assets = await r.json();
+
+    const assetsEl = document.getElementById(`assets-${meetingId}`);
+    if (assetsEl) {
+      const icons = [];
+      if (assets.video_url_available) {
+        icons.push(assets.video_downloaded
+          ? '<span class="asset-icon asset-downloaded" title="Video downloaded">&#x1F3AC;</span>'
+          : '<span class="asset-icon asset-available" title="Video available">&#x1F4F9;</span>'
+        );
+      }
+      if (assets.agenda_url_available) {
+        icons.push(assets.agenda_downloaded
+          ? '<span class="asset-icon asset-downloaded" title="Agenda downloaded">&#x1F4CB;</span>'
+          : '<span class="asset-icon asset-available" title="Agenda available">&#x1F4C4;</span>'
+        );
+      }
+      if (assets.minutes_url_available) {
+        icons.push(assets.minutes_downloaded
+          ? '<span class="asset-icon asset-downloaded" title="Minutes downloaded">&#x1F4DD;</span>'
+          : '<span class="asset-icon asset-available" title="Minutes available">&#x1F4C3;</span>'
+        );
+      }
+      assetsEl.innerHTML = icons.join(" ");
+    }
+
+    // Show download button if video is available but not downloaded
+    if (assets.video_url_available && !assets.video_downloaded) {
+      const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+      if (card) {
+        const dlBtn = card.querySelector(".download-btn");
+        if (dlBtn) dlBtn.style.display = "";
+      }
+
+      // Also set badge to "download"
+      const badge = document.getElementById(`badge-${meetingId}`);
+      if (badge && badge.textContent === "\u2014") {
+        badge.textContent = "download";
+        badge.className = "meeting-card-badge badge-downloadable";
+      }
+    }
+  } catch { /* ignore */ }
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────

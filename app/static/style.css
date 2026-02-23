@@ -2320,3 +2320,87 @@ html, body {
   background: rgba(245, 158, 11, 0.2);
   border-color: var(--accent-amber);
 }
+
+/* ── PrimeGov / Download Badges ────────────────────────────────────────────── */
+
+.badge-downloadable {
+  background: var(--accent-amber-dim);
+  color: var(--accent-amber);
+  cursor: pointer;
+}
+
+/* Asset status icons on meeting cards */
+.asset-icons {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.asset-icon {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+}
+
+.asset-available {
+  opacity: 0.4;
+}
+
+.asset-downloaded {
+  opacity: 1;
+}
+
+/* PrimeGov committee checkboxes */
+.primegov-committees {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.primegov-committee-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-primary);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.primegov-committee-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+}
+
+.primegov-committee-item input[type="checkbox"] {
+  accent-color: var(--accent-blue);
+}
+
+/* PrimeGov progress area */
+.primegov-progress-area {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.primegov-progress-stage {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-blue);
+  margin-bottom: 6px;
+}
+
+.primegov-progress-detail {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}

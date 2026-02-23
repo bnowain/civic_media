@@ -181,6 +181,45 @@ async def upload_video(
     return media
 
 
+# ── Transcode to 540p ─────────────────────────────────────────────────────────
+
+@router.post("/api/media/{meeting_id}/transcode", status_code=202)
+def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
+    """
+    Transcode a meeting's video to 540p (960x540).
+    Deletes the original file on success.
+    Must be done before processing the pipeline for large downloaded files.
+    """
+    meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+
+    media = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
+        )
+        .first()
+    )
+    if not media:
+        raise HTTPException(400, "No media file found for this meeting")
+
+    if media.transcode_status == "transcoding":
+        raise HTTPException(400, "Transcode already in progress")
+
+    if media.transcode_status == "transcoded":
+        raise HTTPException(400, "Already transcoded")
+
+    from app.tasks import transcode_video_task
+    media.transcode_status = "pending"
+    db.commit()
+
+    transcode_video_task.delay(meeting_id, media.media_id)
+    return {"meeting_id": meeting_id, "media_id": media.media_id, "status": "queued"}
+
+
 # ── Process unprocessed meeting ────────────────────────────────────────────────
 
 @router.post("/api/media/{meeting_id}/process", status_code=202)
@@ -330,14 +369,17 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         .count()
     )
 
-    has_media = (
+    source_media = (
         db.query(models.MediaFile)
         .filter(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
         )
         .first()
     )
+    has_media = source_media is not None
+    transcode_status = source_media.transcode_status if source_media else None
 
     progress = _read_progress(meeting_id)
     stage  = progress.get("stage")
@@ -356,6 +398,7 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
             progress_pct=pct or 0,
             detail=detail,
             error=True,
+            transcode_status=transcode_status,
         )
 
     # Check for stale progress (worker crashed without writing error)
@@ -379,17 +422,25 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
                     detail=f"Worker appears stalled (no update for {int(age)}s). "
                            f"Kill and restart the worker, or click Process to retry.",
                     error=True,
+                    transcode_status=transcode_status,
                 )
         except (ValueError, TypeError):
             pass
+
+    # "Transcode complete" at pct=100 is NOT pipeline complete
+    is_transcode_stage = stage and "transcode" in stage.lower()
 
     if not has_media:
         status = "pending"
         stage  = stage or "Waiting for upload"
         pct    = pct or 0
-    elif stage == "Complete" or pct == 100:
+    elif (stage == "Complete" or pct == 100) and not is_transcode_stage and segment_count > 0:
         status = "complete"
         pct    = 100
+    elif is_transcode_stage and pct == 100:
+        # Transcode finished, but pipeline hasn't run yet
+        status = "pending"
+        pct    = 0
     elif segment_count > 0 or stage:
         status = "processing"
         pct    = pct or 10
@@ -411,6 +462,7 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         stage=stage,
         progress_pct=pct,
         detail=detail,
+        transcode_status=transcode_status,
     )
 
 

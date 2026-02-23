@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey,
+    Boolean, Column, DateTime, Float, ForeignKey, Integer,
     LargeBinary, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -57,6 +57,10 @@ class Meeting(Base):
     description       = Column(Text, nullable=True)       # episode title, guest names
     source_url        = Column(Text, nullable=True)        # original audio URL (dedup key)
     thumbnail_url     = Column(Text, nullable=True)        # cover art URL from source
+    primegov_id       = Column(Integer, nullable=True, unique=True, index=True)
+    video_url         = Column(Text, nullable=True)        # Swagit video page URL
+    agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
+    minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL
     processed_at      = Column(DateTime, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
 
@@ -72,11 +76,12 @@ class Meeting(Base):
 class MediaFile(Base):
     __tablename__ = "media_files"
 
-    media_id   = Column(String, primary_key=True, default=_gen_id)
-    meeting_id = Column(String, ForeignKey("meetings.meeting_id"), nullable=False)
-    file_type  = Column(String, nullable=False)   # "video" | "audio"
-    file_path  = Column(String, nullable=False)
-    duration   = Column(Float)                    # seconds, populated after extraction
+    media_id         = Column(String, primary_key=True, default=_gen_id)
+    meeting_id       = Column(String, ForeignKey("meetings.meeting_id"), nullable=False)
+    file_type        = Column(String, nullable=False)   # "video" | "audio"
+    file_path        = Column(String, nullable=False)
+    duration         = Column(Float)                    # seconds, populated after extraction
+    transcode_status = Column(String, nullable=True)    # null | "pending" | "transcoding" | "transcoded"
 
     meeting = relationship("Meeting", back_populates="media_files")
 

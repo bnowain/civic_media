@@ -18,7 +18,8 @@ from app.database import engine
 from app import models
 from app.routers import (
     assignments, clips, documents, governing_bodies, ingest, library, media,
-    meetings, mentions, news, people, segments, system, tags, tagging, transcribe,
+    meetings, mentions, news, people, primegov, segments, system, tags, tagging,
+    transcribe,
 )
 
 # Create all tables (idempotent)
@@ -100,6 +101,7 @@ app.include_router(tags.router)
 app.include_router(mentions.router)
 app.include_router(tagging.router)
 app.include_router(ingest.router)
+app.include_router(primegov.router)
 app.include_router(system.router)
 
 # ── Static files ─────────────────────────────────────────────────────────────

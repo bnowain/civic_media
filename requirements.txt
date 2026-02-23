@@ -32,6 +32,8 @@ pytesseract>=0.3.10       # Tesseract must be installed via apt/brew
 # ── Scraping / Ingest ────────────────────────────────────────────────────────
 beautifulsoup4>=4.12.0
 requests>=2.31.0
+httpx>=0.27.0
+playwright>=1.40.0              # `playwright install chromium` after pip install
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 numpy>=1.26.0

@@ -339,6 +339,259 @@ def ingest_radio_task(self, source_id: str | None = None) -> dict:
 
 
 @celery_app.task(
+    bind=True,
+    name="tasks.transcode_video",
+    max_retries=0,
+)
+def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
+    """
+    Transcode a video to 540p (960x540) using ffmpeg.
+    Deletes the original file on success and updates MediaFile.
+    Writes progress to media/{meeting_id}/progress.json.
+    """
+    import re
+    import subprocess
+    from app.database import SessionLocal
+    from app import models
+
+    db = SessionLocal()
+    try:
+        media = db.query(models.MediaFile).filter_by(media_id=media_id).first()
+        if not media:
+            return {"error": "MediaFile not found", "status": "error"}
+
+        original_path = Path(media.file_path)
+        if not original_path.exists():
+            return {"error": "Source file not found", "status": "error"}
+
+        media.transcode_status = "transcoding"
+        db.commit()
+
+        # Build output path: same dir, add _540p suffix
+        stem = original_path.stem
+        out_path = original_path.parent / f"{stem}_540p.mp4"
+
+        progress_file = MEDIA_DIR / meeting_id / "progress.json"
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        progress_file.write_text(json.dumps({
+            "stage": "Transcoding to 540p",
+            "pct": 5,
+            "detail": f"Source: {original_path.name}",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
+
+        # ffmpeg: scale to 540p (height=540, width auto even),
+        # libx264 crf 23, aac audio, fast preset
+        cmd = [
+            "ffmpeg", "-y",
+            "-progress", "pipe:1", "-nostats",
+            "-i", str(original_path),
+            "-vf", "scale=-2:540",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+
+        # Get source duration for progress calculation
+        duration_sec = media.duration
+        if not duration_sec:
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet",
+                     "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1",
+                     str(original_path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    duration_sec = float(probe.stdout.strip())
+            except Exception:
+                pass
+        duration_us = (duration_sec or 3600) * 1_000_000
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        for line in proc.stdout:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded.startswith("out_time_us="):
+                val = decoded.split("=", 1)[1].strip()
+                if val.isdigit() and int(val) > 0 and duration_us > 0:
+                    pct = min(95, int(int(val) / duration_us * 100))
+                    try:
+                        progress_file.write_text(json.dumps({
+                            "stage": "Transcoding to 540p",
+                            "pct": pct,
+                            "detail": f"{pct}% complete",
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }))
+                    except Exception:
+                        pass
+
+        proc.wait(timeout=7200)  # 2 hour timeout
+
+        if proc.returncode != 0:
+            media.transcode_status = "pending"
+            db.commit()
+            _write_error_progress(MEDIA_DIR, meeting_id, "Transcode failed (ffmpeg error)")
+            return {"error": "ffmpeg failed", "status": "error"}
+
+        if not out_path.exists() or out_path.stat().st_size < 1000:
+            media.transcode_status = "pending"
+            db.commit()
+            _write_error_progress(MEDIA_DIR, meeting_id, "Transcoded file too small or missing")
+            return {"error": "Output file invalid", "status": "error"}
+
+        # Get new duration
+        new_duration = None
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet",
+                 "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1",
+                 str(out_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                new_duration = float(probe.stdout.strip())
+        except Exception:
+            pass
+
+        # Delete original file
+        original_size = original_path.stat().st_size
+        new_size = out_path.stat().st_size
+        original_path.unlink()
+
+        # Update MediaFile record
+        media.file_path = str(out_path)
+        media.transcode_status = "transcoded"
+        if new_duration:
+            media.duration = new_duration
+        db.commit()
+
+        # Write completion progress
+        progress_file.write_text(json.dumps({
+            "stage": "Transcode complete",
+            "pct": 100,
+            "detail": (
+                f"540p: {new_size / (1024*1024):.0f} MB "
+                f"(was {original_size / (1024*1024):.0f} MB, "
+                f"saved {(1 - new_size/original_size)*100:.0f}%)"
+            ),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
+
+        logger.info(
+            "Transcoded %s: %s → %s (%.0f MB → %.0f MB)",
+            meeting_id, original_path.name, out_path.name,
+            original_size / (1024*1024), new_size / (1024*1024),
+        )
+        return {
+            "meeting_id": meeting_id,
+            "status": "transcoded",
+            "original_size": original_size,
+            "new_size": new_size,
+        }
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("transcode_video_task failed for meeting %s", meeting_id)
+        try:
+            media = db.query(models.MediaFile).filter_by(media_id=media_id).first()
+            if media:
+                media.transcode_status = "pending"
+                db.commit()
+        except Exception:
+            pass
+        _write_error_progress(MEDIA_DIR, meeting_id, str(exc))
+        return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="tasks.primegov_discover",
+    max_retries=0,
+)
+def primegov_discover_task(
+    committee_ids: list[int] | None = None,
+    years: list[int] | None = None,
+) -> dict:
+    """
+    Run PrimeGov meeting discovery: scrape API → deduplicate → create/update
+    Meeting records.  Does NOT download any assets.
+    """
+    from app.database import SessionLocal
+    from app.services.primegov.discovery import run_discovery
+
+    db = SessionLocal()
+    try:
+        return run_discovery(db, committee_ids, years)
+    except Exception:
+        db.rollback()
+        logger.exception("primegov_discover_task failed")
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="tasks.primegov_download",
+    max_retries=1,
+    default_retry_delay=30,
+)
+def primegov_download_task(
+    self,
+    meeting_id: str,
+    download_video: bool = True,
+    download_agenda: bool = True,
+    download_minutes: bool = True,
+    auto_process: bool = False,
+) -> dict:
+    """
+    Download PrimeGov assets (video, agenda, minutes) for a single meeting.
+    Optionally triggers process_video_task after video download.
+    """
+    from app.database import SessionLocal
+    from app.services.primegov.downloader import (
+        download_video as dl_video,
+        download_document as dl_doc,
+    )
+
+    db = SessionLocal()
+    results = {}
+    try:
+        if download_video:
+            results["video"] = dl_video(db, meeting_id)
+
+        if download_agenda:
+            results["agenda"] = dl_doc(db, meeting_id, "agenda")
+
+        if download_minutes:
+            results["minutes"] = dl_doc(db, meeting_id, "minutes")
+
+        # Auto-process if video was downloaded successfully
+        if auto_process and results.get("video", {}).get("status") == "complete":
+            media_id = results["video"].get("media_id")
+            if media_id:
+                process_video_task.delay(meeting_id, media_id)
+                results["auto_process"] = "queued"
+
+        return {"meeting_id": meeting_id, "results": results}
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("primegov_download_task failed for meeting %s", meeting_id)
+        try:
+            raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="tasks.rerun_voiceprints",
     max_retries=0,
 )
