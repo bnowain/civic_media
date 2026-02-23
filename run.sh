@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # run.sh — Start the Civic Media Processing Tool
 #
 # Prerequisites (install once):
@@ -72,18 +72,44 @@ else
   echo "   The pipeline tasks will not run without Redis."
 fi
 
-# ── Start Celery worker ───────────────────────────────────────────────────────
+# ── Start Celery worker with auto-restart watchdog ────────────────────────────
 
-echo "▶ Starting Celery worker..."
-celery -A app.worker.celery_app worker \
-  --loglevel=info \
-  --concurrency=1 \
-  --queues=celery \
-  --logfile=celery.log \
-  --detach \
-  --pidfile=celery.pid
+CELERY_WATCHDOG_PID=""
 
-echo "   Celery worker started (log: celery.log)"
+celery_watchdog() {
+  while true; do
+    echo "[$(date)] Starting Celery worker..."
+    celery -A app.worker.celery_app worker \
+      --loglevel=info \
+      --concurrency=1 \
+      --queues=celery \
+      --logfile=celery.log \
+      --pidfile=celery.pid || true
+    echo "[$(date)] Worker exited. Restarting in 5 seconds..."
+    sleep 5
+  done
+}
+
+cleanup() {
+  echo ""
+  echo "▶ Shutting down..."
+  if [[ -n "$CELERY_WATCHDOG_PID" ]]; then
+    kill "$CELERY_WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [[ -f celery.pid ]]; then
+    kill "$(cat celery.pid)" 2>/dev/null || true
+    rm -f celery.pid
+  fi
+  exit 0
+}
+
+trap cleanup SIGINT SIGTERM EXIT
+
+echo "▶ Starting Celery worker (with auto-restart watchdog)..."
+celery_watchdog &
+CELERY_WATCHDOG_PID=$!
+sleep 2
+echo "   Celery worker started (log: celery.log, watchdog PID: $CELERY_WATCHDOG_PID)"
 
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 
@@ -91,8 +117,7 @@ echo "▶ Starting FastAPI server at http://${HOST}:${PORT}"
 echo ""
 echo "  Open your browser: http://localhost:${PORT}"
 echo ""
-echo "  Press Ctrl+C to stop the server."
-echo "  The Celery worker will continue running (kill via: cat celery.pid | xargs kill)"
+echo "  Press Ctrl+C to stop everything."
 echo ""
 
 uvicorn app.main:app \

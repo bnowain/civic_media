@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 def _write_progress(newscast_id: str, stage: str, pct: int, detail: str = "") -> None:
     p = TV_NEWS_DIR / newscast_id / "progress.json"
     try:
-        p.write_text(json.dumps({"stage": stage, "pct": pct, "detail": detail}))
+        p.write_text(json.dumps({
+            "stage": stage, "pct": pct, "detail": detail,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
     except Exception as exc:
         logger.warning("Could not write progress.json: %s", exc)
 

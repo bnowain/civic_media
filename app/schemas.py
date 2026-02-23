@@ -179,6 +179,7 @@ class PipelineStatus(BaseModel):
     stage: Optional[str]     # Human-readable current step
     progress_pct: Optional[int]   # 0-100
     detail: Optional[str]         # Extra info e.g. "1200/1800 segments"
+    error: bool = False
 
 
 # ── TV News ──────────────────────────────────────────────────────────────────

@@ -448,7 +448,20 @@ function renderProgressBar(progressEl, status) {
   const stage = status.stage || "";
   const detail = status.detail || "";
   const isComplete = status.status === "complete";
-  const indeterminate = !isComplete && pct === 0 && stage !== "";
+  const isError = status.status === "error";
+  const indeterminate = !isComplete && !isError && pct === 0 && stage !== "";
+
+  if (isError) {
+    progressEl.innerHTML = `
+      <div class="pipeline-progress pipeline-error">
+        <div class="progress-header">
+          <span class="progress-stage" style="color: var(--red-500, #ef4444)">Error: ${esc(stage)}</span>
+        </div>
+        ${detail ? `<div class="progress-detail" style="color: var(--red-400, #f87171)">${esc(detail)}</div>` : ""}
+      </div>
+    `;
+    return;
+  }
 
   progressEl.innerHTML = `
     <div class="pipeline-progress">
@@ -468,7 +481,11 @@ function renderProgressBar(progressEl, status) {
 function applyStatusToBadge(badge, status, meetingId) {
   if (!badge) return;
 
-  if (status.status === "complete" && status.segment_count > 0) {
+  if (status.status === "error") {
+    badge.textContent = "error";
+    badge.className = "meeting-card-badge badge-error";
+    showProcessBtn(meetingId);
+  } else if (status.status === "complete" && status.segment_count > 0) {
     badge.textContent = `${status.segment_count} segs`;
     badge.className = "meeting-card-badge badge-complete";
     hideProcessBtn(meetingId);
@@ -531,7 +548,10 @@ async function updateMeetingCardStatus(meetingId) {
 
   applyStatusToBadge(badge, status, meetingId);
 
-  if (status.status === "processing" && progressEl) {
+  if (status.status === "error" && progressEl) {
+    renderProgressBar(progressEl, status);
+    // Stop polling on error — user must retry manually
+  } else if (status.status === "processing" && progressEl) {
     renderProgressBar(progressEl, status);
     startPolling(meetingId);
   } else if (status.status === "complete" && progressEl) {
@@ -561,7 +581,7 @@ function startPolling(meetingId) {
     applyStatusToBadge(badge, status, meetingId);
     if (progressEl) renderProgressBar(progressEl, status);
 
-    if (status.status === "complete") {
+    if (status.status === "complete" || status.status === "error") {
       clearInterval(activePollers[meetingId]);
       delete activePollers[meetingId];
     }

@@ -62,6 +62,10 @@ CLIP_MIN_DURATION   = 0.5     # seconds
 CLIP_MAX_DURATION   = 3600.0  # seconds
 CLIP_CLEANUP_HOURS  = 24      # hours before auto-cleanup of exported files
 
+# Progress staleness detection
+PROGRESS_STALE_SECONDS = 600    # 10 min: status endpoint reports "error" if progress.json is older
+ORPHAN_RECOVERY_SECONDS = 120   # 2 min: worker startup re-queues orphaned in-progress tasks
+
 # Ensure all directories exist at import time
 for _d in [DATABASE_PATH.parent, MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR, TV_NEWS_DIR, CLIPS_DIR, COMSKIP_INI_DIR]:
     _d.mkdir(parents=True, exist_ok=True)

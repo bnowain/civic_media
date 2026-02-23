@@ -28,16 +28,32 @@ if (-not $hfToken) {
     Write-Host ""
 }
 
-# ── 3. Celery worker in a new CMD window ─────────────────────────────────────
+# ── 3. Celery worker with auto-restart watchdog ─────────────────────────────
 
-Write-Host "  [2/3] Starting Celery worker..." -ForegroundColor White
+Write-Host "  [2/3] Starting Celery worker (with watchdog)..." -ForegroundColor White
 
-$celeryCmd = "cd /d `"$Root`" && `"$Root\venv\Scripts\activate.bat`" && set PYTHONPATH=. && set HF_TOKEN=$hfToken && celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo"
+$watchdogPath = "$Root\.celery_watchdog.cmd"
+$watchdogContent = @"
+@echo off
+title Civic Media - Celery Worker (watchdog)
+:restart
+cd /d "$Root"
+call "$Root\venv\Scripts\activate.bat"
+set PYTHONPATH=.
+set HF_TOKEN=$hfToken
+echo [%date% %time%] Starting Celery worker...
+celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo
+echo.
+echo [%date% %time%] Worker exited. Restarting in 5 seconds... (Ctrl+C to stop)
+timeout /t 5 /nobreak >nul
+goto restart
+"@
 
-Start-Process cmd -ArgumentList "/K", $celeryCmd
+[System.IO.File]::WriteAllText($watchdogPath, $watchdogContent)
+Start-Process cmd -ArgumentList "/K", $watchdogPath
 
 Start-Sleep -Seconds 2
-Write-Host "        Celery worker started (check the new window)." -ForegroundColor Green
+Write-Host "        Celery worker started with auto-restart watchdog." -ForegroundColor Green
 
 # ── 4. FastAPI server in this window ─────────────────────────────────────────
 

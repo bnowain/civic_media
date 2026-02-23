@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -49,7 +50,10 @@ def _write_progress(meeting_id: str, stage: str, pct: int, detail: str = "") -> 
     """Write progress.json for UI polling."""
     p = MEDIA_DIR / meeting_id / "progress.json"
     try:
-        p.write_text(json.dumps({"stage": stage, "pct": pct, "detail": detail}))
+        p.write_text(json.dumps({
+            "stage": stage, "pct": pct, "detail": detail,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
     except Exception as exc:
         logger.warning("Could not write progress.json: %s", exc)
 

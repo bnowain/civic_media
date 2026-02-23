@@ -317,6 +317,9 @@ def _read_progress(meeting_id: str) -> dict:
 
 @router.get("/api/media/{meeting_id}/status", response_model=schemas.PipelineStatus)
 def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
+    from datetime import datetime, timezone
+    from app.config import PROGRESS_STALE_SECONDS
+
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
@@ -340,6 +343,45 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     stage  = progress.get("stage")
     pct    = progress.get("pct")
     detail = progress.get("detail", "")
+    is_error = progress.get("error", False)
+
+    # Check for explicit error state in progress.json
+    if is_error:
+        return schemas.PipelineStatus(
+            meeting_id=meeting_id,
+            segment_count=segment_count,
+            task_id=None,
+            status="error",
+            stage=stage or "Error",
+            progress_pct=pct or 0,
+            detail=detail,
+            error=True,
+        )
+
+    # Check for stale progress (worker crashed without writing error)
+    updated_at_str = progress.get("updated_at")
+    if (updated_at_str
+        and stage not in (None, "Complete", "")
+        and pct != 100):
+        try:
+            updated_at = datetime.fromisoformat(updated_at_str)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+            if age > PROGRESS_STALE_SECONDS:
+                return schemas.PipelineStatus(
+                    meeting_id=meeting_id,
+                    segment_count=segment_count,
+                    task_id=None,
+                    status="error",
+                    stage=stage,
+                    progress_pct=pct,
+                    detail=f"Worker appears stalled (no update for {int(age)}s). "
+                           f"Kill and restart the worker, or click Process to retry.",
+                    error=True,
+                )
+        except (ValueError, TypeError):
+            pass
 
     if not has_media:
         status = "pending"
@@ -351,6 +393,11 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     elif segment_count > 0 or stage:
         status = "processing"
         pct    = pct or 10
+    elif meeting and meeting.processed_at is None and segment_count == 0:
+        # Media exists but never processed — ready to process
+        status = "pending"
+        stage  = "Ready to process"
+        pct    = 0
     else:
         status = "processing"
         stage  = stage or "Starting..."

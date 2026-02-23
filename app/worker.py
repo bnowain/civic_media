@@ -3,9 +3,17 @@ Celery worker entry point.
 Import this module to get a configured Celery application instance.
 """
 
-from celery import Celery
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
 
-from app.config import CELERY_BACKEND, CELERY_BROKER
+from celery import Celery
+from celery.signals import worker_ready
+
+from app.config import CELERY_BACKEND, CELERY_BROKER, MEDIA_DIR, ORPHAN_RECOVERY_SECONDS
+
+logger = logging.getLogger(__name__)
 
 celery_app = Celery(
     "civic_media",
@@ -28,3 +36,81 @@ celery_app.conf.update(
     # Keep results for 24 hours
     result_expires=86400,
 )
+
+
+@worker_ready.connect
+def recover_orphaned_tasks(sender=None, **kwargs):
+    """
+    On worker startup, scan for meetings whose progress.json indicates
+    they were mid-pipeline when the worker died. Re-queue them.
+    """
+    if not MEDIA_DIR.exists():
+        return
+
+    now = datetime.now(timezone.utc)
+    recovered = 0
+
+    for progress_file in MEDIA_DIR.glob("*/progress.json"):
+        try:
+            data = json.loads(progress_file.read_text())
+        except Exception:
+            continue
+
+        stage = data.get("stage", "")
+        pct = data.get("pct", 0)
+        is_error = data.get("error", False)
+
+        # Skip completed, error, or not-yet-started tasks
+        if stage in ("Complete", "Error", "") or pct == 100 or is_error:
+            continue
+
+        # Check staleness via updated_at
+        updated_at_str = data.get("updated_at")
+        if not updated_at_str:
+            continue
+
+        try:
+            updated_at = datetime.fromisoformat(updated_at_str)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        age_seconds = (now - updated_at).total_seconds()
+        if age_seconds < ORPHAN_RECOVERY_SECONDS:
+            continue
+
+        # This task is stale — find the meeting and re-queue
+        meeting_id = progress_file.parent.name
+
+        try:
+            from app.database import SessionLocal
+            from app import models
+
+            db = SessionLocal()
+            try:
+                # Find source media (not extracted audio)
+                source_media = (
+                    db.query(models.MediaFile)
+                    .filter(
+                        models.MediaFile.meeting_id == meeting_id,
+                        models.MediaFile.file_type.in_(["video", "audio"]),
+                        ~models.MediaFile.file_path.like("%_extracted.wav"),
+                    )
+                    .first()
+                )
+                if source_media:
+                    from app.tasks import process_video_task
+                    process_video_task.delay(meeting_id, source_media.media_id)
+                    recovered += 1
+                    logger.info(
+                        "Orphan recovery: re-queued meeting %s (was at '%s' %d%%, stale %.0fs)",
+                        meeting_id, stage, pct, age_seconds,
+                    )
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("Orphan recovery failed for meeting %s: %s", meeting_id, exc)
+
+    if recovered:
+        logger.info("Orphan recovery: re-queued %d stale tasks", recovered)

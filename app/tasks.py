@@ -14,19 +14,39 @@ All tasks use their own DB sessions (never share across task boundaries).
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.worker import celery_app
+from app.config import MEDIA_DIR, TV_NEWS_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _write_error_progress(base_dir: Path, item_id: str, error_msg: str) -> None:
+    """Write an error state to progress.json so the UI can detect failure."""
+    p = base_dir / item_id / "progress.json"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "stage": "Error",
+            "pct": 0,
+            "detail": str(error_msg)[:500],
+            "error": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
+    except Exception as exc:
+        logger.warning("Could not write error progress.json: %s", exc)
 
 
 @celery_app.task(
     bind=True,
     name="tasks.process_video",
-    max_retries=1,
-    default_retry_delay=15,
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=120,
 )
 def process_video_task(self, meeting_id: str, media_id: str) -> dict:
     """
@@ -46,8 +66,14 @@ def process_video_task(self, meeting_id: str, media_id: str) -> dict:
 
     except Exception as exc:
         db.rollback()
-        logger.exception("process_video_task failed for meeting %s", meeting_id)
-        raise self.retry(exc=exc)
+        logger.exception("process_video_task failed for meeting %s (attempt %d/%d)",
+                         meeting_id, self.request.retries + 1, self.max_retries + 1)
+        try:
+            raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            logger.error("process_video_task: all retries exhausted for meeting %s", meeting_id)
+            _write_error_progress(MEDIA_DIR, meeting_id, str(exc))
+            return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
     finally:
         db.close()
 
@@ -188,8 +214,9 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
 @celery_app.task(
     bind=True,
     name="tasks.process_newscast",
-    max_retries=1,
-    default_retry_delay=15,
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=120,
 )
 def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = False) -> dict:
     """Run the full TV news processing pipeline for a newscast."""
@@ -216,8 +243,14 @@ def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = 
                 db.commit()
         except Exception:
             pass
-        logger.exception("process_newscast_task failed for newscast %s", newscast_id)
-        raise self.retry(exc=exc)
+        logger.exception("process_newscast_task failed for newscast %s (attempt %d/%d)",
+                         newscast_id, self.request.retries + 1, self.max_retries + 1)
+        try:
+            raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            logger.error("process_newscast_task: all retries exhausted for newscast %s", newscast_id)
+            _write_error_progress(TV_NEWS_DIR, newscast_id, str(exc))
+            return {"newscast_id": newscast_id, "status": "error", "error": str(exc)[:500]}
     finally:
         db.close()
 
