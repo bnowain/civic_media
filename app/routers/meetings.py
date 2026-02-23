@@ -60,6 +60,18 @@ def get_meeting(meeting_id: str, db: Session = Depends(get_db)):
     return m
 
 
+@router.patch("/{meeting_id}", response_model=schemas.MeetingOut)
+def update_meeting(meeting_id: str, payload: schemas.MeetingUpdate, db: Session = Depends(get_db)):
+    m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if not m:
+        raise HTTPException(404, "Meeting not found")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(m, field, value)
+    db.commit()
+    db.refresh(m)
+    return m
+
+
 @router.delete("/{meeting_id}", status_code=204)
 def delete_meeting(meeting_id: str, db: Session = Depends(get_db)):
     """

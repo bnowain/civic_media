@@ -35,10 +35,31 @@ class MeetingCreate(BaseModel):
     title: str
     category: str = "meeting"
     governing_body_id: Optional[str] = None
+    description: Optional[str] = None
+    source_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
     def validate_date(cls, v: str) -> str:
+        import re
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+            raise ValueError("meeting_date must be YYYY-MM-DD")
+        return v
+
+
+class MeetingUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    meeting_date: Optional[str] = None
+    governing_body: Optional[str] = None
+    meeting_type: Optional[str] = None
+
+    @field_validator("meeting_date")
+    @classmethod
+    def validate_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         import re
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             raise ValueError("meeting_date must be YYYY-MM-DD")
@@ -344,3 +365,33 @@ class RecentMediaItem(BaseModel):
     created_at: datetime
     status: Optional[str] = None
     subtitle: Optional[str] = None
+
+
+# ── Ingest Sources ──────────────────────────────────────────────────────────
+
+class IngestSourceOut(BaseModel):
+    source_id: str
+    name: str
+    source_type: str
+    config_json: Optional[str]
+    last_scraped_at: Optional[datetime]
+    last_scraped_count: Optional[float]
+    enabled: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class IngestRunResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+
+class IngestStatusResponse(BaseModel):
+    running: bool
+    source_id: Optional[str] = None
+    episodes_found: int = 0
+    episodes_downloaded: int = 0
+    stage: Optional[str] = None
+    error: Optional[str] = None

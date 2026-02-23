@@ -2016,6 +2016,38 @@ html, body {
   color: var(--accent-red);
 }
 
+.clip-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.clip-progress-track {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.clip-progress-fill {
+  height: 100%;
+  background: var(--accent-blue);
+  border-radius: 2px;
+  transition: width 0.8s ease;
+  min-width: 2px;
+}
+
+.clip-progress-pct {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 30px;
+  text-align: right;
+}
+
 .clip-download-link {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2147,4 +2179,144 @@ html, body {
 .clip-action-btn {
   padding: 3px 8px;
   font-size: 10px;
+}
+
+/* ── Ingest System ─────────────────────────────────────────────────────────── */
+
+/* Unprocessed badge */
+.badge-unprocessed {
+  background: var(--accent-amber-dim);
+  color: var(--accent-amber);
+}
+
+/* Meeting card thumbnail */
+.meeting-card-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.meeting-card-thumb-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Meeting card description line */
+.meeting-card-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Card action buttons row */
+.meeting-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Edit meeting dialog */
+.edit-dialog .form-group {
+  margin-bottom: 0;
+}
+
+/* Ingest dialog */
+.ingest-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ingest-source-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ingest-source-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.ingest-source-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.ingest-source-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.ingest-source-toggle {
+  flex-shrink: 0;
+}
+
+.ingest-progress-area {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ingest-progress-stage {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-blue);
+  margin-bottom: 6px;
+}
+
+.ingest-progress-counts {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Library toolbar with ingest button */
+.library-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-amber {
+  background: var(--accent-amber-dim);
+  color: var(--accent-amber);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.btn-amber:hover {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: var(--accent-amber);
 }

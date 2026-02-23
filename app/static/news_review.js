@@ -583,29 +583,42 @@ async function createNewsClip() {
 
 async function pollNewsClipStatus(clipId, statusEl, btn) {
   let attempts = 0;
-  const MAX = 120;
+  const MAX = 180;
+
+  // Show progress bar
+  statusEl.innerHTML = `
+    <div class="clip-progress">
+      <div class="clip-progress-track">
+        <div class="clip-progress-fill" id="clip-progress-fill" style="width:0%"></div>
+      </div>
+      <span class="clip-progress-pct" id="clip-progress-pct">0%</span>
+    </div>`;
+  statusEl.className = "clip-status";
 
   const timer = setInterval(async () => {
     attempts++;
     try {
-      const r = await fetch(`/api/clips/${clipId}`);
+      const r = await fetch(`/api/clips/${clipId}/progress`);
       if (!r.ok) throw new Error("Poll failed");
-      const clip = await r.json();
+      const data = await r.json();
 
-      if (clip.export_status === "ready") {
+      if (data.status === "ready") {
         clearInterval(timer);
         statusEl.innerHTML = `<a href="/api/clips/${clipId}/download" class="clip-download-link">&#8615; Download</a>`;
         statusEl.className = "clip-status clip-status-ready";
         btn.disabled = false;
         btn.textContent = "Export Clip";
-      } else if (clip.export_status === "error") {
+      } else if (data.status === "error") {
         clearInterval(timer);
-        statusEl.textContent = `Error: ${clip.export_error || "export failed"}`;
+        statusEl.textContent = `Error: ${data.error || "export failed"}`;
         statusEl.className = "clip-status clip-status-error";
         btn.disabled = false;
         btn.textContent = "Export Clip";
       } else {
-        statusEl.textContent = "exporting...";
+        const fill = document.getElementById("clip-progress-fill");
+        const pctEl = document.getElementById("clip-progress-pct");
+        if (fill) fill.style.width = `${data.pct || 0}%`;
+        if (pctEl) pctEl.textContent = `${data.pct || 0}%`;
       }
     } catch { /* ignore */ }
 
@@ -615,7 +628,7 @@ async function pollNewsClipStatus(clipId, statusEl, btn) {
       btn.disabled = false;
       btn.textContent = "Export Clip";
     }
-  }, 2000);
+  }, 1000);
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────

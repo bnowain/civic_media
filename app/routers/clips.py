@@ -1,20 +1,23 @@
 """
 Clip endpoints.
 
-POST   /api/clips/                    — Create clip + thumbnail + dispatch export.
+POST   /api/clips/                    — Create clip + thumbnail + start export.
 GET    /api/clips/                    — List clips (optional source_type, source_id filters).
 GET    /api/clips/{clip_id}           — Get single clip.
 PATCH  /api/clips/{clip_id}           — Update title/notes.
 DELETE /api/clips/{clip_id}           — Delete clip + files.
 GET    /api/clips/{clip_id}/download  — Serve export file, set downloaded_at.
 GET    /api/clips/{clip_id}/thumbnail — Serve thumbnail image.
-POST   /api/clips/{clip_id}/re-export — Re-dispatch export task.
+POST   /api/clips/{clip_id}/re-export — Re-start export in background thread.
 POST   /api/clips/{clip_id}/cover-image — Upload cover image for audio-to-MP4.
 POST   /api/clips/cleanup             — Delete old export files, keep metadata.
 """
 
+import json
+import logging
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -28,7 +31,9 @@ from app.config import (
     CLIP_CLEANUP_HOURS, CLIP_MAX_DURATION, CLIP_MIN_DURATION,
     CLIPS_DIR, MEDIA_DIR,
 )
-from app.database import get_db
+from app.database import SessionLocal, get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/clips", tags=["clips"])
 
@@ -114,6 +119,166 @@ def _generate_thumbnail(
     return str(thumb_path) if thumb_path.exists() else None
 
 
+def _export_clip_bg(clip_id: str) -> None:
+    """
+    Run FFmpeg clip export in a background thread.
+
+    Uses its own DB session. Writes progress.json for the frontend to poll.
+    Progress is read from FFmpeg's stdout via ``-progress pipe:1`` (Windows
+    holds an exclusive lock on progress *files*, so pipe is the only
+    reliable approach).
+    """
+    db = SessionLocal()
+    try:
+        clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
+        if not clip:
+            logger.error("_export_clip_bg: clip %s not found", clip_id)
+            return
+
+        clip.export_status = "exporting"
+        clip.export_error = None
+        db.commit()
+
+        clip_dir = CLIPS_DIR / clip_id
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        source = clip.source_media_path
+
+        progress_json = clip_dir / "progress.json"
+
+        # Build FFmpeg command — progress goes to stdout via pipe:1
+        if clip.cover_image_path and Path(clip.cover_image_path).exists():
+            out_path = clip_dir / "clip.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
+                "-loop", "1", "-i", clip.cover_image_path,
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:v", "libx264", "-tune", "stillimage",
+                "-c:a", "aac", "-b:a", "128k",
+                "-shortest", "-pix_fmt", "yuv420p",
+                str(out_path),
+            ]
+        elif clip.media_type == "video":
+            out_path = clip_dir / "clip.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ]
+        else:
+            out_path = clip_dir / "clip.mp3"
+            cmd = [
+                "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
+                "-ss", str(clip.start_time),
+                "-to", str(clip.end_time),
+                "-i", source,
+                "-c:a", "libmp3lame", "-q:a", "2",
+                str(out_path),
+            ]
+
+        # Write initial progress
+        progress_json.write_text(json.dumps({"pct": 0, "status": "exporting"}))
+        duration_us = clip.duration * 1_000_000
+
+        # stderr to DEVNULL — errors detected via returncode
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        # Read progress from stdout (pipe:1) and update progress.json
+        for line in proc.stdout:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded.startswith("out_time_us="):
+                val = decoded.split("=", 1)[1].strip()
+                if val.isdigit() and int(val) > 0 and duration_us > 0:
+                    pct = min(99, int(int(val) / duration_us * 100))
+                    try:
+                        progress_json.write_text(json.dumps({
+                            "pct": pct, "status": "exporting",
+                        }))
+                    except Exception:
+                        pass
+
+        proc.wait(timeout=600)
+
+        # Clean up progress file
+        if progress_json.exists():
+            progress_json.unlink()
+
+        if proc.returncode != 0:
+            clip.export_status = "error"
+            clip.export_error = f"FFmpeg exited with code {proc.returncode}"
+            db.commit()
+            logger.error("_export_clip_bg FFmpeg error for %s: exit code %d", clip_id, proc.returncode)
+            return
+
+        clip.export_path = str(out_path)
+        clip.export_status = "ready"
+        db.commit()
+        logger.info("_export_clip_bg complete: %s -> %s", clip_id, out_path)
+
+        # Auto-cleanup old exports so abandoned clips don't pile up
+        _run_cleanup(db)
+
+    except Exception as exc:
+        db.rollback()
+        try:
+            clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
+            if clip:
+                clip.export_status = "error"
+                clip.export_error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+        logger.exception("_export_clip_bg failed for clip %s", clip_id)
+    finally:
+        db.close()
+
+
+def _run_cleanup(db: Session) -> int:
+    """Delete export files for downloaded or expired clips. Returns count cleaned."""
+    cutoff = datetime.utcnow() - timedelta(hours=CLIP_CLEANUP_HOURS)
+    cleaned = 0
+
+    clips = (
+        db.query(models.Clip)
+        .filter(
+            models.Clip.export_status == "ready",
+            models.Clip.export_path.isnot(None),
+        )
+        .all()
+    )
+
+    for clip in clips:
+        should_clean = (
+            clip.downloaded_at is not None
+            or clip.created_at < cutoff
+        )
+        if not should_clean:
+            continue
+
+        if clip.export_path:
+            p = Path(clip.export_path)
+            if p.exists():
+                p.unlink()
+
+        clip.export_status = "cleaned"
+        clip.export_path = None
+        cleaned += 1
+
+    db.commit()
+    return cleaned
+
+
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=schemas.ClipOut, status_code=201)
@@ -164,9 +329,10 @@ def create_clip(payload: schemas.ClipCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(clip)
 
-    # Dispatch export task
-    from app.tasks import export_clip_task
-    export_clip_task.delay(clip.clip_id)
+    # Start export immediately in a background thread (no Celery queue)
+    threading.Thread(
+        target=_export_clip_bg, args=(clip.clip_id,), daemon=True,
+    ).start()
 
     return clip
 
@@ -225,6 +391,33 @@ def delete_clip(clip_id: str, db: Session = Depends(get_db)):
 
 
 # ── Download & Thumbnail ─────────────────────────────────────────────────────
+
+@router.get("/{clip_id}/progress")
+def clip_progress(clip_id: str, db: Session = Depends(get_db)):
+    """Return export progress (0-100 pct) from the FFmpeg progress file."""
+    import json as _json
+
+    clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+
+    if clip.export_status == "ready":
+        return {"pct": 100, "status": "ready"}
+    if clip.export_status == "error":
+        return {"pct": 0, "status": "error", "error": clip.export_error}
+    if clip.export_status != "exporting":
+        return {"pct": 0, "status": clip.export_status or "pending"}
+
+    progress_file = CLIPS_DIR / clip_id / "progress.json"
+    if progress_file.exists():
+        try:
+            data = _json.loads(progress_file.read_text())
+            return {"pct": data.get("pct", 0), "status": "exporting"}
+        except Exception:
+            pass
+
+    return {"pct": 0, "status": "exporting"}
+
 
 @router.get("/{clip_id}/download")
 def download_clip(clip_id: str, db: Session = Depends(get_db)):
@@ -287,8 +480,10 @@ def re_export_clip(clip_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(clip)
 
-    from app.tasks import export_clip_task
-    export_clip_task.delay(clip.clip_id)
+    # Start export immediately in a background thread (no Celery queue)
+    threading.Thread(
+        target=_export_clip_bg, args=(clip.clip_id,), daemon=True,
+    ).start()
 
     return clip
 
@@ -325,34 +520,5 @@ async def upload_cover_image(
 @router.post("/cleanup")
 def cleanup_clips(db: Session = Depends(get_db)):
     """Delete export files for downloaded or expired clips. Keeps metadata + thumbnails."""
-    cutoff = datetime.utcnow() - timedelta(hours=CLIP_CLEANUP_HOURS)
-    cleaned = 0
-
-    clips = (
-        db.query(models.Clip)
-        .filter(
-            models.Clip.export_status == "ready",
-            models.Clip.export_path.isnot(None),
-        )
-        .all()
-    )
-
-    for clip in clips:
-        should_clean = (
-            clip.downloaded_at is not None
-            or clip.created_at < cutoff
-        )
-        if not should_clean:
-            continue
-
-        if clip.export_path:
-            p = Path(clip.export_path)
-            if p.exists():
-                p.unlink()
-
-        clip.export_status = "cleaned"
-        clip.export_path = None
-        cleaned += 1
-
-    db.commit()
+    cleaned = _run_cleanup(db)
     return {"cleaned": cleaned}

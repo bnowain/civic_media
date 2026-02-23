@@ -1,7 +1,7 @@
 /**
  * index.js — Library page logic.
  * Unified landing page with sidebar filters, tabs (Meetings/Audio/News),
- * and recent media sidebar.
+ * recent media sidebar, and radio show ingest system.
  */
 
 "use strict";
@@ -13,9 +13,11 @@ let governingBodyId = null;           // null = all
 let recentSort = "processed";         // "processed" | "event"
 let selectedCategory = "meeting";     // dialog category
 let governingBodies = [];             // cached list
+let editMeetingId = null;             // meeting being edited
 
 const activePollers = {};
 const POLL_INTERVAL = 4000;
+let ingestPoller = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
@@ -46,16 +48,26 @@ async function init() {
   // Load data
   await Promise.all([loadGoverningBodies(), loadRecent(), loadContent()]);
 
-  // Event listeners
+  // Event listeners — New Item dialog
   document.getElementById("new-item-btn").addEventListener("click", openDialog);
-  document.getElementById("close-dialog-btn").addEventListener("click", closeDialog);
-  document.getElementById("cancel-dialog-btn").addEventListener("click", closeDialog);
+  document.getElementById("close-dialog-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("cancel-dialog-btn").addEventListener("click", closeAllDialogs);
   document.getElementById("create-btn").addEventListener("click", handleCreate);
-  document.getElementById("overlay").addEventListener("click", closeDialog);
+  document.getElementById("overlay").addEventListener("click", closeAllDialogs);
   document.getElementById("f-title").addEventListener("keydown", e => {
     if (e.key === "Enter") handleCreate();
   });
   document.getElementById("add-gb-btn").addEventListener("click", handleAddGoverningBody);
+
+  // Edit dialog
+  document.getElementById("close-edit-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("cancel-edit-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("save-edit-btn").addEventListener("click", handleSaveEdit);
+
+  // Ingest dialog
+  document.getElementById("close-ingest-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("cancel-ingest-btn").addEventListener("click", closeAllDialogs);
+  document.getElementById("run-ingest-btn").addEventListener("click", handleRunIngest);
 
   // Tabs
   document.getElementById("library-tabs").addEventListener("click", e => {
@@ -76,6 +88,7 @@ async function init() {
       gbSection.style.display = "";
     }
 
+    updateToolbar();
     updateURL();
     loadContent();
   });
@@ -100,6 +113,8 @@ async function init() {
     btn.classList.add("active");
     updateDialogFields();
   });
+
+  updateToolbar();
 }
 
 // ── URL State ────────────────────────────────────────────────────────────────
@@ -111,6 +126,20 @@ function updateURL() {
   if (recentSort !== "processed") params.set("sort", recentSort);
   const qs = params.toString();
   history.pushState(null, "", qs ? `/?${qs}` : "/");
+}
+
+// ── Toolbar ──────────────────────────────────────────────────────────────────
+
+function updateToolbar() {
+  const actions = document.getElementById("toolbar-actions");
+  if (!actions) return;
+
+  if (activeMode === "audio") {
+    actions.innerHTML = `<button class="btn btn-amber btn-sm" id="ingest-btn">Ingest Radio Shows</button>`;
+    document.getElementById("ingest-btn").addEventListener("click", openIngestDialog);
+  } else {
+    actions.innerHTML = "";
+  }
 }
 
 // ── API ──────────────────────────────────────────────────────────────────────
@@ -310,19 +339,36 @@ function createMeetingCard(m) {
     ? (m.governing_body ? esc(m.governing_body) : "Audio Transcription")
     : `${esc(m.governing_body)} \u00b7 ${esc(m.meeting_type)}`;
 
+  const descLine = m.description
+    ? `<div class="meeting-card-desc">${esc(m.description)}</div>` : "";
+
+  // Thumbnail for ingested audio
+  const thumbHtml = m.thumbnail_url
+    ? `<img class="meeting-card-thumb" src="${esc(m.thumbnail_url)}" alt="" loading="lazy">`
+    : "";
+
   card.innerHTML = `
+    ${thumbHtml}
     <span class="meeting-card-date">${esc(displayDate)}</span>
     <div class="meeting-card-body">
       <div class="meeting-card-title">${esc(m.title)}</div>
       <div class="meeting-card-sub">${subLine}</div>
+      ${descLine}
       <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">\u2014</span>
-    <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete">\u2715</button>
+    <div class="meeting-card-actions">
+      <button class="btn btn-ghost btn-sm edit-btn" data-meeting-id="${m.meeting_id}" title="Edit">&#x270E;</button>
+      <button class="btn btn-ghost btn-sm process-btn" data-meeting-id="${m.meeting_id}" title="Process" style="display:none">&#x25B6;</button>
+      <button class="btn btn-ghost btn-sm delete-btn" data-meeting-id="${m.meeting_id}" title="Delete">&#x2715;</button>
+    </div>
   `;
 
+  // Store meeting data on the card for edit dialog
+  card._meetingData = m;
+
   card.addEventListener("click", e => {
-    if (e.target.closest(".delete-btn")) return;
+    if (e.target.closest(".delete-btn") || e.target.closest(".edit-btn") || e.target.closest(".process-btn")) return;
     window.location.href = `/review/${m.meeting_id}`;
   });
 
@@ -335,6 +381,23 @@ function createMeetingCard(m) {
       loadRecent();
     } else {
       alert("Failed to delete meeting.");
+    }
+  });
+
+  card.querySelector(".edit-btn").addEventListener("click", e => {
+    e.stopPropagation();
+    openEditDialog(m);
+  });
+
+  card.querySelector(".process-btn").addEventListener("click", async e => {
+    e.stopPropagation();
+    if (!confirm(`Start processing "${m.title}"? This will use GPU resources.`)) return;
+    const r = await fetch(`/api/media/${m.meeting_id}/process`, { method: "POST" });
+    if (r.ok) {
+      loadContent();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      alert(err.detail || "Failed to start processing.");
     }
   });
 
@@ -402,18 +465,55 @@ function renderProgressBar(progressEl, status) {
   `;
 }
 
-function applyStatusToBadge(badge, status) {
+function applyStatusToBadge(badge, status, meetingId) {
   if (!badge) return;
+
   if (status.status === "complete" && status.segment_count > 0) {
     badge.textContent = `${status.segment_count} segs`;
     badge.className = "meeting-card-badge badge-complete";
+    hideProcessBtn(meetingId);
   } else if (status.status === "processing") {
     badge.textContent = "processing";
     badge.className = "meeting-card-badge badge-processing";
+    hideProcessBtn(meetingId);
+  } else if (status.status === "pending" && status.segment_count === 0) {
+    // Check if this meeting has media but no segments (unprocessed)
+    checkUnprocessed(meetingId, badge);
   } else {
     badge.textContent = "no media";
     badge.className = "meeting-card-badge badge-pending";
   }
+}
+
+async function checkUnprocessed(meetingId, badge) {
+  try {
+    const r = await fetch(`/api/media/${meetingId}`);
+    if (!r.ok) return;
+    const files = await r.json();
+    const hasMedia = files.some(f => f.file_type === "video" || f.file_type === "audio");
+    if (hasMedia) {
+      badge.textContent = "unprocessed";
+      badge.className = "meeting-card-badge badge-unprocessed";
+      showProcessBtn(meetingId);
+    } else {
+      badge.textContent = "no media";
+      badge.className = "meeting-card-badge badge-pending";
+    }
+  } catch { /* ignore */ }
+}
+
+function showProcessBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".process-btn");
+  if (btn) btn.style.display = "";
+}
+
+function hideProcessBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".process-btn");
+  if (btn) btn.style.display = "none";
 }
 
 async function updateMeetingCardStatus(meetingId) {
@@ -429,7 +529,7 @@ async function updateMeetingCardStatus(meetingId) {
     return;
   }
 
-  applyStatusToBadge(badge, status);
+  applyStatusToBadge(badge, status, meetingId);
 
   if (status.status === "processing" && progressEl) {
     renderProgressBar(progressEl, status);
@@ -458,7 +558,7 @@ function startPolling(meetingId) {
       return;
     }
 
-    applyStatusToBadge(badge, status);
+    applyStatusToBadge(badge, status, meetingId);
     if (progressEl) renderProgressBar(progressEl, status);
 
     if (status.status === "complete") {
@@ -468,7 +568,7 @@ function startPolling(meetingId) {
   }, POLL_INTERVAL);
 }
 
-// ── Dialog ───────────────────────────────────────────────────────────────────
+// ── New Item Dialog ─────────────────────────────────────────────────────────
 
 function openDialog() {
   selectedCategory = "meeting";
@@ -480,9 +580,15 @@ function openDialog() {
   document.getElementById("overlay").classList.add("active");
 }
 
-function closeDialog() {
+function closeAllDialogs() {
   document.getElementById("new-item-dialog").close();
+  document.getElementById("edit-dialog").close();
+  document.getElementById("ingest-dialog").close();
   document.getElementById("overlay").classList.remove("active");
+  if (ingestPoller) {
+    clearInterval(ingestPoller);
+    ingestPoller = null;
+  }
 }
 
 function updateDialogFields() {
@@ -522,7 +628,7 @@ async function handleCreate() {
     } else {
       await createMeeting(title);
     }
-    closeDialog();
+    closeAllDialogs();
     loadContent();
     loadRecent();
   } catch (err) {
@@ -542,7 +648,6 @@ async function createMeeting(title) {
   if (!date) throw new Error("Please select a date.");
 
   const gbId = isMeeting ? document.getElementById("f-governing-body").value : "";
-  // Look up governing body name from ID
   const gb = governingBodies.find(g => g.governing_body_id === gbId);
 
   const payload = {
@@ -605,13 +710,168 @@ async function handleAddGoverningBody() {
     input.value = "";
     await loadGoverningBodies();
 
-    // Auto-select the new one
     const select = document.getElementById("f-governing-body");
     const newGb = governingBodies.find(g => g.name === name);
     if (newGb) select.value = newGb.governing_body_id;
   } catch (err) {
     alert(`Failed to add: ${err.message}`);
   }
+}
+
+// ── Edit Dialog ─────────────────────────────────────────────────────────────
+
+function openEditDialog(meeting) {
+  editMeetingId = meeting.meeting_id;
+  document.getElementById("edit-title").value = meeting.title || "";
+  document.getElementById("edit-description").value = meeting.description || "";
+  document.getElementById("edit-date").value = meeting.meeting_date || "";
+
+  document.getElementById("edit-dialog").showModal();
+  document.getElementById("overlay").classList.add("active");
+}
+
+async function handleSaveEdit() {
+  if (!editMeetingId) return;
+
+  const payload = {
+    title: document.getElementById("edit-title").value.trim() || undefined,
+    description: document.getElementById("edit-description").value.trim() || undefined,
+    meeting_date: document.getElementById("edit-date").value || undefined,
+  };
+
+  // Remove undefined fields
+  Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
+
+  const btn = document.getElementById("save-edit-btn");
+  btn.textContent = "Saving...";
+  btn.disabled = true;
+
+  try {
+    const r = await fetch(`/api/meetings/${editMeetingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    closeAllDialogs();
+    loadContent();
+    loadRecent();
+  } catch (err) {
+    alert(`Failed to save: ${err.message}`);
+  } finally {
+    btn.textContent = "Save";
+    btn.disabled = false;
+  }
+}
+
+// ── Ingest Dialog ───────────────────────────────────────────────────────────
+
+async function openIngestDialog() {
+  document.getElementById("ingest-dialog").showModal();
+  document.getElementById("overlay").classList.add("active");
+  document.getElementById("ingest-progress").style.display = "none";
+  document.getElementById("run-ingest-btn").disabled = false;
+  document.getElementById("run-ingest-btn").textContent = "Run All Sources";
+
+  // Load sources
+  const container = document.getElementById("ingest-sources");
+  container.innerHTML = '<div class="loading-state-sm">Loading sources...</div>';
+
+  try {
+    const r = await fetch("/api/ingest/sources");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const sources = await r.json();
+
+    if (sources.length === 0) {
+      container.innerHTML = '<div class="loading-state-sm">No ingest sources configured. Run the migration first.</div>';
+      return;
+    }
+
+    container.innerHTML = "";
+    sources.forEach(src => {
+      const lastScraped = src.last_scraped_at
+        ? `Last run: ${new Date(src.last_scraped_at).toLocaleDateString()} (${src.last_scraped_count ?? 0} found)`
+        : "Never run";
+
+      const el = document.createElement("div");
+      el.className = "ingest-source-item";
+      el.innerHTML = `
+        <div class="ingest-source-info">
+          <div class="ingest-source-name">${esc(src.name)}</div>
+          <div class="ingest-source-meta">${esc(src.source_type)} &middot; ${esc(lastScraped)}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" data-source-id="${src.source_id}">Run</button>
+      `;
+
+      el.querySelector("button").addEventListener("click", () => {
+        runIngestForSource(src.source_id, src.name);
+      });
+
+      container.appendChild(el);
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="loading-state-sm">Failed to load sources: ${esc(err.message)}</div>`;
+  }
+}
+
+async function handleRunIngest() {
+  runIngestForSource(null, "all sources");
+}
+
+async function runIngestForSource(sourceId, label) {
+  const btn = document.getElementById("run-ingest-btn");
+  btn.disabled = true;
+  btn.textContent = "Running...";
+
+  const progressArea = document.getElementById("ingest-progress");
+  progressArea.style.display = "";
+  document.getElementById("ingest-stage").textContent = `Starting ingest for ${label}...`;
+  document.getElementById("ingest-counts").textContent = "";
+
+  try {
+    const url = sourceId ? `/api/ingest/run?source_id=${sourceId}` : "/api/ingest/run";
+    const r = await fetch(url, { method: "POST" });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+
+    // Start polling for progress
+    startIngestPolling();
+  } catch (err) {
+    document.getElementById("ingest-stage").textContent = `Error: ${err.message}`;
+    btn.disabled = false;
+    btn.textContent = "Run All Sources";
+  }
+}
+
+function startIngestPolling() {
+  if (ingestPoller) clearInterval(ingestPoller);
+
+  ingestPoller = setInterval(async () => {
+    try {
+      const r = await fetch("/api/ingest/status");
+      if (!r.ok) return;
+      const status = await r.json();
+
+      document.getElementById("ingest-stage").textContent = status.stage || (status.running ? "Running..." : "Complete");
+      document.getElementById("ingest-counts").textContent =
+        `Found: ${status.episodes_found || 0} | Downloaded: ${status.episodes_downloaded || 0}`;
+
+      if (!status.running) {
+        clearInterval(ingestPoller);
+        ingestPoller = null;
+        document.getElementById("run-ingest-btn").disabled = false;
+        document.getElementById("run-ingest-btn").textContent = "Run All Sources";
+        document.getElementById("ingest-bar").classList.remove("indeterminate");
+        document.getElementById("ingest-bar").style.width = "100%";
+
+        // Refresh the content grid
+        loadContent();
+        loadRecent();
+      }
+    } catch { /* ignore polling errors */ }
+  }, 2000);
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────

@@ -174,6 +174,41 @@ async def upload_video(
     return media
 
 
+# ── Process unprocessed meeting ────────────────────────────────────────────────
+
+@router.post("/api/media/{meeting_id}/process", status_code=202)
+def process_meeting(meeting_id: str, db: Session = Depends(get_db)):
+    """
+    Trigger the processing pipeline for a meeting that has a media file
+    but hasn't been processed yet (e.g. ingested radio episodes).
+    """
+    meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+
+    media = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+        )
+        .first()
+    )
+    if not media:
+        raise HTTPException(400, "No media file found for this meeting")
+
+    segment_count = (
+        db.query(models.TranscriptSegment)
+        .filter_by(meeting_id=meeting_id)
+        .count()
+    )
+    if segment_count > 0:
+        raise HTTPException(400, "Meeting already has transcript segments. Use /rerun instead.")
+
+    process_video_task.delay(meeting_id, media.media_id)
+    return {"meeting_id": meeting_id, "status": "queued"}
+
+
 # ── Rerun pipeline ────────────────────────────────────────────────────────────
 
 @router.post("/api/media/{meeting_id}/rerun", status_code=202)

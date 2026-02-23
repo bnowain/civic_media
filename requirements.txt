@@ -29,5 +29,9 @@ pdfplumber>=0.11.0
 pdf2image>=1.17.0         # Poppler must be installed via apt/brew
 pytesseract>=0.3.10       # Tesseract must be installed via apt/brew
 
+# ── Scraping / Ingest ────────────────────────────────────────────────────────
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 numpy>=1.26.0

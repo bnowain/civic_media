@@ -5,6 +5,8 @@ Registers all routers, mounts static files and media directories,
 initialises the database schema on first run.
 """
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,12 +17,31 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine
 from app import models
 from app.routers import (
-    assignments, clips, documents, governing_bodies, library, media,
+    assignments, clips, documents, governing_bodies, ingest, library, media,
     meetings, mentions, news, people, segments, tags, tagging, transcribe,
 )
 
 # Create all tables (idempotent)
 models.Base.metadata.create_all(bind=engine)
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup: clean up any abandoned clip exports
+    try:
+        from app.routers.clips import _run_cleanup
+        from app.database import SessionLocal as _SL
+        _db = _SL()
+        cleaned = _run_cleanup(_db)
+        _db.close()
+        if cleaned:
+            logger.info("Startup clip cleanup: removed %d old exports", cleaned)
+    except Exception:
+        logger.debug("Startup clip cleanup skipped", exc_info=True)
+    yield
+
 
 app = FastAPI(
     title="Civic Meeting Media Processing Tool",
@@ -28,6 +49,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 # ── API routers ──────────────────────────────────────────────────────────────
@@ -45,6 +67,7 @@ app.include_router(clips.router)
 app.include_router(tags.router)
 app.include_router(mentions.router)
 app.include_router(tagging.router)
+app.include_router(ingest.router)
 
 # ── Static files ─────────────────────────────────────────────────────────────
 _static_dir = BASE_DIR / "app" / "static"

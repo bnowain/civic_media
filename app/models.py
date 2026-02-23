@@ -54,6 +54,9 @@ class Meeting(Base):
     category          = Column(String, nullable=False, default="meeting")  # "meeting" | "audio"
     media_directory   = Column(String)
     governing_body_id = Column(String, ForeignKey("governing_bodies.governing_body_id"), nullable=True)
+    description       = Column(Text, nullable=True)       # episode title, guest names
+    source_url        = Column(Text, nullable=True)        # original audio URL (dedup key)
+    thumbnail_url     = Column(Text, nullable=True)        # cover art URL from source
     processed_at      = Column(DateTime, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
 
@@ -305,6 +308,21 @@ class Clip(Base):
     cover_image_path  = Column(String)
     downloaded_at     = Column(DateTime)
     created_at        = Column(DateTime, default=datetime.utcnow)
+
+
+# ── Ingest Sources ──────────────────────────────────────────────────────────
+
+class IngestSource(Base):
+    __tablename__ = "ingest_sources"
+
+    source_id          = Column(String, primary_key=True, default=_gen_id)
+    name               = Column(String, nullable=False, unique=True)
+    source_type        = Column(String, nullable=False)  # "kcnr" | "securenet" | "freedominaction"
+    config_json        = Column(Text, nullable=True)     # JSON blob of source-specific params
+    last_scraped_at    = Column(DateTime, nullable=True)
+    last_scraped_count = Column(Float, nullable=True)    # episodes found last run
+    enabled            = Column(Boolean, default=True)
+    created_at         = Column(DateTime, default=datetime.utcnow)
 
 
 class PeopleMentionDenial(Base):

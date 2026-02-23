@@ -272,6 +272,31 @@ def retag_content_task(content_type: str, content_id: str) -> dict:
 
 
 @celery_app.task(
+    bind=True,
+    name="tasks.ingest_radio",
+    max_retries=0,
+)
+def ingest_radio_task(self, source_id: str | None = None) -> dict:
+    """
+    Scrape radio show sources, download new episodes, and create
+    unprocessed Meeting records. Does NOT auto-process.
+    """
+    from app.database import SessionLocal
+    from app.services.ingest import run_ingest
+
+    db = SessionLocal()
+    try:
+        run_ingest(db, source_id)
+        return {"status": "complete", "source_id": source_id}
+    except Exception:
+        db.rollback()
+        logger.exception("ingest_radio_task failed")
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="tasks.rerun_voiceprints",
     max_retries=0,
 )
@@ -331,11 +356,13 @@ def export_clip_task(self, clip_id: str) -> dict:
         clip_dir.mkdir(parents=True, exist_ok=True)
         source = clip.source_media_path
 
+        import json as _json
+
         if clip.cover_image_path and Path(clip.cover_image_path).exists():
-            # Audio-to-MP4 with cover image
             out_path = clip_dir / "clip.mp4"
             cmd = [
                 "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
                 "-loop", "1", "-i", clip.cover_image_path,
                 "-ss", str(clip.start_time),
                 "-to", str(clip.end_time),
@@ -349,6 +376,7 @@ def export_clip_task(self, clip_id: str) -> dict:
             out_path = clip_dir / "clip.mp4"
             cmd = [
                 "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
                 "-ss", str(clip.start_time),
                 "-to", str(clip.end_time),
                 "-i", source,
@@ -361,6 +389,7 @@ def export_clip_task(self, clip_id: str) -> dict:
             out_path = clip_dir / "clip.mp3"
             cmd = [
                 "ffmpeg", "-y",
+                "-progress", "pipe:1", "-nostats",
                 "-ss", str(clip.start_time),
                 "-to", str(clip.end_time),
                 "-i", source,
@@ -368,24 +397,47 @@ def export_clip_task(self, clip_id: str) -> dict:
                 str(out_path),
             ]
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600,
+        progress_json = clip_dir / "progress.json"
+        progress_json.write_text(_json.dumps({"pct": 0, "status": "exporting"}))
+        duration_us = clip.duration * 1_000_000
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
 
-        if result.returncode != 0:
+        for line in proc.stdout:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded.startswith("out_time_us="):
+                val = decoded.split("=", 1)[1].strip()
+                if val.isdigit() and int(val) > 0 and duration_us > 0:
+                    pct = min(99, int(int(val) / duration_us * 100))
+                    try:
+                        progress_json.write_text(_json.dumps({
+                            "pct": pct, "status": "exporting",
+                        }))
+                    except Exception:
+                        pass
+
+        proc.wait(timeout=600)
+
+        if progress_json.exists():
+            progress_json.unlink()
+
+        if proc.returncode != 0:
             clip.export_status = "error"
-            clip.export_error = result.stderr[:500] if result.stderr else "FFmpeg failed"
+            clip.export_error = f"FFmpeg exited with code {proc.returncode}"
             db.commit()
-            logger.error(
-                "export_clip_task FFmpeg error for %s: %s",
-                clip_id, clip.export_error,
-            )
+            logger.error("export_clip_task FFmpeg error for %s: exit code %d", clip_id, proc.returncode)
             return {"clip_id": clip_id, "status": "error"}
 
         clip.export_path = str(out_path)
         clip.export_status = "ready"
         db.commit()
         logger.info("export_clip_task complete: %s → %s", clip_id, out_path)
+
+        # Auto-cleanup old exports so abandoned clips don't pile up
+        cleanup_clips_task.delay()
+
         return {"clip_id": clip_id, "status": "ready"}
 
     except Exception as exc:
