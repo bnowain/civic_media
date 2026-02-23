@@ -114,6 +114,7 @@ async function loadSegments() {
 
   renderTranscript();
   updateStats();
+  updateProcessButton();
 }
 
 async function loadDocuments() {
@@ -797,18 +798,54 @@ function setupControls() {
   document.getElementById("reprocess-btn")
     .addEventListener("click", async () => {
       const btn = document.getElementById("reprocess-btn");
-      btn.textContent = "↻ Running…";
-      btn.disabled = true;
-      try {
-        await reprocessAll();
-        showReprocessIndicator();
-      } catch (err) {
-        alert(`Reprocess failed: ${err.message}`);
-      } finally {
-        btn.textContent = "↻ Reprocess";
-        btn.disabled = false;
+      const hasSegments = segments.length > 0;
+
+      if (!hasSegments) {
+        // First-time process: trigger the pipeline
+        if (!confirm(`Start processing "${meeting?.title || "this meeting"}"? This will use GPU resources.`)) return;
+        btn.textContent = "↻ Starting…";
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/api/media/${meetingId}/process`, { method: "POST" });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+          }
+          showPipelineBanner("Pipeline processing…");
+          startPipelinePoll();
+        } catch (err) {
+          alert(`Process failed: ${err.message}`);
+        } finally {
+          updateProcessButton();
+          btn.disabled = false;
+        }
+      } else {
+        // Re-run voiceprint matching on unverified segments
+        btn.textContent = "↻ Running…";
+        btn.disabled = true;
+        try {
+          await reprocessAll();
+          showReprocessIndicator();
+        } catch (err) {
+          alert(`Reprocess failed: ${err.message}`);
+        } finally {
+          updateProcessButton();
+          btn.disabled = false;
+        }
       }
     });
+}
+
+function updateProcessButton() {
+  const btn = document.getElementById("reprocess-btn");
+  if (!btn) return;
+  if (segments.length > 0) {
+    btn.textContent = "↻ Reprocess";
+    btn.title = "Re-run voiceprint matching on all unverified segments";
+  } else {
+    btn.textContent = "▶ Process";
+    btn.title = "Start the transcription pipeline for this meeting";
+  }
 }
 
 // ── Export dropdown ───────────────────────────────────────────────────────────
