@@ -87,6 +87,7 @@ def migrate():
                     "base_url": "https://apps.kcnr1460.com",
                     "archive_path": "/kevin-crye-show",
                     "max_pages": 19,
+                    "cutoff_date": "2026-01-25",
                 }),
             },
             {

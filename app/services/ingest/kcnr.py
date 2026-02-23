@@ -75,6 +75,7 @@ class KCNRScraper(BaseScraper):
         self.base_url = config.get("base_url", "https://apps.kcnr1460.com")
         self.max_pages = config.get("max_pages", 20)
         self.shows = config.get("shows", None)  # if None, scrape all
+        self.cutoff_date = config.get("cutoff_date")  # YYYY-MM-DD: skip episodes >= this date
 
     @property
     def source_type(self) -> str:
@@ -158,6 +159,10 @@ class KCNRScraper(BaseScraper):
                         date = f"{path_match.group(1)}-{path_match.group(2)}-{path_match.group(3)}"
                     else:
                         date = current_date or "1970-01-01"
+
+                # Skip episodes at or after the cutoff date (moved to KQMS)
+                if self.cutoff_date and date >= self.cutoff_date:
+                    continue
 
                 title = f"{show_name} — {date}"
 
