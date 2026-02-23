@@ -60,21 +60,31 @@ def extract_m3u8_url(swagit_url: str) -> Optional[str]:
     logger.info("Extracting m3u8 from Swagit page: %s", swagit_url)
 
     try:
+        import threading
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
 
             m3u8_url = None
+            found_event = threading.Event()
 
             # Intercept network requests to catch the m3u8 URL
             def handle_request(request):
                 nonlocal m3u8_url
                 if "playlist.m3u8" in request.url:
                     m3u8_url = request.url
+                    found_event.set()
 
             page.on("request", handle_request)
 
-            page.goto(swagit_url, wait_until="networkidle", timeout=30000)
+            # Use domcontentloaded — don't wait for networkidle (Swagit
+            # analytics keep firing and cause 30s+ timeouts)
+            page.goto(swagit_url, wait_until="domcontentloaded", timeout=30000)
+
+            # Wait up to 15s for the m3u8 request to fire
+            if not m3u8_url:
+                page.wait_for_timeout(15000)
 
             # If not caught via network, try page content
             if not m3u8_url:
@@ -281,12 +291,21 @@ def download_document(
         output_path.stat().st_size / 1024,
     )
 
-    # Queue OCR processing
+    # Run OCR — try Celery first, fall back to direct extraction
     try:
         from app.tasks import process_pdf_task
         process_pdf_task.delay(doc.document_id)
     except Exception:
-        logger.debug("Could not queue PDF OCR task (worker may be offline)")
+        logger.debug("Celery unavailable, running OCR directly")
+        try:
+            from app.services.pdf_ingestor import extract_text
+            text = extract_text(str(output_path))
+            if text:
+                doc.ocr_text = text
+                db.commit()
+                logger.info("Direct OCR: %d chars for %s", len(text), doc_type)
+        except Exception as ocr_exc:
+            logger.warning("Direct OCR failed: %s", ocr_exc)
 
     return {
         "status": "complete",

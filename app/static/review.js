@@ -996,18 +996,27 @@ async function uploadPdf(file, docType) {
 
 function renderDocuments() {
   const list = document.getElementById("doc-list");
+  const tabBar = document.getElementById("doc-tabs");
+  const viewer = document.getElementById("doc-viewer");
+  const frame = document.getElementById("doc-viewer-frame");
+
+  // Reset tabs — keep only the "Documents" list tab
+  tabBar.innerHTML = '<button class="doc-tab active" data-doc-tab="list">Documents</button>';
 
   if (documents.length === 0) {
     list.innerHTML = `<div class="doc-empty">No documents uploaded.</div>`;
+    list.style.display = "";
+    viewer.style.display = "none";
     return;
   }
 
+  // Build list view
   list.innerHTML = "";
   documents.forEach(doc => {
     const item = document.createElement("div");
     item.className = "doc-item";
     const hasText  = doc.ocr_text && doc.ocr_text.trim().length > 0;
-    const filename = doc.file_path.split("/").pop();
+    const filename = doc.file_path.split(/[/\\]/).pop();
 
     item.innerHTML = `
       <span class="doc-item-type">${esc(doc.document_type)}</span>
@@ -1015,10 +1024,39 @@ function renderDocuments() {
         ${esc(filename)}
       </span>
       <span class="doc-item-status ${hasText ? "ready" : ""}">
-        ${hasText ? `✓ ${doc.ocr_text.length.toLocaleString()} chars` : "processing…"}
+        ${hasText ? `\u2713 ${doc.ocr_text.length.toLocaleString()} chars` : "processing\u2026"}
       </span>
     `;
     list.appendChild(item);
+  });
+
+  // Add a tab for each document (agenda, minutes, etc.)
+  documents.forEach(doc => {
+    const label = doc.document_type.charAt(0).toUpperCase() + doc.document_type.slice(1);
+    const tab = document.createElement("button");
+    tab.className = "doc-tab";
+    tab.dataset.docTab = doc.document_id;
+    tab.textContent = label;
+    tabBar.appendChild(tab);
+  });
+
+  // Tab click handler
+  tabBar.addEventListener("click", e => {
+    const tab = e.target.closest(".doc-tab");
+    if (!tab) return;
+    tabBar.querySelectorAll(".doc-tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+
+    const tabId = tab.dataset.docTab;
+    if (tabId === "list") {
+      list.style.display = "";
+      viewer.style.display = "none";
+      frame.src = "";
+    } else {
+      list.style.display = "none";
+      viewer.style.display = "";
+      frame.src = `/api/documents/${meetingId}/${tabId}/file`;
+    }
   });
 }
 

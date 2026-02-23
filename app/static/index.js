@@ -353,6 +353,7 @@ function createMeetingCard(m) {
   const card = document.createElement("div");
   card.className = "meeting-card";
   card.dataset.meetingId = m.meeting_id;
+  if (m.primegov_id) card.dataset.primegovId = m.primegov_id;
 
   const displayDate = formatDate(m.meeting_date || "\u2014");
   const isAudio = m.category === "audio";
@@ -443,7 +444,11 @@ function createMeetingCard(m) {
       const r = await fetch(`/api/primegov/download/${m.meeting_id}`, { method: "POST" });
       if (r.ok) {
         btn.textContent = "\u23F3";
-        // Start polling for download progress
+        const badge = document.getElementById(`badge-${m.meeting_id}`);
+        if (badge) {
+          badge.textContent = "downloading";
+          badge.className = "meeting-card-badge badge-processing";
+        }
         startPolling(m.meeting_id);
       } else {
         const err = await r.json().catch(() => ({}));
@@ -595,10 +600,21 @@ function applyStatusToBadge(badge, status, meetingId) {
     hideTranscodeBtn(meetingId);
   } else if (status.status === "pending" && status.segment_count === 0) {
     // Check if this meeting has media but no segments (unprocessed)
+    // For PrimeGov meetings without media, show "download" instead of "no media"
     checkUnprocessed(meetingId, badge, status.transcode_status);
   } else {
-    badge.textContent = "no media";
-    badge.className = "meeting-card-badge badge-pending";
+    // Check if this is a PrimeGov meeting before showing "no media"
+    const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+    if (card && card.dataset.primegovId) {
+      // Let fetchAssetStatus handle the badge for PrimeGov meetings
+      if (!badge.textContent || badge.textContent === "\u2014") {
+        badge.textContent = "pending";
+        badge.className = "meeting-card-badge badge-pending";
+      }
+    } else {
+      badge.textContent = "no media";
+      badge.className = "meeting-card-badge badge-pending";
+    }
   }
 }
 
@@ -631,8 +647,19 @@ async function checkUnprocessed(meetingId, badge, transcodeStatus) {
         hideTranscodeBtn(meetingId);
       }
     } else {
-      badge.textContent = "no media";
-      badge.className = "meeting-card-badge badge-pending";
+      // No media file — check if this is a PrimeGov meeting with downloadable assets
+      const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+      if (card && card.dataset.primegovId) {
+        badge.textContent = "download";
+        badge.className = "meeting-card-badge badge-downloadable";
+        const dlBtn = card.querySelector(".download-btn");
+        if (dlBtn) dlBtn.style.display = "";
+        hideProcessBtn(meetingId);
+        hideTranscodeBtn(meetingId);
+      } else {
+        badge.textContent = "no media";
+        badge.className = "meeting-card-badge badge-pending";
+      }
     }
   } catch { /* ignore */ }
 }
@@ -680,14 +707,20 @@ async function updateMeetingCardStatus(meetingId) {
 
   applyStatusToBadge(badge, status, meetingId);
 
-  if (status.status === "error" && progressEl) {
-    renderProgressBar(progressEl, status);
-    // Stop polling on error — user must retry manually
-  } else if (status.status === "processing" && progressEl) {
-    renderProgressBar(progressEl, status);
-    startPolling(meetingId);
-  } else if (status.status === "complete" && progressEl) {
-    renderProgressBar(progressEl, status);
+  if (progressEl) {
+    const hasActiveStage = status.stage && status.stage !== "Waiting for upload";
+    if (status.status === "error") {
+      renderProgressBar(progressEl, status);
+    } else if (status.status === "processing" || status.transcode_status === "transcoding") {
+      renderProgressBar(progressEl, status);
+      startPolling(meetingId);
+    } else if (status.status === "complete") {
+      renderProgressBar(progressEl, status);
+    } else if (hasActiveStage) {
+      // Show progress for downloads and other pending operations
+      renderProgressBar(progressEl, status);
+      startPolling(meetingId);
+    }
   }
 }
 
@@ -713,11 +746,45 @@ function startPolling(meetingId) {
     applyStatusToBadge(badge, status, meetingId);
     if (progressEl) renderProgressBar(progressEl, status);
 
+    // Detect download completion: media now exists, needs transcode
+    if (status.transcode_status === "pending" && status.status === "pending"
+        && status.stage === "Ready to process") {
+      badge.textContent = "needs transcode";
+      badge.className = "meeting-card-badge badge-downloadable";
+      hideDownloadBtn(meetingId);
+      showTranscodeBtn(meetingId);
+      hideProcessBtn(meetingId);
+      if (progressEl) progressEl.innerHTML = "";
+      clearInterval(activePollers[meetingId]);
+      delete activePollers[meetingId];
+      return;
+    }
+
+    // Detect transcode completion: ready for pipeline processing
+    if (status.transcode_status === "transcoded" && status.status === "pending") {
+      badge.textContent = "unprocessed";
+      badge.className = "meeting-card-badge badge-unprocessed";
+      hideTranscodeBtn(meetingId);
+      hideDownloadBtn(meetingId);
+      showProcessBtn(meetingId);
+      if (progressEl) progressEl.innerHTML = "";
+      clearInterval(activePollers[meetingId]);
+      delete activePollers[meetingId];
+      return;
+    }
+
     if (status.status === "complete" || status.status === "error") {
       clearInterval(activePollers[meetingId]);
       delete activePollers[meetingId];
     }
   }, POLL_INTERVAL);
+}
+
+function hideDownloadBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".download-btn");
+  if (btn) btn.style.display = "none";
 }
 
 // ── New Item Dialog ─────────────────────────────────────────────────────────
@@ -1177,11 +1244,16 @@ async function fetchAssetStatus(meetingId) {
         if (dlBtn) dlBtn.style.display = "";
       }
 
-      // Also set badge to "download"
+      // Set badge to "download" — override stale "no media" or initial "—"
       const badge = document.getElementById(`badge-${meetingId}`);
-      if (badge && badge.textContent === "\u2014") {
-        badge.textContent = "download";
-        badge.className = "meeting-card-badge badge-downloadable";
+      if (badge) {
+        const bt = badge.textContent;
+        // Don't override active states like processing/transcoding/complete
+        const activeStates = ["processing", "transcoding", "complete", "error", "unprocessed", "needs transcode"];
+        if (!activeStates.includes(bt) && !bt.includes("segs")) {
+          badge.textContent = "download";
+          badge.className = "meeting-card-badge badge-downloadable";
+        }
       }
     }
   } catch { /* ignore */ }

@@ -306,7 +306,9 @@
 
       <div class="doc-panel" id="doc-panel">
         <div class="doc-panel-header">
-          <span class="doc-panel-title">Documents</span>
+          <div class="doc-tabs" id="doc-tabs">
+            <button class="doc-tab active" data-doc-tab="list">Documents</button>
+          </div>
           <div class="doc-upload-controls">
             <label class="doc-upload-btn" title="Upload Agenda">
               Agenda
@@ -324,6 +326,9 @@
         </div>
         <div class="doc-list" id="doc-list">
           <div class="doc-empty">No documents uploaded.</div>
+        </div>
+        <div class="doc-viewer" id="doc-viewer" style="display:none">
+          <iframe id="doc-viewer-frame" style="width:100%;height:100%;border:none;"></iframe>
         </div>
       </div>
     </section>

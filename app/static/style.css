@@ -629,6 +629,41 @@ html, body {
   padding: 20px 0;
 }
 
+/* Document tabs */
+.doc-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.doc-tab {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.doc-tab:hover { color: var(--text-secondary); }
+.doc-tab.active {
+  color: var(--text-primary);
+  border-color: var(--border);
+  background: var(--bg-raised);
+}
+
+/* Inline PDF viewer */
+.doc-viewer {
+  flex: 1;
+  min-height: 400px;
+  background: var(--bg-base);
+}
+
 /* ── Transcript Panel ─────────────────────────────────────────────────────── */
 
 .transcript-panel {

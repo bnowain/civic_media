@@ -10,12 +10,12 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.config import DOCUMENTS_DIR
 from app.database import get_db
-from app.tasks import process_pdf_task
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -67,7 +67,20 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    process_pdf_task.delay(doc.document_id)
+    try:
+        from app.tasks import process_pdf_task
+        process_pdf_task.delay(doc.document_id)
+    except Exception:
+        # Celery/worker not available — run OCR directly
+        try:
+            from app.services.pdf_ingestor import extract_text
+            text = extract_text(str(dest_path))
+            if text:
+                doc.ocr_text = text
+                db.commit()
+                db.refresh(doc)
+        except Exception:
+            pass
 
     return doc
 
@@ -92,3 +105,25 @@ def get_document(meeting_id: str, document_id: str, db: Session = Depends(get_db
     if not doc:
         raise HTTPException(404, "Document not found")
     return doc
+
+
+@router.get("/{meeting_id}/{document_id}/file")
+def serve_document_file(meeting_id: str, document_id: str, db: Session = Depends(get_db)):
+    """Serve the actual PDF file for inline viewing."""
+    doc = (
+        db.query(models.Document)
+        .filter_by(meeting_id=meeting_id, document_id=document_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    pdf_path = Path(doc.file_path)
+    if not pdf_path.exists():
+        raise HTTPException(404, "PDF file not found on disk")
+
+    return FileResponse(
+        str(pdf_path),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline"},
+    )

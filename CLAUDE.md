@@ -130,6 +130,47 @@ This project is a spoke in the **Atlas** hub-and-spoke ecosystem. Atlas is a cen
 - **Shasta-Campaign-Finance** — campaign finance disclosures from NetFile
 - **Facebook-Monitor** — automated public Facebook page monitoring
 
+## Testing
+
+No formal test suite exists yet. Use Playwright for browser-based UI testing and pytest for API/service tests.
+
+### Setup
+
+```bash
+pip install playwright pytest pytest-asyncio httpx
+python -m playwright install chromium
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Run only Playwright browser tests
+pytest tests/ -v -k "browser"
+
+# Run only API tests
+pytest tests/ -v -k "api"
+```
+
+### Writing Tests
+
+- **Browser tests** go in `tests/test_browser.py` — use Playwright to verify UI behavior (card states, progress bars, button transitions, inline PDF viewer, dialog flows)
+- **API tests** go in `tests/test_api.py` — use httpx or TestClient against FastAPI endpoints
+- **Service tests** go in `tests/test_services.py` — unit tests for pipeline stages, OCR, voiceprint matching
+- Playwright is already installed in this project (used by PrimeGov scraper)
+- The server must be running at localhost:8000 for browser tests
+- Use `page.wait_for_selector()` and `page.wait_for_timeout()` to handle async UI updates (polling, progress bars)
+
+### Key Flows to Test
+
+1. **Meeting discovery**: Discover BOS → cards appear with "download" badges
+2. **Download → Transcode → Process lifecycle**: download button → progress bar → transcode button → progress bar → process button
+3. **Review page**: video player loads, document tabs show PDFs inline, transcript segments render
+4. **Speaker assignment**: assign speaker → voiceprint created → reprocess matches
+5. **Export**: SRT/TXT/JSON export produces valid files
+
 ## Master Schema & Codex References
 
 **`E:\0-Automated-Apps\MASTER_SCHEMA.md`** — Canonical cross-project database

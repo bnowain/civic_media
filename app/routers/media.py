@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.config import MEDIA_DIR
 from app.database import get_db
-from app.tasks import process_video_task
 from app.utils import generate_media_filename
 
 router = APIRouter(tags=["media"])
@@ -177,6 +176,7 @@ async def upload_video(
     db.commit()
     db.refresh(media)
 
+    from app.tasks import process_video_task
     process_video_task.delay(meeting_id, media.media_id)
     return media
 
@@ -189,7 +189,10 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
     Transcode a meeting's video to 540p (960x540).
     Deletes the original file on success.
     Must be done before processing the pipeline for large downloaded files.
+    Runs in a background thread — no Celery required.
     """
+    import threading
+
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
@@ -212,12 +215,16 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
     if media.transcode_status == "transcoded":
         raise HTTPException(400, "Already transcoded")
 
-    from app.tasks import transcode_video_task
-    media.transcode_status = "pending"
+    media_id = media.media_id
+    media.transcode_status = "transcoding"
     db.commit()
 
-    transcode_video_task.delay(meeting_id, media.media_id)
-    return {"meeting_id": meeting_id, "media_id": media.media_id, "status": "queued"}
+    # Run in background thread so it works without Celery
+    from app.services.transcoder import run_transcode
+    t = threading.Thread(target=run_transcode, args=(meeting_id, media_id), daemon=True)
+    t.start()
+
+    return {"meeting_id": meeting_id, "media_id": media_id, "status": "started"}
 
 
 # ── Process unprocessed meeting ────────────────────────────────────────────────
@@ -251,6 +258,7 @@ def process_meeting(meeting_id: str, db: Session = Depends(get_db)):
     if segment_count > 0:
         raise HTTPException(400, "Meeting already has transcript segments. Use /rerun instead.")
 
+    from app.tasks import process_video_task
     process_video_task.delay(meeting_id, media.media_id)
     return {"meeting_id": meeting_id, "status": "queued"}
 
@@ -333,6 +341,7 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
             p.unlink()
 
     # Requeue pipeline
+    from app.tasks import process_video_task
     process_video_task.delay(meeting_id, source_media.media_id)
 
     return {
@@ -429,17 +438,35 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
 
     # "Transcode complete" at pct=100 is NOT pipeline complete
     is_transcode_stage = stage and "transcode" in stage.lower()
+    is_download_stage = stage and any(
+        k in stage.lower() for k in ("download", "extract", "video downloaded")
+    )
 
     if not has_media:
         status = "pending"
         stage  = stage or "Waiting for upload"
         pct    = pct or 0
-    elif (stage == "Complete" or pct == 100) and not is_transcode_stage and segment_count > 0:
+    elif transcode_status == "transcoding":
+        # Active transcode in progress — report progress from progress.json
+        status = "processing"
+        stage  = stage or "Transcoding to 540p"
+        pct    = pct or 5
+    elif (stage == "Complete" or pct == 100) and not is_transcode_stage and not is_download_stage and segment_count > 0:
         status = "complete"
         pct    = 100
     elif is_transcode_stage and pct == 100:
         # Transcode finished, but pipeline hasn't run yet
         status = "pending"
+        pct    = 0
+    elif has_media and transcode_status == "pending" and segment_count == 0 and not is_transcode_stage:
+        # Media downloaded but needs transcode
+        status = "pending"
+        stage  = "Ready to process"
+        pct    = 0
+    elif has_media and transcode_status == "transcoded" and segment_count == 0 and meeting and meeting.processed_at is None:
+        # Transcoded but pipeline hasn't run yet
+        status = "pending"
+        stage  = "Ready to process"
         pct    = 0
     elif segment_count > 0 or stage:
         status = "processing"
