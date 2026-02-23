@@ -18,6 +18,7 @@ import logging
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -185,9 +186,12 @@ def _export_clip_bg(clip_id: str) -> None:
                 str(out_path),
             ]
 
-        # Write initial progress
-        progress_json.write_text(json.dumps({"pct": 0, "status": "exporting"}))
+        # Write initial progress with started_at for client-side ETA
+        progress_json.write_text(json.dumps({
+            "pct": 0, "status": "exporting", "started_at": time.time(),
+        }))
         duration_us = clip.duration * 1_000_000
+        export_started_at = time.time()
 
         # stderr to DEVNULL — errors detected via returncode
         proc = subprocess.Popen(
@@ -204,6 +208,7 @@ def _export_clip_bg(clip_id: str) -> None:
                     try:
                         progress_json.write_text(json.dumps({
                             "pct": pct, "status": "exporting",
+                            "started_at": export_started_at,
                         }))
                     except Exception:
                         pass
@@ -412,7 +417,10 @@ def clip_progress(clip_id: str, db: Session = Depends(get_db)):
     if progress_file.exists():
         try:
             data = _json.loads(progress_file.read_text())
-            return {"pct": data.get("pct", 0), "status": "exporting"}
+            resp = {"pct": data.get("pct", 0), "status": "exporting"}
+            if "started_at" in data:
+                resp["started_at"] = data["started_at"]
+            return resp
         except Exception:
             pass
 

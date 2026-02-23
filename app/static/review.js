@@ -1343,7 +1343,7 @@ async function createClip() {
 
 async function pollClipStatus(clipId, statusEl, btn) {
   let attempts = 0;
-  const MAX = 180; // 180 * 1s = 3 minutes max
+  const MAX = 660; // 660 * 1s = 11 minutes max (matches FFmpeg 600s timeout)
 
   // Show progress bar
   statusEl.innerHTML = `

@@ -18,7 +18,7 @@ from app.database import engine
 from app import models
 from app.routers import (
     assignments, clips, documents, governing_bodies, ingest, library, media,
-    meetings, mentions, news, people, segments, tags, tagging, transcribe,
+    meetings, mentions, news, people, segments, system, tags, tagging, transcribe,
 )
 
 # Create all tables (idempotent)
@@ -40,6 +40,38 @@ async def lifespan(app: FastAPI):
             logger.info("Startup clip cleanup: removed %d old exports", cleaned)
     except Exception:
         logger.debug("Startup clip cleanup skipped", exc_info=True)
+
+    # On startup: reset orphaned "exporting" clips to "error"
+    # (daemon threads die on server restart, leaving status stuck)
+    try:
+        from app.database import SessionLocal as _SL2
+        from app.config import CLIPS_DIR
+        import time as _time
+        _db2 = _SL2()
+        orphans = (
+            _db2.query(models.Clip)
+            .filter(models.Clip.export_status == "exporting")
+            .all()
+        )
+        recovered = 0
+        for clip in orphans:
+            # Check if progress.json is stale (>2 min old) or missing
+            progress_file = CLIPS_DIR / clip.clip_id / "progress.json"
+            stale = True
+            if progress_file.exists():
+                age = _time.time() - progress_file.stat().st_mtime
+                stale = age > 120
+            if stale:
+                clip.export_status = "error"
+                clip.export_error = "Server restarted during export"
+                recovered += 1
+        if recovered:
+            _db2.commit()
+            logger.info("Startup orphan recovery: reset %d stuck exports to error", recovered)
+        _db2.close()
+    except Exception:
+        logger.debug("Startup orphan export recovery skipped", exc_info=True)
+
     yield
 
 
@@ -68,6 +100,7 @@ app.include_router(tags.router)
 app.include_router(mentions.router)
 app.include_router(tagging.router)
 app.include_router(ingest.router)
+app.include_router(system.router)
 
 # ── Static files ─────────────────────────────────────────────────────────────
 _static_dir = BASE_DIR / "app" / "static"

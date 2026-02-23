@@ -8,6 +8,42 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .clip-inline-progress {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .clip-inline-progress .clip-progress-track {
+      flex: 1;
+      min-width: 80px;
+      height: 4px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .clip-inline-progress .clip-progress-fill {
+      height: 100%;
+      background: #4aacff;
+      border-radius: 2px;
+      transition: width 1.5s ease;
+    }
+    .clip-inline-progress .clip-progress-pct {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.7rem;
+      color: #888;
+      min-width: 30px;
+    }
+    .clip-eta {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.65rem;
+      color: #666;
+    }
+    .clip-status-area {
+      margin-top: 4px;
+    }
+  </style>
 </head>
 <body class="page-index">
 
@@ -20,6 +56,7 @@
       <a href="/" class="nav-link">Home</a>
       <a href="/speakers" class="nav-link">Speakers</a>
       <a href="/clips" class="nav-link active">Clips</a>
+      <button class="btn btn-ghost btn-sm" id="shutdown-btn" title="Shutdown server" style="margin-left:8px;font-size:1.1em;padding:4px 8px;">&#x23FB;</button>
     </div>
   </header>
 
@@ -36,6 +73,13 @@
     </div>
   </main>
 
+  <script>
+    document.getElementById("shutdown-btn").addEventListener("click", async () => {
+      if (!confirm("Shut down Civic Media server?")) return;
+      try { await fetch("/api/system/shutdown", { method: "POST" }); } catch {}
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#888;"><div style="text-align:center"><h2>Server stopped</h2><p>Close this tab or restart with .\\start.ps1</p></div></div>';
+    });
+  </script>
   <script src="/static/clips.js"></script>
 </body>
 </html>

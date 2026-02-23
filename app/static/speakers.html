@@ -21,6 +21,7 @@
       <a href="/" class="nav-link">Home</a>
       <a href="/speakers" class="nav-link active">Speakers</a>
       <a href="/clips" class="nav-link">Clips</a>
+      <button class="btn btn-ghost btn-sm" id="shutdown-btn" title="Shutdown server" style="margin-left:8px;font-size:1.1em;padding:4px 8px;">&#x23FB;</button>
     </div>
   </header>
 
@@ -110,6 +111,13 @@
     </div>
   </main>
 
+  <script>
+    document.getElementById("shutdown-btn").addEventListener("click", async () => {
+      if (!confirm("Shut down Civic Media server?")) return;
+      try { await fetch("/api/system/shutdown", { method: "POST" }); } catch {}
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#888;"><div style="text-align:center"><h2>Server stopped</h2><p>Close this tab or restart with .\\start.ps1</p></div></div>';
+    });
+  </script>
   <script src="/static/speakers.js"></script>
 </body>
 </html>

@@ -114,7 +114,20 @@ async function init() {
     updateDialogFields();
   });
 
+  // Shutdown button
+  document.getElementById("shutdown-btn").addEventListener("click", handleShutdown);
+
   updateToolbar();
+}
+
+// ── Shutdown ──────────────────────────────────────────────────────────────────
+
+async function handleShutdown() {
+  if (!confirm("Shut down Civic Media server? This will stop all background processes.")) return;
+  try {
+    await fetch("/api/system/shutdown", { method: "POST" });
+  } catch { /* connection drops on shutdown */ }
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#888;"><div style="text-align:center"><h2>Server stopped</h2><p>Close this tab or restart with .\\start.ps1</p></div></div>';
 }
 
 // ── URL State ────────────────────────────────────────────────────────────────
