@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import MEDIA_DIR
+from app.utils import generate_media_filename
 from .base import ScrapedEpisode
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
 
     content_type = resp.headers.get("content-type")
     ext = _guess_extension(episode.audio_url, content_type)
-    audio_filename = f"audio_source{ext}"
+    audio_filename = generate_media_filename(
+        episode.episode_date, episode.show_name or episode.title, ext,
+    )
     audio_path = meeting_dir / audio_filename
 
     with audio_path.open("wb") as f:

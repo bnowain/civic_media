@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import MEDIA_DIR
+from app.utils import generate_media_filename
 from app.services import (
     aligner,
     audio_extractor,
@@ -145,15 +146,29 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     # -- 1. Extract preprocessed mono 16kHz WAV -------------------------------
     meeting_dir = MEDIA_DIR / meeting_id
     meeting_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = str(meeting_dir / "audio.wav")
 
+    # Load meeting metadata for intelligent filename
+    meeting_obj = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    extracted_filename = generate_media_filename(
+        meeting_obj.meeting_date if meeting_obj else None,
+        meeting_obj.title if meeting_obj else None,
+        ".wav",
+        suffix="_extracted",
+    )
+    audio_path = str(meeting_dir / extracted_filename)
+
+    # Check for existing extracted audio (any *_extracted.wav)
     audio_record = (
         db.query(models.MediaFile)
-        .filter_by(meeting_id=meeting_id, file_type="audio")
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_path.like("%\\_extracted.wav", escape="\\"),
+        )
         .first()
     )
 
-    if audio_record and Path(audio_path).exists():
+    if audio_record and Path(audio_record.file_path).exists():
+        audio_path = audio_record.file_path
         logger.info("[%s] Audio already extracted - skipping.", meeting_id)
         duration = audio_record.duration
     else:

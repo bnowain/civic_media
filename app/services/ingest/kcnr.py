@@ -2,7 +2,8 @@
 KCNR archive scraper.
 
 Scrapes the KCNR podcast archive pages at apps.kcnr1460.com.
-Each page lists episodes with dates (h2/h3 headings) and direct MP3 links.
+Each page lists episodes with direct MP3 links whose filenames contain
+dates (e.g. kevin_crye_2026-02-22.mp3, poke_2023-02-12.mp3).
 Pagination is via ?page=N query params.
 
 Two archive paths:
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Ordinal suffix patterns (1st, 2nd, 3rd, 22nd, etc.)
 _ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)")
+
+# Date embedded in MP3 filenames: kevin_crye_2026-02-22.mp3, poke_2023-02-12.mp3
+_FILENAME_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.mp3", re.IGNORECASE)
+# Date in URL path: /media/2025/04/20/FILENAME.mp3
+_URL_PATH_DATE_RE = re.compile(r"/media/(\d{4})/(\d{2})/(\d{2})/")
 
 # Archive paths on KCNR. The "poke" archive alternates between Kevin Crye Show
 # and Poke the Hornets Nest episodes — we import all as Kevin Crye Show and
@@ -118,7 +124,7 @@ class KCNRScraper(BaseScraper):
         soup = BeautifulSoup(html, "html.parser")
         episodes = []
 
-        # Date headings are h2 or h3 tags
+        # Track heading dates as fallback
         current_date = None
 
         for tag in soup.find_all(["h2", "h3", "a"]):
@@ -141,7 +147,18 @@ class KCNRScraper(BaseScraper):
                 if any(ep.audio_url == href for ep in episodes):
                     continue
 
-                date = current_date or "1970-01-01"
+                # Extract date from filename (e.g. kevin_crye_2026-02-22.mp3)
+                date_match = _FILENAME_DATE_RE.search(href)
+                if date_match:
+                    date = date_match.group(1)
+                else:
+                    # Fallback: date from URL path (e.g. /media/2025/04/20/)
+                    path_match = _URL_PATH_DATE_RE.search(href)
+                    if path_match:
+                        date = f"{path_match.group(1)}-{path_match.group(2)}-{path_match.group(3)}"
+                    else:
+                        date = current_date or "1970-01-01"
+
                 title = f"{show_name} — {date}"
 
                 episodes.append(ScrapedEpisode(

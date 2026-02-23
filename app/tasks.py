@@ -113,7 +113,7 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
     available when re-evaluation starts.
     """
     from app.database import SessionLocal
-    from app.config import MAX_EMBED_AUDIO_SEC, MEDIA_DIR, MULTI_CLIP_DURATION
+    from app.config import MAX_EMBED_AUDIO_SEC, MULTI_CLIP_DURATION
     from app.services.voiceprint import MIN_VOICEPRINT_DURATION
     from app.services import embedder
     from app import models
@@ -127,10 +127,19 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
             logger.warning("extract_multi_voiceprints: segment %s not found", segment_id)
             return {"error": "segment not found"}
 
-        audio_path = str(MEDIA_DIR / segment.meeting_id / "audio.wav")
-        if not Path(audio_path).exists():
-            logger.warning("extract_multi_voiceprints: audio not found at %s", audio_path)
+        # Find extracted audio via DB (any *_extracted.wav)
+        extracted_media = (
+            db.query(models.MediaFile)
+            .filter(
+                models.MediaFile.meeting_id == segment.meeting_id,
+                models.MediaFile.file_path.like("%\\_extracted.wav", escape="\\"),
+            )
+            .first()
+        )
+        if not extracted_media or not Path(extracted_media.file_path).exists():
+            logger.warning("extract_multi_voiceprints: extracted audio not found for meeting %s", segment.meeting_id)
             return {"error": "audio not found"}
+        audio_path = extracted_media.file_path
 
         # Build windows starting after the region already covered
         clip_start = segment.start_time + MAX_EMBED_AUDIO_SEC

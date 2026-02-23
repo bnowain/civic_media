@@ -84,7 +84,7 @@ def migrate():
                 "name": "KCNR - Kevin Crye Show",
                 "source_type": "kcnr",
                 "config_json": json.dumps({
-                    "base_url": "https://www.kcnrradio.com",
+                    "base_url": "https://apps.kcnr1460.com",
                     "archive_path": "/kevin-crye-show",
                     "max_pages": 19,
                 }),
@@ -94,7 +94,7 @@ def migrate():
                 "name": "KQMS - SecureNet Shows",
                 "source_type": "securenet",
                 "config_json": json.dumps({
-                    "station_url": "https://securenetsystems.net/v5/index.cfm",
+                    "station_url": "https://radio.securenetsystems.net/v5/KQMS",
                     "station_id": "KQMS",
                     "shows": [
                         "Kevin Crye",

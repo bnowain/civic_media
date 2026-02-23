@@ -21,6 +21,7 @@ from app import models, schemas
 from app.config import MEDIA_DIR
 from app.database import get_db
 from app.tasks import process_video_task
+from app.utils import generate_media_filename
 
 router = APIRouter(tags=["media"])
 
@@ -45,27 +46,33 @@ _MIME_TYPES = {
 }
 
 
-def _find_media_file(meeting_id: str) -> Path | None:
-    """Return the uploaded media file (video or audio) regardless of extension, or None."""
-    d = MEDIA_DIR / meeting_id
-    # Check video files first, then audio source files
-    for prefix, suffixes in [("video", _VIDEO_SUFFIXES), ("audio_source", _AUDIO_SUFFIXES)]:
-        for suffix in suffixes:
-            p = d / f"{prefix}{suffix}"
-            if p.exists():
-                return p
+def _find_media_file(meeting_id: str, db: Session) -> Path | None:
+    """Return the source media file (upload or download) via DB query, or None."""
+    source = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
+        )
+        .first()
+    )
+    if source:
+        p = Path(source.file_path)
+        if p.exists():
+            return p
     return None
 
 
 # ── Video streaming ───────────────────────────────────────────────────────────
 
 @router.get("/media/{meeting_id}/video")
-async def stream_media(meeting_id: str, request: Request):
+async def stream_media(meeting_id: str, request: Request, db: Session = Depends(get_db)):
     """
     Stream a meeting's media file (video or audio) with HTTP 206 range request support.
     Browsers require range responses to seek in large media files.
     """
-    video_path = _find_media_file(meeting_id)
+    video_path = _find_media_file(meeting_id, db)
     if not video_path:
         raise HTTPException(404, "Media file not found")
 
@@ -150,12 +157,12 @@ async def upload_video(
         )
 
     is_audio = suffix in _AUDIO_SUFFIXES
-    file_prefix = "audio_source" if is_audio else "video"
     file_type = "audio" if is_audio else "video"
 
     dest_dir  = MEDIA_DIR / meeting_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"{file_prefix}{suffix}"
+    dest_filename = generate_media_filename(meeting.meeting_date, meeting.title, suffix)
+    dest_path = dest_dir / dest_filename
 
     with dest_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
@@ -234,15 +241,14 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    # Find the source media file (video or audio upload).
-    # Uploaded audio files are saved as "audio_source.*", whereas the
-    # pipeline-extracted audio lives at "audio.wav".
+    # Find the source media file (video or audio upload/download).
+    # Pipeline-extracted audio filenames end with "_extracted.wav".
     source_media = (
         db.query(models.MediaFile)
         .filter(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
-            ~models.MediaFile.file_path.like("%audio.wav"),
+            ~models.MediaFile.file_path.like("%\\_extracted.wav", escape="\\"),
         )
         .first()
     )
@@ -268,18 +274,21 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
         .delete(synchronize_session=False)
     )
 
-    # Delete extracted audio.wav MediaFile record (will be re-extracted).
-    # Keep uploaded audio source files intact.
+    # Delete extracted audio MediaFile record (will be re-extracted).
+    # Keep uploaded/downloaded source files intact.
     db.query(models.MediaFile).filter(
         models.MediaFile.meeting_id == meeting_id,
-        models.MediaFile.file_path.like("%audio.wav"),
+        models.MediaFile.file_path.like("%\\_extracted.wav", escape="\\"),
     ).delete(synchronize_session=False)
 
     db.commit()
 
-    # Delete cache files — audio.wav, diarization.json, progress.json
+    # Delete cache files — *_extracted.wav, diarization.json, progress.json
     meeting_dir = MEDIA_DIR / meeting_id
-    for fname in ("audio.wav", "diarization.json", "progress.json"):
+    if meeting_dir.exists():
+        for p in meeting_dir.glob("*_extracted.wav"):
+            p.unlink()
+    for fname in ("diarization.json", "progress.json"):
         p = meeting_dir / fname
         if p.exists():
             p.unlink()
