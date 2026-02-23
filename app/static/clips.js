@@ -5,8 +5,11 @@
 
 "use strict";
 
+const CLEANUP_HOURS = 24;  // must match app/config.py CLIP_CLEANUP_HOURS
+
 let clips = [];
-const activePollers = {};  // clipId -> { timer, startedAt, firstPct }
+const activePollers = {};  // clipId -> { timer, firstPct, firstPctTime }
+const sourceCache = {};    // sourceId -> { label, date }
 
 async function init() {
   await loadClips();
@@ -17,12 +20,62 @@ async function loadClips() {
     const r = await fetch("/api/clips/");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     clips = await r.json();
+    await loadSourceInfo();
     renderClips();
   } catch (err) {
     console.error("Failed to load clips:", err);
     document.getElementById("clips-grid").innerHTML =
       '<div class="empty-state">Failed to load clips.</div>';
   }
+}
+
+async function loadSourceInfo() {
+  // Collect unique source IDs by type
+  const meetingIds = [...new Set(clips.filter(c => c.source_type === "meeting").map(c => c.source_id))];
+  const newscastIds = [...new Set(clips.filter(c => c.source_type === "newscast").map(c => c.source_id))];
+
+  // Fetch meetings in parallel
+  const fetches = [];
+  for (const id of meetingIds) {
+    if (sourceCache[id]) continue;
+    fetches.push(
+      fetch(`/api/meetings/${id}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(m => {
+          if (!m) return;
+          const date = m.meeting_date ? formatDate(m.meeting_date) : "";
+          sourceCache[id] = {
+            label: m.governing_body || m.title || "Meeting",
+            date,
+          };
+        })
+        .catch(() => {})
+    );
+  }
+  for (const id of newscastIds) {
+    if (sourceCache[id]) continue;
+    fetches.push(
+      fetch(`/api/news/${id}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(n => {
+          if (!n) return;
+          sourceCache[id] = {
+            label: n.station || n.title || "Newscast",
+            date: n.air_date ? formatDate(n.air_date) : "",
+          };
+        })
+        .catch(() => {})
+    );
+  }
+  await Promise.all(fetches);
+}
+
+function getSourceLine(clip) {
+  const info = sourceCache[clip.source_id];
+  if (info) {
+    return info.date ? `${info.label} ${info.date}` : info.label;
+  }
+  return clip.source_type;
 }
 
 function renderClips() {
@@ -56,11 +109,8 @@ function renderClips() {
       ? `/api/clips/${clip.clip_id}/thumbnail`
       : null;
 
-    const dateStr = clip.created_at
-      ? new Date(clip.created_at).toLocaleDateString("en-US", {
-          year: "numeric", month: "short", day: "numeric",
-        })
-      : "";
+    const countdown = getCountdown(clip);
+    const sourceLine = getSourceLine(clip);
 
     card.innerHTML = `
       <div class="clip-card-thumb">
@@ -72,15 +122,16 @@ function renderClips() {
       </div>
       <div class="clip-card-body">
         <div class="clip-card-title">${esc(clip.title)}</div>
-        <div class="clip-card-meta">
-          ${esc(clip.source_type)} &middot; ${dateStr}
-        </div>
-        <div class="clip-status-area" id="status-${clip.clip_id}">
-          ${renderStatusBadge(clip)}
+        <div class="clip-card-meta-row">
+          <span class="clip-card-meta">${esc(sourceLine)}</span>
+          <span class="clip-countdown" id="countdown-${clip.clip_id}">${countdown}</span>
         </div>
       </div>
-      <div class="clip-card-actions" id="actions-${clip.clip_id}">
-        ${renderActions(clip)}
+      <div class="clip-card-actions">
+        <span class="clip-primary-action" id="primary-${clip.clip_id}">${renderPrimaryAction(clip)}</span>
+        <button class="btn btn-ghost btn-sm clip-action-btn" onclick="openSource('${clip.clip_id}')">Open Source</button>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm btn-danger clip-action-btn" onclick="deleteClip('${clip.clip_id}')">&#10005;</button>
       </div>
     `;
 
@@ -93,30 +144,44 @@ function renderClips() {
   });
 }
 
-function renderStatusBadge(clip) {
-  if (clip.export_status === "ready") {
-    return `<span class="clip-card-badge clip-badge-ready">ready</span>`;
+// ── Primary action: morphs between Re-export / progress bar / Download ──────
+
+function renderPrimaryAction(clip) {
+  const s = clip.export_status;
+
+  if (s === "ready") {
+    return `<a href="/api/clips/${clip.clip_id}/download" class="btn btn-primary btn-sm clip-download-btn">&#8615; Download</a>`;
   }
-  if (clip.export_status === "error") {
-    return `<span class="clip-card-badge clip-badge-error">error</span>`;
+
+  if (s === "exporting" || s === "pending") {
+    return `<span class="clip-card-badge clip-badge-exporting">exporting...</span>`;
   }
-  if (clip.export_status === "exporting" || clip.export_status === "pending") {
-    return `<span class="clip-card-badge clip-badge-exporting">exporting</span>`;
+
+  if (s === "error") {
+    return `<button class="btn btn-ghost btn-sm clip-action-btn" onclick="reExportClip('${clip.clip_id}')">&#8635; Re-export</button>`;
   }
-  return `<span class="clip-card-badge clip-badge-cleaned">${esc(clip.export_status || "unknown")}</span>`;
+
+  // cleaned or unknown
+  return `<button class="btn btn-ghost btn-sm clip-action-btn" onclick="reExportClip('${clip.clip_id}')">&#8635; Re-export</button>`;
 }
 
-function renderActions(clip) {
-  let html = "";
-  if (clip.export_status === "ready") {
-    html += `<a href="/api/clips/${clip.clip_id}/download" class="btn btn-ghost btn-sm clip-action-btn">&#8615; Download</a>`;
+function getCountdown(clip) {
+  if (!clip.created_at || clip.export_status !== "ready") return "";
+  const created = new Date(clip.created_at).getTime();
+  const expires = created + CLEANUP_HOURS * 3600 * 1000;
+  const remaining = expires - Date.now();
+  if (remaining <= 0) return "(download expiring soon)";
+
+  const hours = remaining / (3600 * 1000);
+  if (hours >= 48) {
+    const days = Math.floor(hours / 24);
+    return `(${days}d to download)`;
   }
-  if (clip.export_status === "cleaned" || clip.export_status === "error") {
-    html += `<button class="btn btn-ghost btn-sm clip-action-btn" onclick="reExportClip('${clip.clip_id}')">&#8635; Re-export</button>`;
+  if (hours >= 1) {
+    return `(${Math.floor(hours)}h to download)`;
   }
-  html += `<button class="btn btn-ghost btn-sm clip-action-btn" onclick="openSource('${clip.clip_id}')">Open Source</button>`;
-  html += `<button class="btn btn-ghost btn-sm btn-danger clip-action-btn" onclick="deleteClip('${clip.clip_id}')">&#10005;</button>`;
-  return html;
+  const mins = Math.floor(remaining / 60000);
+  return `(${mins}m to download)`;
 }
 
 // ── Polling for in-progress exports ─────────────────────────────────────────
@@ -124,7 +189,7 @@ function renderActions(clip) {
 function startPolling(clipId) {
   if (activePollers[clipId]) return;
 
-  const state = { timer: null, pollStart: Date.now(), firstPct: null, firstPctTime: null };
+  const state = { timer: null, firstPct: null, firstPctTime: null };
 
   state.timer = setInterval(async () => {
     try {
@@ -132,63 +197,58 @@ function startPolling(clipId) {
       if (!r.ok) return;
       const data = await r.json();
 
-      const statusArea = document.getElementById(`status-${clipId}`);
-      if (!statusArea) { stopPolling(clipId); return; }
+      const primary = document.getElementById(`primary-${clipId}`);
+      if (!primary) { stopPolling(clipId); return; }
 
-      if (data.status === "ready") {
+      // Terminal states — stop polling and update the action area
+      if (data.status === "ready" || data.status === "error" || data.status === "cleaned") {
         stopPolling(clipId);
-        updateClipLocal(clipId, "ready");
-        statusArea.innerHTML = `<span class="clip-card-badge clip-badge-ready">ready</span>`;
-        const actionsEl = document.getElementById(`actions-${clipId}`);
-        if (actionsEl) {
-          const clip = clips.find(c => c.clip_id === clipId);
-          if (clip) actionsEl.innerHTML = renderActions(clip);
+        const clip = clips.find(c => c.clip_id === clipId);
+        if (clip) {
+          clip.export_status = data.status;
+          if (data.error) clip.export_error = data.error;
+          primary.innerHTML = renderPrimaryAction(clip);
+          // Update countdown text
+          const cdEl = document.getElementById(`countdown-${clipId}`);
+          if (cdEl) cdEl.textContent = data.status === "ready" ? getCountdown(clip) : "";
         }
-      } else if (data.status === "error") {
-        stopPolling(clipId);
-        updateClipLocal(clipId, "error");
-        statusArea.innerHTML = `<span class="clip-card-badge clip-badge-error">error: ${esc(data.error || "export failed")}</span>`;
-        const actionsEl = document.getElementById(`actions-${clipId}`);
-        if (actionsEl) {
-          const clip = clips.find(c => c.clip_id === clipId);
-          if (clip) actionsEl.innerHTML = renderActions(clip);
-        }
-      } else {
-        // Exporting — show progress bar + ETA
-        const pct = data.pct || 0;
-
-        // Track first non-zero percentage for ETA calculation
-        if (pct > 0 && state.firstPct === null) {
-          state.firstPct = pct;
-          state.firstPctTime = Date.now();
-          // Use started_at from server if available
-          if (data.started_at) {
-            state.firstPctTime = data.started_at * 1000;
-            state.firstPct = 0;
-          }
-        }
-
-        let etaHtml = "";
-        if (pct > 0 && state.firstPct !== null && pct > state.firstPct) {
-          const elapsed = (Date.now() - state.firstPctTime) / 1000;
-          const pctDone = pct - state.firstPct;
-          const remaining = elapsed * (100 - pct) / pctDone;
-          if (remaining > 0 && remaining < 3600) {
-            const mins = Math.floor(remaining / 60);
-            const secs = Math.floor(remaining % 60);
-            etaHtml = `<span class="clip-eta">~${mins > 0 ? mins + "m " : ""}${secs}s remaining</span>`;
-          }
-        }
-
-        statusArea.innerHTML = `
-          <div class="clip-inline-progress">
-            <div class="clip-progress-track">
-              <div class="clip-progress-fill" style="width:${pct}%"></div>
-            </div>
-            <span class="clip-progress-pct">${pct}%</span>
-            ${etaHtml}
-          </div>`;
+        return;
       }
+
+      // Still exporting — show progress bar + ETA
+      const pct = data.pct || 0;
+
+      // Track first non-zero percentage for ETA calculation
+      if (pct > 0 && state.firstPct === null) {
+        state.firstPct = pct;
+        state.firstPctTime = Date.now();
+        if (data.started_at) {
+          state.firstPctTime = data.started_at * 1000;
+          state.firstPct = 0;
+        }
+      }
+
+      let etaHtml = "";
+      if (pct > 0 && state.firstPct !== null && pct > state.firstPct) {
+        const elapsed = (Date.now() - state.firstPctTime) / 1000;
+        const pctDone = pct - state.firstPct;
+        const remaining = elapsed * (100 - pct) / pctDone;
+        if (remaining > 0 && remaining < 3600) {
+          const mins = Math.floor(remaining / 60);
+          const secs = Math.floor(remaining % 60);
+          etaHtml = `<span class="clip-eta">~${mins > 0 ? mins + "m " : ""}${secs}s remaining</span>`;
+        }
+      }
+
+      primary.innerHTML = `
+        <div class="clip-inline-progress">
+          <div class="clip-progress-track">
+            <div class="clip-progress-fill" style="width:${pct}%"></div>
+          </div>
+          <span class="clip-progress-pct">${pct}%</span>
+          ${etaHtml}
+        </div>`;
+
     } catch { /* ignore poll errors */ }
   }, 2000);
 
@@ -200,11 +260,6 @@ function stopPolling(clipId) {
     clearInterval(activePollers[clipId].timer);
     delete activePollers[clipId];
   }
-}
-
-function updateClipLocal(clipId, newStatus) {
-  const clip = clips.find(c => c.clip_id === clipId);
-  if (clip) clip.export_status = newStatus;
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
@@ -229,11 +284,11 @@ async function reExportClip(clipId) {
       const body = await r.json().catch(() => ({}));
       throw new Error(body.detail || `HTTP ${r.status}`);
     }
-    // Update local state and start polling
-    updateClipLocal(clipId, "exporting");
-    const statusArea = document.getElementById(`status-${clipId}`);
-    if (statusArea) {
-      statusArea.innerHTML = `<span class="clip-card-badge clip-badge-exporting">exporting</span>`;
+    const clip = clips.find(c => c.clip_id === clipId);
+    if (clip) clip.export_status = "exporting";
+    const primary = document.getElementById(`primary-${clipId}`);
+    if (primary) {
+      primary.innerHTML = `<span class="clip-card-badge clip-badge-exporting">exporting...</span>`;
     }
     startPolling(clipId);
   } catch (err) {
@@ -261,6 +316,16 @@ function fmtTime(seconds) {
   const s = Math.floor(seconds % 60);
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatDate(iso) {
+  if (!iso) return "";
+  try {
+    const [y, m, d] = iso.split("-");
+    return new Date(+y, +m - 1, +d).toLocaleDateString("en-US", {
+      year: "numeric", month: "short", day: "numeric",
+    });
+  } catch { return iso; }
 }
 
 function esc(str) {

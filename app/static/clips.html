@@ -12,12 +12,11 @@
     .clip-inline-progress {
       display: flex;
       align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 100px;
     }
     .clip-inline-progress .clip-progress-track {
-      flex: 1;
-      min-width: 80px;
+      width: 60px;
       height: 4px;
       background: rgba(255,255,255,0.08);
       border-radius: 2px;
@@ -40,8 +39,28 @@
       font-size: 0.65rem;
       color: #666;
     }
-    .clip-status-area {
-      margin-top: 4px;
+    .clip-card-meta-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .clip-primary-action {
+      display: inline-flex;
+      align-items: center;
+    }
+    .clip-download-btn {
+      text-decoration: none;
+    }
+    .clip-countdown {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.6rem;
+      color: #777;
+    }
+    .clip-error-hint {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.65rem;
+      color: #e06c75;
     }
   </style>
 </head>

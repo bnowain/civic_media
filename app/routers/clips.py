@@ -231,9 +231,6 @@ def _export_clip_bg(clip_id: str) -> None:
         db.commit()
         logger.info("_export_clip_bg complete: %s -> %s", clip_id, out_path)
 
-        # Auto-cleanup old exports so abandoned clips don't pile up
-        _run_cleanup(db)
-
     except Exception as exc:
         db.rollback()
         try:
@@ -485,6 +482,7 @@ def re_export_clip(clip_id: str, db: Session = Depends(get_db)):
     clip.export_status = "pending"
     clip.export_error = None
     clip.export_path = None
+    clip.downloaded_at = None  # reset so cleanup doesn't nuke it immediately
     db.commit()
     db.refresh(clip)
 
