@@ -73,6 +73,7 @@ HIGH_NO_SPEECH_PROB       = 0.6    # no_speech_prob above this = likely silence
 # almost always indicate Whisper looping on the same phrase.
 HALLUCINATION_COMPRESSION_RATIO = 2.4
 HALLUCINATION_NO_SPEECH_PROB    = 0.9   # near-certain silence → drop
+MIN_SEGMENT_DURATION            = 0.1  # seconds; zero-duration = hallucination artifact
 
 
 def _get_model() -> "_WhisperModelType":
@@ -166,6 +167,16 @@ def transcribe(
 
         text = seg.text.strip()
         if not text:
+            continue
+
+        # Zero/near-zero duration segments are artifacts, not real speech
+        seg_duration = seg.end - seg.start
+        if seg_duration < MIN_SEGMENT_DURATION:
+            hallucination_count += 1
+            logger.warning(
+                "Filtered zero-duration segment [%.1f-%.1f]: dur=%.3fs | %r",
+                seg.start, seg.end, seg_duration, text[:80],
+            )
             continue
 
         avg_logprob    = round(seg.avg_logprob,    4)

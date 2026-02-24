@@ -42,6 +42,7 @@ class MeetingCreate(BaseModel):
     video_url: Optional[str] = None
     agenda_url: Optional[str] = None
     minutes_url: Optional[str] = None
+    packet_url: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod

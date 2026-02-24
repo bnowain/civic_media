@@ -118,6 +118,9 @@ def run_discovery(
             if existing.minutes_url is None and pm.minutes_url:
                 existing.minutes_url = pm.minutes_url
                 changed = True
+            if existing.packet_url is None and pm.packet_url:
+                existing.packet_url = pm.packet_url
+                changed = True
 
             if changed:
                 updated += 1
@@ -141,6 +144,7 @@ def run_discovery(
                 video_url=pm.video_url,
                 agenda_url=pm.agenda_url,
                 minutes_url=pm.minutes_url,
+                packet_url=pm.packet_url,
             )
             db.add(meeting)
             created += 1

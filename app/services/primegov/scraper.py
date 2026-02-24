@@ -31,6 +31,8 @@ COMMITTEES = {
 DOC_TYPES = {
     "Agenda": "agenda",
     "Minutes": "minutes",
+    "Packet": "packet",
+    "HTML Packet": "packet",
     "Meeting Packet": "packet",
 }
 
@@ -76,6 +78,13 @@ class PrimeGovMeeting:
     def minutes_url(self) -> Optional[str]:
         for doc in self.documents:
             if doc.doc_type == "minutes":
+                return doc.download_url
+        return None
+
+    @property
+    def packet_url(self) -> Optional[str]:
+        for doc in self.documents:
+            if doc.doc_type == "packet":
                 return doc.download_url
         return None
 

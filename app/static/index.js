@@ -1223,8 +1223,14 @@ async function fetchAssetStatus(meetingId) {
       }
       if (assets.agenda_url_available) {
         icons.push(assets.agenda_downloaded
-          ? '<span class="asset-icon asset-downloaded" title="Agenda downloaded">&#x1F4CB;</span>'
-          : '<span class="asset-icon asset-available" title="Agenda available">&#x1F4C4;</span>'
+          ? '<span class="asset-icon asset-downloaded" title="Agenda Overview downloaded">&#x1F4CB;</span>'
+          : '<span class="asset-icon asset-available" title="Agenda Overview available">&#x1F4C4;</span>'
+        );
+      }
+      if (assets.packet_url_available) {
+        icons.push(assets.packet_downloaded
+          ? '<span class="asset-icon asset-downloaded" title="Agenda Packet downloaded">&#x1F4E6;</span>'
+          : '<span class="asset-icon asset-available" title="Agenda Packet available">&#x1F4E6;</span>'
         );
       }
       if (assets.minutes_url_available) {

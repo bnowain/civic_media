@@ -243,7 +243,8 @@ def download_document(
     if not meeting:
         return {"error": "Meeting not found", "status": "error"}
 
-    url = meeting.agenda_url if doc_type == "agenda" else meeting.minutes_url
+    url_map = {"agenda": meeting.agenda_url, "minutes": meeting.minutes_url, "packet": meeting.packet_url}
+    url = url_map.get(doc_type)
     if not url:
         return {"error": f"No {doc_type} URL available", "status": "error"}
 

@@ -547,6 +547,7 @@ def primegov_download_task(
     download_video: bool = True,
     download_agenda: bool = True,
     download_minutes: bool = True,
+    download_packet: bool = True,
     auto_process: bool = False,
 ) -> dict:
     """
@@ -570,6 +571,9 @@ def primegov_download_task(
 
         if download_minutes:
             results["minutes"] = dl_doc(db, meeting_id, "minutes")
+
+        if download_packet:
+            results["packet"] = dl_doc(db, meeting_id, "packet")
 
         # Auto-process if video was downloaded successfully
         if auto_process and results.get("video", {}).get("status") == "complete":

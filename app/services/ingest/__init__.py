@@ -47,6 +47,9 @@ def _get_scraper(source: models.IngestSource):
     elif source.source_type == "freedominaction":
         from .freedominaction import FreedomInActionScraper
         return FreedomInActionScraper(config)
+    elif source.source_type == "podbean":
+        from .podbean import PodbeamScraper
+        return PodbeamScraper(config)
     else:
         raise ValueError(f"Unknown source type: {source.source_type}")
 
@@ -140,7 +143,31 @@ def run_ingest(db: Session, source_id: str | None = None):
             )
             existing_urls = {r[0] for r in rows}
 
-        new_episodes = [ep for ep in audio_episodes if ep.audio_url not in existing_urls]
+        # Cross-source dedup: also check by date + show_name (governing_body)
+        # so the same episode from SecureNet and Podbean doesn't create duplicates
+        existing_date_show: set[tuple[str, str]] = set()
+        if audio_episodes:
+            show_names = {ep.show_name for ep in audio_episodes if ep.show_name}
+            if show_names:
+                rows = (
+                    db.query(models.Meeting.meeting_date, models.Meeting.governing_body)
+                    .filter(
+                        models.Meeting.category == "audio",
+                        models.Meeting.governing_body.in_(show_names),
+                    )
+                    .all()
+                )
+                existing_date_show = {(r[0], r[1]) for r in rows}
+
+        new_episodes = []
+        for ep in audio_episodes:
+            if ep.audio_url in existing_urls:
+                continue
+            # Cross-source dedup: skip if same show + date already exists
+            if ep.show_name and (ep.episode_date, ep.show_name) in existing_date_show:
+                logger.info("  Cross-source dup skipped: %s on %s", ep.show_name, ep.episode_date)
+                continue
+            new_episodes.append(ep)
         total_found += len(audio_episodes)
 
         logger.info("  %d new episodes (skipping %d duplicates)",

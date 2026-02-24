@@ -183,6 +183,16 @@ async function editSegmentText(segmentId, text) {
   return r.json();
 }
 
+// ── Interaction guard ─────────────────────────────────────────────────────────
+
+function isUserInteracting() {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.classList.contains("seg-select")) return true;
+  if (el.getAttribute("contenteditable") === "true") return true;
+  return false;
+}
+
 // ── Render Transcript ─────────────────────────────────────────────────────────
 
 function renderTranscript() {
@@ -570,6 +580,8 @@ function showReprocessIndicator() {
   const MAX = 6;
   const timer = setInterval(async () => {
     attempts++;
+    // Skip render if user is interacting with a dropdown or editing text
+    if (isUserInteracting()) return;
     const fresh = await fetchSegments();
     if (fresh) {
       // Merge: keep confirmed-this-session cards, update everything else
@@ -704,6 +716,8 @@ function startPipelinePoll() {
   if (pollTimer) clearInterval(pollTimer);
   let nullCount = 0;
   pollTimer = setInterval(async () => {
+    // Skip render if user is interacting with a dropdown or editing text
+    if (isUserInteracting()) return;
     const s = await fetchStatus();
     if (!s) {
       // Meeting or media may have been deleted — stop after 3 consecutive nulls
@@ -1055,8 +1069,11 @@ function renderDocuments() {
     const hasText  = doc.ocr_text && doc.ocr_text.trim().length > 0;
     const filename = doc.file_path.split(/[/\\]/).pop();
 
+    const DOC_LABELS = { "agenda": "Agenda Overview", "minutes": "Minutes", "packet": "Agenda Packet" };
+    const typeLabel = DOC_LABELS[doc.document_type] || doc.document_type.charAt(0).toUpperCase() + doc.document_type.slice(1);
+
     item.innerHTML = `
-      <span class="doc-item-type">${esc(doc.document_type)}</span>
+      <span class="doc-item-type">${esc(typeLabel)}</span>
       <span style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
         ${esc(filename)}
       </span>
@@ -1067,9 +1084,10 @@ function renderDocuments() {
     list.appendChild(item);
   });
 
-  // Add a tab for each document (agenda, minutes, etc.)
+  // Add a tab for each document (agenda overview, agenda packet, minutes, etc.)
+  const DOC_TAB_LABELS = { "agenda": "Agenda Overview", "minutes": "Minutes", "packet": "Agenda Packet" };
   documents.forEach(doc => {
-    const label = doc.document_type.charAt(0).toUpperCase() + doc.document_type.slice(1);
+    const label = DOC_TAB_LABELS[doc.document_type] || doc.document_type.charAt(0).toUpperCase() + doc.document_type.slice(1);
     const tab = document.createElement("button");
     tab.className = "doc-tab";
     tab.dataset.docTab = doc.document_id;

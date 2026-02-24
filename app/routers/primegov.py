@@ -84,6 +84,7 @@ def download_meeting_assets(
     download_video: bool = Query(default=True),
     download_agenda: bool = Query(default=True),
     download_minutes: bool = Query(default=True),
+    download_packet: bool = Query(default=True),
     auto_process: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
@@ -103,6 +104,7 @@ def download_meeting_assets(
         download_video=download_video,
         download_agenda=download_agenda,
         download_minutes=download_minutes,
+        download_packet=download_packet,
         auto_process=auto_process,
     )
     return {
@@ -147,6 +149,7 @@ def download_all_undownloaded(
                 download_video=True,
                 download_agenda=True,
                 download_minutes=True,
+                download_packet=True,
                 auto_process=auto_process,
             )
             queued += 1
@@ -202,6 +205,12 @@ def meeting_assets_status(meeting_id: str, db: Session = Depends(get_db)):
         .first()
     ) is not None
 
+    has_packet = (
+        db.query(Document)
+        .filter_by(meeting_id=meeting_id, document_type="packet")
+        .first()
+    ) is not None
+
     return {
         "meeting_id": meeting_id,
         "primegov_id": meeting.primegov_id,
@@ -211,4 +220,6 @@ def meeting_assets_status(meeting_id: str, db: Session = Depends(get_db)):
         "agenda_downloaded": has_agenda,
         "minutes_url_available": meeting.minutes_url is not None,
         "minutes_downloaded": has_minutes,
+        "packet_url_available": meeting.packet_url is not None,
+        "packet_downloaded": has_packet,
     }

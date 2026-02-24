@@ -61,6 +61,7 @@ class Meeting(Base):
     video_url         = Column(Text, nullable=True)        # Swagit video page URL
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
     minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL
+    packet_url        = Column(Text, nullable=True)         # PrimeGov meeting packet PDF URL
     processed_at      = Column(DateTime, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
 
@@ -322,7 +323,7 @@ class IngestSource(Base):
 
     source_id          = Column(String, primary_key=True, default=_gen_id)
     name               = Column(String, nullable=False, unique=True)
-    source_type        = Column(String, nullable=False)  # "kcnr" | "securenet" | "freedominaction"
+    source_type        = Column(String, nullable=False)  # "kcnr" | "securenet" | "freedominaction" | "podbean"
     config_json        = Column(Text, nullable=True)     # JSON blob of source-specific params
     last_scraped_at    = Column(DateTime, nullable=True)
     last_scraped_count = Column(Float, nullable=True)    # episodes found last run
