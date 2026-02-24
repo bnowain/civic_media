@@ -176,9 +176,11 @@ async def upload_video(
     db.commit()
     db.refresh(media)
 
-    # Try Celery first, fall back to background thread
+    # Try Celery first (auto-restart if needed), fall back to background thread
     try:
         from app.tasks import process_video_task
+        from app.services.worker_manager import ensure_worker
+        ensure_worker()
         process_video_task.delay(meeting_id, media.media_id)
     except Exception:
         import logging
@@ -285,9 +287,11 @@ def process_meeting(meeting_id: str, db: Session = Depends(get_db)):
     if segment_count > 0:
         raise HTTPException(400, "Meeting already has transcript segments. Use /rerun instead.")
 
-    # Try Celery first, fall back to background thread
+    # Try Celery first (auto-restart if needed), fall back to background thread
     try:
         from app.tasks import process_video_task
+        from app.services.worker_manager import ensure_worker
+        ensure_worker()
         process_video_task.delay(meeting_id, media.media_id)
         return {"meeting_id": meeting_id, "status": "queued"}
     except Exception:
@@ -392,9 +396,11 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
         if p.exists():
             p.unlink()
 
-    # Requeue pipeline — try Celery, fall back to thread
+    # Requeue pipeline — try Celery (auto-restart if needed), fall back to thread
     try:
         from app.tasks import process_video_task
+        from app.services.worker_manager import ensure_worker
+        ensure_worker()
         process_video_task.delay(meeting_id, source_media.media_id)
     except Exception:
         import logging

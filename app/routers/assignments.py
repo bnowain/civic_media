@@ -155,7 +155,9 @@ def confirm_assignment(
     #    re-evaluation starts.
     from app.config import MULTI_CLIP_MIN_SEGMENT
     from app.tasks import extract_multi_voiceprints_task, rerun_voiceprints_task
+    from app.services.worker_manager import ensure_worker
 
+    ensure_worker()
     if segment.embedding and seg_duration >= MULTI_CLIP_MIN_SEGMENT:
         extract_multi_voiceprints_task.delay(segment_id, payload.person_id)
         logger.info(
@@ -224,6 +226,8 @@ def unconfirm_assignment(
 
     # ── Trigger background rerun so system re-matches this segment ─────────
     from app.tasks import rerun_voiceprints_task
+    from app.services.worker_manager import ensure_worker
+    ensure_worker()
     rerun_voiceprints_task.delay(segment.meeting_id)
     logger.info(
         "Queued background voiceprint re-evaluation for meeting %s (unconfirm)",
@@ -309,6 +313,8 @@ def reprocess_meeting(meeting_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Meeting not found")
 
     from app.tasks import rerun_voiceprints_task
+    from app.services.worker_manager import ensure_worker
+    ensure_worker()
     rerun_voiceprints_task.delay(meeting_id)
     return {"meeting_id": meeting_id, "status": "queued"}
 

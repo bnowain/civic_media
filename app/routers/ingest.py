@@ -30,6 +30,7 @@ def run_ingest(
 ):
     """Start an ingest run. Optionally filter to a single source."""
     from app.tasks import ingest_radio_task
+    from app.services.worker_manager import ensure_worker
 
     if source_id:
         src = db.query(models.IngestSource).filter_by(source_id=source_id).first()
@@ -38,6 +39,7 @@ def run_ingest(
         if not src.enabled:
             raise HTTPException(400, "Ingest source is disabled")
 
+    ensure_worker()
     result = ingest_radio_task.delay(source_id)
     return schemas.IngestRunResponse(
         task_id=result.id,

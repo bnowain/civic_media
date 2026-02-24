@@ -48,5 +48,7 @@ def process_tags(payload: TaggingPayload, db: Session = Depends(get_db)):
 def retag_content(content_type: str, content_id: str, db: Session = Depends(get_db)):
     """Manually trigger a retag via Atlas for a specific content item."""
     from app.tasks import retag_content_task
+    from app.services.worker_manager import ensure_worker
+    ensure_worker()
     task = retag_content_task.delay(content_type, content_id)
     return {"task_id": task.id, "status": "queued"}

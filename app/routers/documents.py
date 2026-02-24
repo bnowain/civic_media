@@ -69,6 +69,8 @@ async def upload_document(
 
     try:
         from app.tasks import process_pdf_task
+        from app.services.worker_manager import ensure_worker
+        ensure_worker()
         process_pdf_task.delay(doc.document_id)
     except Exception:
         # Celery/worker not available — run OCR directly

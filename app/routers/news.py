@@ -80,6 +80,8 @@ async def upload_newscast_video(
 
     # Dispatch Celery task
     from app.tasks import process_newscast_task
+    from app.services.worker_manager import ensure_worker
+    ensure_worker()
     task = process_newscast_task.delay(newscast_id, skip_commercial_strip)
 
     return {"newscast_id": newscast_id, "task_id": task.id, "status": "queued"}

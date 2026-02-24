@@ -123,6 +123,11 @@ async function init() {
   // Shutdown button
   document.getElementById("shutdown-btn").addEventListener("click", handleShutdown);
 
+  // Worker status pill
+  document.getElementById("worker-status-btn").addEventListener("click", handleWorkerClick);
+  pollWorkerHealth();
+  setInterval(pollWorkerHealth, 10000);
+
   updateToolbar();
 }
 
@@ -616,11 +621,18 @@ function applyStatusToBadge(badge, status, meetingId) {
   if (status.status === "error") {
     badge.textContent = "error";
     badge.className = "meeting-card-badge badge-error";
-    // Show transcode or process depending on transcode state
-    if (status.transcode_status === "pending") {
+    // Show the right retry button depending on where the failure occurred
+    if (status.transcode_status === null || status.transcode_status === undefined) {
+      // No media file exists — download failed, let user retry
+      showDownloadBtn(meetingId);
+      hideTranscodeBtn(meetingId);
+      hideProcessBtn(meetingId);
+    } else if (status.transcode_status === "pending") {
       showTranscodeBtn(meetingId);
+      hideDownloadBtn(meetingId);
     } else {
       showProcessBtn(meetingId);
+      hideDownloadBtn(meetingId);
     }
   } else if (status.status === "complete" && status.segment_count > 0) {
     badge.textContent = `${status.segment_count} segs`;
@@ -812,6 +824,17 @@ function startPolling(meetingId) {
       delete activePollers[meetingId];
     }
   }, POLL_INTERVAL);
+}
+
+function showDownloadBtn(meetingId) {
+  const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
+  if (!card) return;
+  const btn = card.querySelector(".download-btn");
+  if (btn) {
+    btn.style.display = "";
+    btn.disabled = false;
+    btn.textContent = "\u2B07";
+  }
 }
 
 function hideDownloadBtn(meetingId) {
@@ -1322,6 +1345,96 @@ function formatDate(iso) {
       year: "numeric", month: "short", day: "numeric",
     });
   } catch { return iso; }
+}
+
+// ── Worker Health ─────────────────────────────────────────────────────────────
+
+let workerState = "unknown";  // "online" | "offline" | "restarting" | "unknown"
+
+async function pollWorkerHealth() {
+  const dot = document.getElementById("worker-dot");
+  const label = document.getElementById("worker-label");
+  const btn = document.getElementById("worker-status-btn");
+  if (!dot || !label || !btn) return;
+
+  if (workerState === "restarting") return;  // don't poll during restart
+
+  try {
+    const r = await fetch("/api/system/worker-health");
+    const data = await r.json();
+    if (data.worker_online) {
+      workerState = "online";
+      dot.className = "worker-dot online";
+      label.textContent = "Worker";
+      btn.title = data.active_tasks
+        ? `Worker online — ${data.active_tasks} active task(s)`
+        : "Worker online";
+    } else {
+      workerState = "offline";
+      dot.className = "worker-dot offline";
+      label.textContent = "Offline";
+      btn.title = "Worker offline — click to restart";
+    }
+  } catch {
+    workerState = "offline";
+    dot.className = "worker-dot offline";
+    label.textContent = "Offline";
+    btn.title = "Worker offline — click to restart";
+  }
+}
+
+async function handleWorkerClick() {
+  if (workerState === "online" || workerState === "restarting") return;
+
+  const dot = document.getElementById("worker-dot");
+  const label = document.getElementById("worker-label");
+  const btn = document.getElementById("worker-status-btn");
+
+  // Set restarting state
+  workerState = "restarting";
+  dot.className = "worker-dot restarting";
+  label.textContent = "Restarting...";
+  btn.title = "Restarting worker...";
+
+  try {
+    const r = await fetch("/api/system/restart-worker", { method: "POST" });
+    const data = await r.json();
+    if (data.worker_online) {
+      workerState = "online";
+      dot.className = "worker-dot online";
+      label.textContent = "Worker";
+      btn.title = "Worker online";
+    } else {
+      // Worker launched but not yet responding — poll fast
+      let attempts = 0;
+      const fastPoll = setInterval(async () => {
+        attempts++;
+        try {
+          const pr = await fetch("/api/system/worker-health");
+          const pd = await pr.json();
+          if (pd.worker_online) {
+            clearInterval(fastPoll);
+            workerState = "online";
+            dot.className = "worker-dot online";
+            label.textContent = "Worker";
+            btn.title = "Worker online";
+          }
+        } catch { /* keep polling */ }
+        if (attempts >= 10) {
+          clearInterval(fastPoll);
+          workerState = "offline";
+          dot.className = "worker-dot offline";
+          label.textContent = "Offline";
+          btn.title = "Worker failed to restart — click to retry";
+        }
+      }, 2000);
+    }
+  } catch {
+    workerState = "offline";
+    dot.className = "worker-dot offline";
+    label.textContent = "Offline";
+    btn.title = "Restart failed — click to retry";
+  }
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────

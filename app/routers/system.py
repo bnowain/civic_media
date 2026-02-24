@@ -1,8 +1,10 @@
 """
 System management endpoints.
 
-POST  /api/system/shutdown  — Gracefully stop all server processes.
-GET   /api/system/status    — Check worker process health.
+GET   /api/system/status          — Check worker process health (PID-based).
+GET   /api/system/worker-health   — Celery worker + Redis health (ping-based).
+POST  /api/system/restart-worker  — Kill zombies and relaunch celery watchdog.
+POST  /api/system/shutdown        — Gracefully stop all server processes.
 """
 
 import asyncio
@@ -51,6 +53,20 @@ def system_status():
     watchdog_pid = pids.get("watchdog")
     worker_alive = _pid_alive(watchdog_pid) if watchdog_pid else False
     return {"worker_alive": worker_alive, "watchdog_pid": watchdog_pid}
+
+
+@router.get("/worker-health")
+def worker_health():
+    """Return Celery worker and Redis health status for the UI status pill."""
+    from app.services.worker_manager import check_worker_health
+    return check_worker_health(use_cache=False)
+
+
+@router.post("/restart-worker")
+def restart_worker():
+    """Kill zombie workers and relaunch the celery watchdog."""
+    from app.services.worker_manager import restart_worker as _restart
+    return _restart()
 
 
 @router.post("/shutdown")

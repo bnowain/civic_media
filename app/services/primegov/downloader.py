@@ -295,6 +295,8 @@ def download_document(
     # Run OCR — try Celery first, fall back to direct extraction
     try:
         from app.tasks import process_pdf_task
+        from app.services.worker_manager import ensure_worker
+        ensure_worker()
         process_pdf_task.delay(doc.document_id)
     except Exception:
         logger.debug("Celery unavailable, running OCR directly")

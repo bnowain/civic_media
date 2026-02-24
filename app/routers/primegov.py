@@ -45,7 +45,9 @@ def discover_meetings(
     """
     if background:
         from app.tasks import primegov_discover_task
+        from app.services.worker_manager import ensure_worker
 
+        ensure_worker()
         task = primegov_discover_task.delay(
             committee_ids=committee_ids or [3],
             years=years,
@@ -119,7 +121,9 @@ def download_meeting_assets(
             video_note = "No video URL available for this meeting"
         else:
             from app.tasks import primegov_download_task
+            from app.services.worker_manager import ensure_worker
 
+            ensure_worker()
             task = primegov_download_task.delay(
                 meeting_id=meeting_id,
                 download_video=True,
@@ -160,7 +164,9 @@ def download_all_undownloaded(
     # Filter to those without existing media files
     queued = 0
     from app.tasks import primegov_download_task
+    from app.services.worker_manager import ensure_worker
 
+    ensure_worker()
     for meeting in downloadable:
         has_media = (
             db.query(MediaFile)
