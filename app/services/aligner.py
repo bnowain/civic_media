@@ -11,9 +11,14 @@ Two alignment strategies:
   - Segment-level (fallback): when word data is unavailable (legacy cache),
     each whole transcript segment is assigned to the best-overlap speaker.
 
-After speaker assignment, adjacent segments from the same speaker are
-merged when the gap is small or either segment is very short, capped at
-MAX_MERGE_SENTENCES to keep blocks readable.
+After speaker assignment, a trailing-word reassignment pass corrects for
+pyannote's ~200-500ms latency on speaker change detection.  Acknowledgment
+words ("yeah", "oh", "well", etc.) that bleed onto the end of the previous
+speaker's segment are moved to the next speaker where they belong.
+
+Adjacent segments from the same speaker are then merged when the gap is
+small or either segment is very short, capped at MAX_MERGE_SENTENCES to
+keep blocks readable.
 """
 
 from __future__ import annotations
@@ -29,6 +34,24 @@ logger = logging.getLogger(__name__)
 MAX_MERGE_GAP        = 1.5   # seconds
 MIN_SEGMENT_DURATION = 3.0   # seconds — absorb more short fragments
 MAX_MERGE_SENTENCES  = 5     # allow 3-5 sentence segments
+
+# ── Trailing-word reassignment ───────────────────────────────────────────────
+# Pyannote detects speaker changes ~200-500ms late, so the first word of a new
+# speaker often gets assigned to the outgoing speaker.  At zero-gap speaker
+# transitions, if the last word of the outgoing segment is an acknowledgment /
+# response-starter word, move it to the next speaker's segment.
+#
+# Conservative set — these almost never end a thought naturally when followed
+# immediately by a different speaker's turn.  "well" and "so" are excluded
+# because they legitimately end sentences ("that worked out well").
+TRAILING_REASSIGN_GAP = 0.3   # seconds — only at tight speaker handoffs
+TRAILING_REASSIGN_MIN_WORDS = 3  # don't cannibalize very short segments
+
+_ACKNOWLEDGMENT_WORDS = frozenset({
+    "yeah", "yep", "yes", "oh", "okay", "ok", "right", "sure",
+    "absolutely", "boy", "wow", "no", "nah", "nope", "huh",
+    "hmm", "mm", "uh-huh", "really",
+})
 
 
 def align(
@@ -63,12 +86,14 @@ def align(
         assigned = _assign_speakers(transcript_segments, diarization_segments)
         mode = "segment-level"
 
-    merged = _merge_adjacent(assigned)
+    reassigned = _reassign_trailing_words(assigned)
+    merged = _merge_adjacent(reassigned)
     merged = _absorb_runts(merged)
 
+    reassign_count = len(assigned) - len(reassigned) if len(assigned) != len(reassigned) else "n/a"
     logger.info(
-        "Alignment complete (%s): %d input → %d assigned → %d after merging",
-        mode, len(transcript_segments), len(assigned), len(merged),
+        "Alignment complete (%s): %d input → %d assigned → %d after reassign → %d after merging",
+        mode, len(transcript_segments), len(assigned), len(reassigned), len(merged),
     )
 
     return merged
@@ -98,6 +123,78 @@ def _absorb_runts(segments: list[dict]) -> list[dict]:
             prev["text"] = prev["text"].rstrip() + " " + curr["text"].lstrip()
         else:
             result.append(dict(curr))
+    return result
+
+
+# ── Trailing-word reassignment (pyannote latency correction) ─────────────────
+
+def _reassign_trailing_words(segments: list[dict]) -> list[dict]:
+    """
+    Fix pyannote's late speaker-change detection by moving trailing
+    acknowledgment words from the outgoing speaker to the next speaker.
+
+    At each speaker transition with gap < TRAILING_REASSIGN_GAP:
+      1. Check if the last word of the outgoing segment is in
+         _ACKNOWLEDGMENT_WORDS.
+      2. If the outgoing segment has >= TRAILING_REASSIGN_MIN_WORDS
+         remaining after removal, move the word.
+      3. Adjust timestamps on both segments.
+
+    This runs BEFORE merging so that the moved words get naturally
+    absorbed into the next speaker's merged block.
+    """
+    if len(segments) <= 1:
+        return segments
+
+    result = [dict(s) for s in segments]
+    moved = 0
+
+    for i in range(len(result) - 1):
+        curr = result[i]
+        nxt = result[i + 1]
+
+        # Only at speaker transitions
+        if curr["raw_speaker_label"] == nxt["raw_speaker_label"]:
+            continue
+        if curr["raw_speaker_label"] is None or nxt["raw_speaker_label"] is None:
+            continue
+
+        # Only at tight handoffs (pyannote detected the change nearby)
+        gap = nxt["start"] - curr["end"]
+        if gap > TRAILING_REASSIGN_GAP:
+            continue
+
+        # Extract words from the outgoing segment's text
+        text = curr["text"].rstrip()
+        words = text.split()
+        if len(words) < TRAILING_REASSIGN_MIN_WORDS:
+            continue
+
+        # Check the last word
+        last_word = words[-1].lower().strip(".,;:!?'\"")
+        if last_word not in _ACKNOWLEDGMENT_WORDS:
+            continue
+
+        # Move the trailing word: remove from current, prepend to next
+        removed_word = words.pop()
+        curr["text"] = " ".join(words)
+
+        # Estimate new end time for current segment.
+        # Rough: shrink proportionally by word count ratio.
+        orig_word_count = len(words) + 1
+        duration = curr["end"] - curr["start"]
+        word_duration = duration / orig_word_count if orig_word_count > 0 else 0
+        curr["end"] = round(curr["end"] - word_duration, 3)
+
+        # Prepend to next segment
+        nxt["text"] = removed_word + " " + nxt["text"].lstrip()
+        nxt["start"] = curr["end"]
+
+        moved += 1
+
+    if moved:
+        logger.info("Trailing-word reassignment: moved %d acknowledgment word(s)", moved)
+
     return result
 
 

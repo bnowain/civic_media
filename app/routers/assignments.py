@@ -2,6 +2,7 @@
 Speaker assignment endpoints — the voiceprint learning loop.
 
 POST /api/assignments/{segment_id}/confirm    — confirm or correct a speaker.
+POST /api/assignments/{segment_id}/unconfirm  — remove confirmation and voiceprints.
 POST /api/assignments/{segment_id}/reprocess  — re-match one unverified segment.
 POST /api/assignments/reprocess/{meeting_id}  — re-match all unverified in a meeting.
 GET  /api/assignments/{segment_id}            — read current assignment for a segment.
@@ -156,6 +157,67 @@ def confirm_assignment(
     rerun_voiceprints_task.delay(segment.meeting_id)
     logger.info(
         "Queued background voiceprint re-evaluation for meeting %s",
+        segment.meeting_id,
+    )
+
+    return assign
+
+
+@router.post("/{segment_id}/unconfirm", response_model=schemas.AssignmentOut)
+def unconfirm_assignment(
+    segment_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Remove a confirmed speaker assignment and delete its voiceprints.
+
+    Resets the segment to unverified so automatic matching can re-evaluate it.
+    Triggers a background rerun so the system immediately re-matches.
+    """
+    segment = db.query(models.TranscriptSegment).filter_by(segment_id=segment_id).first()
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    assign = segment.assignment
+    if not assign or not assign.verified:
+        raise HTTPException(400, "Segment is not confirmed — nothing to unconfirm.")
+
+    old_person_id = assign.predicted_person_id
+
+    # ── Delete voiceprints created from this segment ───────────────────────
+    deleted_count = db.query(models.Voiceprint).filter_by(
+        source_segment_id=segment_id,
+        person_id=old_person_id,
+    ).delete(synchronize_session="fetch")
+
+    # Byte-equality fallback for pre-migration voiceprints
+    if deleted_count == 0 and segment.embedding:
+        old_vp = db.query(models.Voiceprint).filter_by(
+            person_id=old_person_id,
+            embedding=segment.embedding,
+        ).first()
+        if old_vp:
+            db.delete(old_vp)
+            deleted_count = 1
+
+    logger.info(
+        "Unconfirm: deleted %d voiceprint(s) from person %s for segment %s",
+        deleted_count, old_person_id, segment_id,
+    )
+
+    # ── Reset assignment to unverified ─────────────────────────────────────
+    assign.verified = False
+    assign.similarity_score = None
+    assign.tagged = False
+
+    db.commit()
+    db.refresh(assign)
+
+    # ── Trigger background rerun so system re-matches this segment ─────────
+    from app.tasks import rerun_voiceprints_task
+    rerun_voiceprints_task.delay(segment.meeting_id)
+    logger.info(
+        "Queued background voiceprint re-evaluation for meeting %s (unconfirm)",
         segment.meeting_id,
     )
 
