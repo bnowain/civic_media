@@ -314,12 +314,29 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     db.query(models.TranscriptSegment).filter_by(meeting_id=meeting_id).delete()
     db.flush()
 
-    segment_times = [(s["start"], s["end"]) for s in aligned_segments]
+    # Center extraction: trim both margins from segment boundaries before
+    # embedding extraction. Falls back to original bounds if the window
+    # computation returns None (embedder's min-duration check handles it).
+    segment_times = []
+    for s in aligned_segments:
+        window = embedder.compute_embed_window(s["start"], s["end"])
+        if window is not None:
+            segment_times.append(window)
+        else:
+            segment_times.append((s["start"], s["end"]))
     all_embeddings = embedder.extract_embeddings_batch(audio_path, segment_times)
 
     # Pre-load voiceprints once for matching (avoids per-segment DB queries)
     preloaded  = voiceprint._load_all_voiceprints(db)
     person_map = {p.person_id: p for p in db.query(models.Person).all()}
+
+    # Resolve effective venue for venue-aware matching
+    effective_venue_id = None
+    if meeting_obj:
+        effective_venue_id = meeting_obj.venue_id or (
+            meeting_obj.governing_body_ref.default_venue_id
+            if meeting_obj.governing_body_ref else None
+        )
 
     for i, (seg_data, emb_array) in enumerate(zip(aligned_segments, all_embeddings)):
         if i % 50 == 0:
@@ -337,6 +354,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             raw_speaker_label=seg_data.get("raw_speaker_label"),
             avg_logprob=seg_data.get("avg_logprob"),
             no_speech_prob=seg_data.get("no_speech_prob"),
+            overlap_ratio=seg_data.get("overlap_ratio", 0.0),
             embedding=embedder.serialize(emb_array) if emb_array is not None else None,
         )
         db.add(segment)
@@ -345,6 +363,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         if emb_array is not None:
             voiceprint.run_voiceprint_matching(
                 db, segment, preloaded=preloaded, person_map=person_map,
+                venue_id=effective_venue_id,
             )
 
     # Set processed_at timestamp

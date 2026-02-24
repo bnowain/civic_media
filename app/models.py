@@ -128,6 +128,7 @@ class TranscriptSegment(Base):
     raw_speaker_label = Column(String)                  # e.g. "SPEAKER_00"
     embedding         = Column(LargeBinary)             # serialised numpy array
     source_type       = Column(String, nullable=False, default="in_person")
+    overlap_ratio     = Column(Float, nullable=True, default=0.0)
 
     avg_logprob    = Column(Float, nullable=True)
     no_speech_prob = Column(Float, nullable=True)
@@ -162,6 +163,7 @@ class Voiceprint(Base):
     source_segment_id = Column(String, nullable=True)        # segment that created this VP
     venue_id         = Column(String, ForeignKey("venues.venue_id"), nullable=True)
     source_type      = Column(String, nullable=False, default="in_person")
+    source_duration  = Column(Float, nullable=True)          # seconds of source audio
     created_at       = Column(DateTime, default=datetime.utcnow)
 
     person = relationship("Person", back_populates="voiceprints")

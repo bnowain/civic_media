@@ -23,9 +23,12 @@ import logging
 import numpy as np
 from sqlalchemy.orm import Session
 
-from app.config import SIMILARITY_MEDIUM, VOICEPRINT_COHERENCE_THRESHOLD
+from app.config import SIMILARITY_MEDIUM, VENUE_FAMILIARITY_BOOST, VOICEPRINT_COHERENCE_THRESHOLD
 from app.models import Person, SegmentAssignment, TranscriptSegment, Voiceprint
 from app.services.embedder import deserialize
+
+# Default duration assumed for voiceprints with no source_duration recorded.
+DEFAULT_VOICEPRINT_DURATION = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +38,10 @@ logger = logging.getLogger(__name__)
 TOP_K = 3
 
 # Minimum segment duration (seconds) for a voiceprint to be useful.
-# ECAPA-TDNN needs ~2s of speech to produce a reliable embedding.
-# This is checked at voiceprint creation time, not at matching time.
-MIN_VOICEPRINT_DURATION = 2.0
+# ECAPA-TDNN needs ~2s of speech to produce a reliable embedding,
+# plus margins (0.5s start + 2.0s end) are trimmed from both edges
+# to avoid speaker bleed.  4s total ≈ 1.5s usable center audio.
+MIN_VOICEPRINT_DURATION = 4.0
 
 
 # ── Maths ─────────────────────────────────────────────────────────────────────
@@ -51,20 +55,30 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def top_k_similarity(
     seg_vec: np.ndarray,
-    voiceprint_entries: list[tuple[str, np.ndarray]],
+    voiceprint_entries: list[tuple[str, np.ndarray, str | None, float | None]],
     k: int = TOP_K,
+    venue_id: str | None = None,
+    venue_boost: float = 0.0,
 ) -> tuple[float, list[str]]:
     """
     Compare a segment embedding against a list of voiceprint embeddings.
-    Returns (mean_of_top_k_scores, [voiceprint_ids_in_top_k]).
+    Returns (weighted_mean_of_top_k_scores, [voiceprint_ids_in_top_k]).
+
+    Venue boost: if venue_id is set and a voiceprint's venue matches,
+    its score is boosted by venue_boost before top-K selection.
+
+    Duration weighting: top-K scores are averaged with weights proportional
+    to source_duration (longer segments = more reliable embeddings).
 
     If fewer than K voiceprints exist, averages all of them.
     """
     if not voiceprint_entries:
         return 0.0, []
 
-    vp_ids = [vp_id for vp_id, _ in voiceprint_entries]
-    vp_arrays = [arr for _, arr in voiceprint_entries]
+    vp_ids = [vp_id for vp_id, _, _, _ in voiceprint_entries]
+    vp_arrays = [arr for _, arr, _, _ in voiceprint_entries]
+    vp_venues = [vid for _, _, vid, _ in voiceprint_entries]
+    vp_durations = [dur for _, _, _, dur in voiceprint_entries]
 
     # Vectorised cosine similarity: stack voiceprints into a matrix,
     # compute all dot products in one shot.
@@ -77,6 +91,12 @@ def top_k_similarity(
     scores = np.zeros(len(vp_arrays), dtype=np.float64)
     scores[safe] = vp_matrix[safe] @ seg_vec / denoms[safe]
 
+    # Apply venue boost before top-K selection
+    if venue_id and venue_boost > 0:
+        for i, vp_venue in enumerate(vp_venues):
+            if vp_venue == venue_id:
+                scores[i] += venue_boost
+
     # Get indices of top-K scores
     if len(scores) <= k:
         top_indices = list(range(len(scores)))
@@ -86,33 +106,46 @@ def top_k_similarity(
     top_k_scores = scores[top_indices]
     top_k_vp_ids = [vp_ids[i] for i in top_indices]
 
-    return float(np.mean(top_k_scores)), top_k_vp_ids
+    # Duration-weighted mean of top-K scores
+    weights = np.array([
+        vp_durations[i] if vp_durations[i] is not None else DEFAULT_VOICEPRINT_DURATION
+        for i in top_indices
+    ], dtype=np.float64)
+    weight_sum = weights.sum()
+    if weight_sum > 0:
+        weighted_score = float(np.dot(top_k_scores, weights) / weight_sum)
+    else:
+        weighted_score = float(np.mean(top_k_scores))
+
+    return weighted_score, top_k_vp_ids
 
 
 # ── Load all voiceprints into memory ─────────────────────────────────────────
 
-def _load_all_voiceprints(db: Session) -> dict[str, list[tuple[str, np.ndarray]]]:
+def _load_all_voiceprints(db: Session) -> dict[str, list[tuple[str, np.ndarray, str | None, float | None]]]:
     """
     Load every voiceprint from the DB, grouped by person_id.
-    Returns {person_id: [(voiceprint_id, np.ndarray), ...]}.
+    Returns {person_id: [(voiceprint_id, np.ndarray, venue_id, source_duration), ...]}.
 
     Called once at the start of a batch re-evaluation so we don't
     re-query per segment.
     """
     all_vps = db.query(Voiceprint).all()
-    by_person: dict[str, list[tuple[str, np.ndarray]]] = {}
+    by_person: dict[str, list[tuple[str, np.ndarray, str | None, float | None]]] = {}
     for vp in all_vps:
         arr = deserialize(vp.embedding)
-        by_person.setdefault(vp.person_id, []).append((vp.voiceprint_id, arr))
+        by_person.setdefault(vp.person_id, []).append(
+            (vp.voiceprint_id, arr, vp.venue_id, getattr(vp, "source_duration", None))
+        )
     return by_person
 
 
 # ── Coherence gate ───────────────────────────────────────────────────────────
 
 def _apply_coherence_gate(
-    vp_by_person: dict[str, list[tuple[str, np.ndarray]]],
+    vp_by_person: dict[str, list[tuple[str, np.ndarray, str | None, float | None]]],
     threshold: float = VOICEPRINT_COHERENCE_THRESHOLD,
-) -> dict[str, list[tuple[str, np.ndarray]]]:
+) -> dict[str, list[tuple[str, np.ndarray, str | None, float | None]]]:
     """
     Filter out voiceprints that are outliers for their person.
 
@@ -124,7 +157,7 @@ def _apply_coherence_gate(
     Safety: never excludes ALL voiceprints for a person — always keeps
     the one closest to the centroid.
     """
-    filtered: dict[str, list[tuple[str, np.ndarray]]] = {}
+    filtered: dict[str, list[tuple[str, np.ndarray, str | None, float | None]]] = {}
 
     for person_id, entries in vp_by_person.items():
         if len(entries) <= 1:
@@ -132,8 +165,8 @@ def _apply_coherence_gate(
             filtered[person_id] = entries
             continue
 
-        arrays = np.stack([arr for _, arr in entries], axis=0)   # (N, D)
-        centroid = arrays.mean(axis=0)                           # (D,)
+        arrays = np.stack([arr for _, arr, _, _ in entries], axis=0)  # (N, D)
+        centroid = arrays.mean(axis=0)                                # (D,)
 
         # Cosine similarity of each voiceprint to centroid
         norms = np.linalg.norm(arrays, axis=1)
@@ -177,8 +210,9 @@ def _apply_coherence_gate(
 def run_voiceprint_matching(
     db: Session,
     segment: TranscriptSegment,
-    preloaded: dict[str, list[tuple[str, np.ndarray]]] | None = None,
+    preloaded: dict[str, list[tuple[str, np.ndarray, str | None, float | None]]] | None = None,
     person_map: dict[str, Person] | None = None,
+    venue_id: str | None = None,
 ) -> list[str]:
     """
     Match one segment against all known person voiceprints using top-K
@@ -191,6 +225,7 @@ def run_voiceprint_matching(
         preloaded:  Optional pre-loaded voiceprints from _load_all_voiceprints().
                     If None, voiceprints are loaded from the DB per-call.
         person_map: Optional {person_id: Person} lookup. If None, queried from DB.
+        venue_id:   Optional venue to apply familiarity boost for same-venue voiceprints.
 
     Returns:
         List of voiceprint IDs that were in the top-K for the winning person.
@@ -216,7 +251,10 @@ def run_voiceprint_matching(
     best_vp_ids: list[str] = []
 
     for person_id, vp_entries in vp_by_person.items():
-        score, vp_ids = top_k_similarity(seg_vec, vp_entries)
+        score, vp_ids = top_k_similarity(
+            seg_vec, vp_entries,
+            venue_id=venue_id, venue_boost=VENUE_FAMILIARITY_BOOST,
+        )
         if score > best_score:
             best_score  = score
             best_person = people_lookup.get(person_id)
@@ -280,6 +318,17 @@ def rerun_unverified_segments(
             total_filtered, total_raw, total_raw - total_filtered,
         )
 
+    # Resolve effective venue for the meeting (meeting-level > governing body default)
+    from app.models import Meeting
+    effective_venue_id = None
+    if meeting_id:
+        mtg = db.query(Meeting).filter_by(meeting_id=meeting_id).first()
+        if mtg:
+            effective_venue_id = mtg.venue_id or (
+                mtg.governing_body_ref.default_venue_id
+                if mtg.governing_body_ref else None
+            )
+
     query = (
         db.query(TranscriptSegment)
         .outerjoin(SegmentAssignment,
@@ -300,7 +349,10 @@ def rerun_unverified_segments(
     logger.info("Re-evaluating %d unverified segments...", len(segments))
 
     for seg in segments:
-        run_voiceprint_matching(db, seg, preloaded=preloaded, person_map=person_map)
+        run_voiceprint_matching(
+            db, seg, preloaded=preloaded, person_map=person_map,
+            venue_id=effective_venue_id,
+        )
 
     db.commit()
     logger.info("Batch re-evaluation complete.")

@@ -139,7 +139,7 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
     available when re-evaluation starts.
     """
     from app.database import SessionLocal
-    from app.config import MAX_EMBED_AUDIO_SEC, MULTI_CLIP_DURATION
+    from app.config import MAX_EMBED_AUDIO_SEC, MULTI_CLIP_DURATION, EMBED_END_MARGIN
     from app.services.voiceprint import MIN_VOICEPRINT_DURATION
     from app.services import embedder
     from app import models
@@ -167,11 +167,18 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
             return {"error": "audio not found"}
         audio_path = extracted_media.file_path
 
-        # Build windows starting after the region already covered
-        clip_start = segment.start_time + MAX_EMBED_AUDIO_SEC
+        # Build windows starting after the primary center-extraction window.
+        # The primary window is computed by compute_embed_window(); multi-clips
+        # start after it ends.  The end margin only applies to the segment
+        # boundary (last window), not interior windows.
+        primary = embedder.compute_embed_window(segment.start_time, segment.end_time)
+        if primary is None:
+            return {"segment_id": segment_id, "extra_voiceprints": 0}
+        usable_end = segment.end_time - EMBED_END_MARGIN
+        clip_start = primary[1]  # start after primary window ends
         windows: list[tuple[float, float]] = []
-        while clip_start < segment.end_time:
-            clip_end = min(clip_start + MULTI_CLIP_DURATION, segment.end_time)
+        while clip_start < usable_end:
+            clip_end = min(clip_start + MULTI_CLIP_DURATION, usable_end)
             if clip_end - clip_start >= MIN_VOICEPRINT_DURATION:
                 windows.append((clip_start, clip_end))
             clip_start = clip_end
@@ -182,12 +189,13 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
         embeddings = embedder.extract_embeddings_batch(audio_path, windows)
 
         added = 0
-        for emb in embeddings:
+        for (clip_start, clip_end), emb in zip(windows, embeddings):
             if emb is not None:
                 vp = models.Voiceprint(
                     person_id=person_id,
                     embedding=embedder.serialize(emb),
                     source_segment_id=segment_id,
+                    source_duration=clip_end - clip_start,
                 )
                 db.add(vp)
                 added += 1

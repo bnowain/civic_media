@@ -187,6 +187,7 @@ class SegmentOut(BaseModel):
     text: str
     raw_speaker_label: Optional[str]
     source_type: str = "in_person"
+    overlap_ratio: Optional[float] = None
     assignment: Optional[AssignmentOut]
 
     model_config = {"from_attributes": True}

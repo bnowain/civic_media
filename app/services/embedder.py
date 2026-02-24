@@ -26,7 +26,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from app.config import EMBEDDING_DEVICE, EMBEDDING_MODEL, MAX_EMBED_AUDIO_SEC, MIN_EMBED_DURATION
+from app.config import (
+    EMBED_END_MARGIN,
+    EMBED_START_MARGIN,
+    EMBEDDING_DEVICE,
+    EMBEDDING_MODEL,
+    MAX_EMBED_AUDIO_SEC,
+    MIN_EMBED_DURATION,
+)
 
 if TYPE_CHECKING:
     from speechbrain.inference.speaker import EncoderClassifier as _EC
@@ -72,6 +79,46 @@ def clear_audio_cache() -> None:
     """
     _audio_cache.clear()
     logger.info("Audio cache cleared.")
+
+
+# ── Center extraction ─────────────────────────────────────────────────────────
+
+def compute_embed_window(
+    seg_start: float,
+    seg_end: float,
+) -> tuple[float, float] | None:
+    """
+    Compute the optimal audio window for embedding extraction.
+
+    Trims EMBED_START_MARGIN from the beginning and EMBED_END_MARGIN from
+    the end to avoid speaker-transition bleed.  Takes up to
+    MAX_EMBED_AUDIO_SEC from the CENTER of the clean window.
+
+    For very short segments where margins would leave < MIN_EMBED_DURATION,
+    falls back to 80% of duration, centered.
+
+    Returns (start, end) or None if remaining audio < MIN_EMBED_DURATION.
+    """
+    seg_dur = seg_end - seg_start
+    if seg_dur < MIN_EMBED_DURATION:
+        return None
+
+    clean_start = seg_start + EMBED_START_MARGIN
+    clean_end = seg_end - EMBED_END_MARGIN
+    clean_dur = clean_end - clean_start
+
+    if clean_dur < MIN_EMBED_DURATION:
+        # Fallback: use 80% of duration, centered
+        usable = seg_dur * 0.8
+        if usable < MIN_EMBED_DURATION:
+            return None
+        center = (seg_start + seg_end) / 2
+        return (center - usable / 2, center + usable / 2)
+
+    # Take up to MAX_EMBED_AUDIO_SEC from the center of the clean window
+    take = min(clean_dur, MAX_EMBED_AUDIO_SEC)
+    center = (clean_start + clean_end) / 2
+    return (center - take / 2, center + take / 2)
 
 
 # ── Model ─────────────────────────────────────────────────────────────────────

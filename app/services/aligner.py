@@ -90,6 +90,9 @@ def align(
     merged = _merge_adjacent(reassigned)
     merged = _absorb_runts(merged)
 
+    # Compute overlap ratios on final merged segments
+    _compute_overlap_ratios(merged, diarization_segments)
+
     reassign_count = len(assigned) - len(reassigned) if len(assigned) != len(reassigned) else "n/a"
     logger.info(
         "Alignment complete (%s): %d input → %d assigned → %d after reassign → %d after merging",
@@ -124,6 +127,46 @@ def _absorb_runts(segments: list[dict]) -> list[dict]:
         else:
             result.append(dict(curr))
     return result
+
+
+# ── Overlap ratio computation ────────────────────────────────────────────────
+
+def _compute_overlap_ratios(
+    segments: list[dict],
+    diarization_segments: list[dict],
+) -> None:
+    """
+    For each segment, compute what fraction of its duration has competing
+    diarization speakers (crosstalk). Modifies dicts in place by adding
+    an 'overlap_ratio' key.
+
+    A segment's assigned speaker is its raw_speaker_label. Any diarization
+    turn from a DIFFERENT speaker that overlaps the segment's time range
+    contributes to the overlap total. The ratio is overlap_time / seg_duration.
+    """
+    if not diarization_segments:
+        for seg in segments:
+            seg["overlap_ratio"] = 0.0
+        return
+
+    for seg in segments:
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+        seg_dur = seg_end - seg_start
+        assigned_speaker = seg.get("raw_speaker_label")
+
+        if seg_dur <= 0 or assigned_speaker is None:
+            seg["overlap_ratio"] = 0.0
+            continue
+
+        overlap_time = 0.0
+        for d in diarization_segments:
+            if d["speaker"] == assigned_speaker:
+                continue
+            overlap = max(0.0, min(seg_end, d["end"]) - max(seg_start, d["start"]))
+            overlap_time += overlap
+
+        seg["overlap_ratio"] = round(min(overlap_time / seg_dur, 1.0), 4)
 
 
 # ── Trailing-word reassignment (pyannote latency correction) ─────────────────

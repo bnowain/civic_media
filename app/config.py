@@ -61,6 +61,17 @@ VENUE_FAMILIARITY_BOOST = 0.05
 # Minimum segment duration (seconds) for embedding extraction
 MIN_EMBED_DURATION = 0.5
 
+# Center extraction margins (seconds) trimmed from segment boundaries before
+# embedding extraction. Pyannote detects speaker changes ~200-500ms late,
+# so both edges may contain adjacent speakers' voices.
+EMBED_START_MARGIN = 0.5   # trim from segment start (incoming speaker bleed)
+EMBED_END_MARGIN   = 2.0   # trim from segment end (outgoing speaker bleed)
+
+# Maximum overlap ratio for voiceprint creation. Segments with more than this
+# fraction of their duration overlapping with other diarization speakers are
+# too contaminated for reliable voiceprints.
+MAX_OVERLAP_FOR_VOICEPRINT = 0.15
+
 # Clip export constraints
 CLIP_MIN_DURATION   = 0.5     # seconds
 CLIP_MAX_DURATION   = 3600.0  # seconds

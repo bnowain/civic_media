@@ -52,8 +52,10 @@ def confirm_assignment(
         raise HTTPException(404, "Person not found")
 
     from app.services.voiceprint import MIN_VOICEPRINT_DURATION
+    from app.config import MAX_OVERLAP_FOR_VOICEPRINT
 
     seg_duration = segment.end_time - segment.start_time
+    seg_overlap = segment.overlap_ratio or 0.0
     assign = segment.assignment
 
     # ── Handle re-confirmation to a DIFFERENT person ──────────────────────
@@ -102,18 +104,25 @@ def confirm_assignment(
             if meeting.governing_body_ref else None
         )
 
-    if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION:
+    if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION and seg_overlap <= MAX_OVERLAP_FOR_VOICEPRINT:
         new_vp = models.Voiceprint(
             person_id=payload.person_id,
             embedding=segment.embedding,
             source_segment_id=segment_id,
             venue_id=effective_venue_id,
             source_type=segment.source_type,
+            source_duration=seg_duration,
         )
         db.add(new_vp)
         logger.info(
-            "Added voiceprint for person '%s' from segment %s (%.1fs)",
-            person.canonical_name, segment_id, seg_duration,
+            "Added voiceprint for person '%s' from segment %s (%.1fs, overlap=%.2f)",
+            person.canonical_name, segment_id, seg_duration, seg_overlap,
+        )
+    elif segment.embedding and seg_overlap > MAX_OVERLAP_FOR_VOICEPRINT:
+        logger.info(
+            "Segment %s has too much speaker overlap (%.0f%% > %.0f%%) — "
+            "assignment confirmed but voiceprint not added.",
+            segment_id, seg_overlap * 100, MAX_OVERLAP_FOR_VOICEPRINT * 100,
         )
     elif segment.embedding:
         logger.info(
@@ -271,7 +280,16 @@ def reprocess_segment(segment_id: str, db: Session = Depends(get_db)):
     if segment.assignment and segment.assignment.verified:
         raise HTTPException(400, "Segment is verified — use /confirm to reassign.")
 
-    vp_service.run_voiceprint_matching(db, segment)
+    # Resolve effective venue for venue-aware matching
+    mtg = db.query(models.Meeting).filter_by(meeting_id=segment.meeting_id).first()
+    effective_venue_id = None
+    if mtg:
+        effective_venue_id = mtg.venue_id or (
+            mtg.governing_body_ref.default_venue_id
+            if mtg.governing_body_ref else None
+        )
+
+    vp_service.run_voiceprint_matching(db, segment, venue_id=effective_venue_id)
     db.refresh(segment)
 
     if segment.assignment is None:
