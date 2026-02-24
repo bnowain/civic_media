@@ -91,11 +91,23 @@ def confirm_assignment(
     # ── Create new voiceprint ─────────────────────────────────────────────
     #    Quality gate: skip segments shorter than MIN_VOICEPRINT_DURATION —
     #    ECAPA-TDNN needs ~2s of speech to produce a reliable embedding.
+
+    # Resolve effective venue: meeting-level override > governing body default
+    meeting = db.query(models.Meeting).filter_by(meeting_id=segment.meeting_id).first()
+    effective_venue_id = None
+    if meeting:
+        effective_venue_id = meeting.venue_id or (
+            meeting.governing_body_ref.default_venue_id
+            if meeting.governing_body_ref else None
+        )
+
     if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION:
         new_vp = models.Voiceprint(
             person_id=payload.person_id,
             embedding=segment.embedding,
             source_segment_id=segment_id,
+            venue_id=effective_venue_id,
+            source_type=segment.source_type,
         )
         db.add(new_vp)
         logger.info(

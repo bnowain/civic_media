@@ -28,6 +28,19 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── Venues ───────────────────────────────────────────────────────────────────
+
+class Venue(Base):
+    __tablename__ = "venues"
+
+    venue_id      = Column(String, primary_key=True, default=_gen_id)
+    name          = Column(String, nullable=False)
+    acoustic_type = Column(String, nullable=False, default="indoor_dry")
+    notes         = Column(Text)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ── Governing Bodies ─────────────────────────────────────────────────────────
 
 class GoverningBody(Base):
@@ -36,9 +49,11 @@ class GoverningBody(Base):
     governing_body_id = Column(String, primary_key=True, default=_gen_id)
     name              = Column(String, nullable=False, unique=True)
     display_name      = Column(String)
+    default_venue_id  = Column(String, ForeignKey("venues.venue_id"), nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
 
-    meetings = relationship("Meeting", back_populates="governing_body_ref")
+    meetings      = relationship("Meeting", back_populates="governing_body_ref")
+    default_venue = relationship("Venue")
 
 
 # ── Meetings ─────────────────────────────────────────────────────────────────
@@ -57,6 +72,7 @@ class Meeting(Base):
     description       = Column(Text, nullable=True)       # episode title, guest names
     source_url        = Column(Text, nullable=True)        # original audio URL (dedup key)
     thumbnail_url     = Column(Text, nullable=True)        # cover art URL from source
+    venue_id          = Column(String, ForeignKey("venues.venue_id"), nullable=True)
     primegov_id       = Column(Integer, nullable=True, unique=True, index=True)
     video_url         = Column(Text, nullable=True)        # Swagit video page URL
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
@@ -66,6 +82,7 @@ class Meeting(Base):
     created_at        = Column(DateTime, default=datetime.utcnow)
 
     governing_body_ref = relationship("GoverningBody", back_populates="meetings")
+    venue              = relationship("Venue")
     media_files = relationship("MediaFile", back_populates="meeting",
                                cascade="all, delete-orphan")
     documents   = relationship("Document",  back_populates="meeting",
@@ -110,6 +127,7 @@ class TranscriptSegment(Base):
     text              = Column(Text,  nullable=False)
     raw_speaker_label = Column(String)                  # e.g. "SPEAKER_00"
     embedding         = Column(LargeBinary)             # serialised numpy array
+    source_type       = Column(String, nullable=False, default="in_person")
 
     avg_logprob    = Column(Float, nullable=True)
     no_speech_prob = Column(Float, nullable=True)
@@ -142,9 +160,12 @@ class Voiceprint(Base):
     person_id        = Column(String, ForeignKey("people.person_id"), nullable=False)
     embedding        = Column(LargeBinary, nullable=False)   # serialised numpy
     source_segment_id = Column(String, nullable=True)        # segment that created this VP
+    venue_id         = Column(String, ForeignKey("venues.venue_id"), nullable=True)
+    source_type      = Column(String, nullable=False, default="in_person")
     created_at       = Column(DateTime, default=datetime.utcnow)
 
     person = relationship("Person", back_populates="voiceprints")
+    venue  = relationship("Venue")
 
 
 class SegmentAssignment(Base):

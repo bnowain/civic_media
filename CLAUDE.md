@@ -82,6 +82,10 @@ Two-page vanilla JS SPA served from `app/static/`:
 - **index.html/js** — meeting list, upload, live progress bars
 - **review.html/js** — video player + synced transcript with speaker confirmation, text editing, filtering, and export (SRT/TXT/JSON)
 
+### TXT Export Formatting
+
+The TXT export (`GET /api/segments/{meeting_id}/export?format=txt`) applies a multi-stage text processing pipeline: segment joining with punctuation at boundaries, filler removal, sentence capitalization, phone number formatting, paragraph splitting at sentence boundaries, and smart trailing period logic. **Full spec with constants, thresholds, and known limitations**: `docs/txt_export_spec.md`. Check that doc before modifying any `_to_txt` helpers in `app/routers/segments.py`.
+
 ## Key Design Decisions
 
 - **Embeddings stored as `LargeBinary`** — serialized numpy arrays in SQLite, not a vector DB

@@ -10,6 +10,24 @@ from typing import Optional
 from pydantic import BaseModel, field_validator
 
 
+# ── Venues ───────────────────────────────────────────────────────────────────
+
+class VenueCreate(BaseModel):
+    name: str
+    acoustic_type: str = "indoor_dry"
+    notes: Optional[str] = None
+
+
+class VenueOut(BaseModel):
+    venue_id: str
+    name: str
+    acoustic_type: str
+    notes: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ── Governing Bodies ─────────────────────────────────────────────────────────
 
 class GoverningBodyCreate(BaseModel):
@@ -21,6 +39,7 @@ class GoverningBodyOut(BaseModel):
     governing_body_id: str
     name: str
     display_name: Optional[str]
+    default_venue_id: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -43,6 +62,7 @@ class MeetingCreate(BaseModel):
     agenda_url: Optional[str] = None
     minutes_url: Optional[str] = None
     packet_url: Optional[str] = None
+    venue_id: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
@@ -59,6 +79,7 @@ class MeetingUpdate(BaseModel):
     meeting_date: Optional[str] = None
     governing_body: Optional[str] = None
     meeting_type: Optional[str] = None
+    venue_id: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
@@ -165,6 +186,7 @@ class SegmentOut(BaseModel):
     end_time: float
     text: str
     raw_speaker_label: Optional[str]
+    source_type: str = "in_person"
     assignment: Optional[AssignmentOut]
 
     model_config = {"from_attributes": True}
@@ -173,6 +195,11 @@ class SegmentOut(BaseModel):
 class SegmentEdit(BaseModel):
     """Payload for manually correcting segment text."""
     text: str
+
+
+class SourceTypeUpdate(BaseModel):
+    """Payload for changing a segment's source type (in_person vs telephone)."""
+    source_type: str
 
 
 # ── Pipeline Status ──────────────────────────────────────────────────────────

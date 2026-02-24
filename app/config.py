@@ -54,6 +54,10 @@ PYANNOTE_MODEL   = "pyannote/speaker-diarization-3.1"
 EMBEDDING_MODEL  = "speechbrain/spkrec-ecapa-voxceleb"
 EMBEDDING_DEVICE = os.environ.get("EMBEDDING_DEVICE", "cuda")
 
+# Venue familiarity boost: added to cosine similarity when a voiceprint
+# was recorded in the same venue as the segment being matched.
+VENUE_FAMILIARITY_BOOST = 0.05
+
 # Minimum segment duration (seconds) for embedding extraction
 MIN_EMBED_DURATION = 0.5
 
