@@ -28,6 +28,12 @@ let pendingSegmentId = null;   // for new-person dialog
 // Segments confirmed in this browser session — never overwritten by polling
 const _confirmedThisSession = new Set();
 
+// Quick-assign state
+const _personFrequency = new Map();  // person_id → count in this meeting
+let _ignorePersonId = null;
+const MIN_VOICEPRINT_DURATION = 4.0; // matches server-side voiceprint.MIN_VOICEPRINT_DURATION
+const MAX_OVERLAP_FOR_VOICEPRINT = 0.15; // matches server-side config
+
 // DOM shortcuts
 const video          = () => document.getElementById("video-player");
 const transcriptList = () => document.getElementById("transcript-list");
@@ -41,8 +47,10 @@ async function init() {
   }
 
   await Promise.all([loadMeeting(), loadPeople()]);
+  await _ensureIgnorePerson();
   await loadDocuments();
   await loadSegments();
+  _buildPersonFrequency();
 
   setupVideoEvents();
   setupControls();
@@ -188,9 +196,48 @@ async function editSegmentText(segmentId, text) {
 function isUserInteracting() {
   const el = document.activeElement;
   if (!el) return false;
-  if (el.classList.contains("seg-select")) return true;
+  if (el.classList.contains("seg-assign-input")) return true;
   if (el.getAttribute("contenteditable") === "true") return true;
   return false;
+}
+
+// ── Quick-Assign Helpers ──────────────────────────────────────────────────────
+
+async function _ensureIgnorePerson() {
+  const existing = people.find(p => p.canonical_name === "Ignore");
+  if (existing) {
+    _ignorePersonId = existing.person_id;
+    return;
+  }
+  try {
+    const person = await createPerson("Ignore");
+    people.push(person);
+    _ignorePersonId = person.person_id;
+  } catch (err) {
+    // May have been created concurrently — reload people list
+    await loadPeople();
+    const found = people.find(p => p.canonical_name === "Ignore");
+    if (found) _ignorePersonId = found.person_id;
+  }
+}
+
+function _buildPersonFrequency() {
+  _personFrequency.clear();
+  for (const seg of segments) {
+    const pid = seg.assignment?.predicted_person_id;
+    if (pid) _personFrequency.set(pid, (_personFrequency.get(pid) || 0) + 1);
+  }
+}
+
+function _getQuickAssignPeople() {
+  return Array.from(_personFrequency.entries())
+    .filter(([pid]) => pid !== _ignorePersonId)
+    .sort((a, b) => b[1] - a[1])
+    .map(([pid]) => {
+      const p = people.find(x => x.person_id === pid);
+      return p ? { person_id: p.person_id, canonical_name: p.canonical_name } : null;
+    })
+    .filter(Boolean);
 }
 
 // ── Render Transcript ─────────────────────────────────────────────────────────
@@ -310,14 +357,15 @@ function buildSegmentCard(seg, idx, grouped = false) {
       <button class="btn btn-primary btn-xs seg-save-btn" data-seg="${seg.segment_id}">Save</button>
       <button class="btn btn-ghost btn-xs seg-cancel-btn" data-seg="${seg.segment_id}">Cancel</button>
     </div>
+    <div class="seg-quick-row" data-seg="${seg.segment_id}" onclick="event.stopPropagation()"></div>
     <div class="seg-controls" onclick="event.stopPropagation()">
-      <select class="seg-select" data-seg="${seg.segment_id}">
-        <option value="">— Assign —</option>
-        ${people.map(p => `
-          <option value="${p.person_id}" ${p.person_id === personId ? "selected" : ""}>
-            ${esc(p.canonical_name)}
-          </option>`).join("")}
-      </select>
+      <div class="seg-assign-wrap" data-seg="${seg.segment_id}">
+        <input type="text" class="seg-assign-input" data-seg="${seg.segment_id}"
+               data-person-id="${personId || ""}"
+               value="${personId ? esc(speakerName) : ""}"
+               placeholder="— Assign —" autocomplete="off" />
+        <div class="seg-assign-dropdown"></div>
+      </div>
       <button class="seg-tag-btn${tagged ? " is-tagged" : ""}"
               data-seg="${seg.segment_id}">
         ${tagged ? "✦ Tagged" : "Tag"}
@@ -331,12 +379,19 @@ function buildSegmentCard(seg, idx, grouped = false) {
     <div class="tag-pills" id="seg-tags-${seg.segment_id}"></div>
   `;
 
+  // Wire up autocomplete on the assign input
+  _setupAssignAutocomplete(card);
+
+  // Render quick-assign buttons
+  _renderQuickButtons(seg.segment_id, card);
+
   // Load tags for this segment
   loadSegmentTags(seg.segment_id);
 
   // Seek on card body click
   card.addEventListener("click", e => {
     if (e.target.closest(".seg-controls")) return;
+    if (e.target.closest(".seg-quick-row")) return;
     if (e.target.closest(".seg-edit-controls")) return;
     if (e.target.classList.contains("seg-text") && e.detail >= 2) return; // let dblclick handle
     const v = video();
@@ -365,16 +420,22 @@ function buildSegmentCard(seg, idx, grouped = false) {
 
   // Tag button
   card.querySelector(".seg-tag-btn").addEventListener("click", async () => {
-    const sel = card.querySelector(".seg-select");
-    if (!sel.value) { alert("Select a speaker first."); return; }
-    await handleTag(seg.segment_id, sel.value, card);
+    const pid = _getAssignedPersonId(card);
+    if (!pid) { alert("Select a speaker first."); return; }
+    await handleTag(seg.segment_id, pid, card);
   });
 
-  // Confirm button
+  // Confirm button (auto-falls back to Tag for short/overlapping segments)
   card.querySelector(".seg-confirm-btn").addEventListener("click", async () => {
-    const sel = card.querySelector(".seg-select");
-    if (!sel.value) { alert("Select a speaker first."); return; }
-    await handleConfirm(seg.segment_id, sel.value, card);
+    const pid = _getAssignedPersonId(card);
+    if (!pid) { alert("Select a speaker first."); return; }
+    const duration = seg.end_time - seg.start_time;
+    const overlap = seg.overlap_ratio || 0;
+    if (duration < MIN_VOICEPRINT_DURATION || overlap > MAX_OVERLAP_FOR_VOICEPRINT) {
+      await handleTag(seg.segment_id, pid, card);
+    } else {
+      await handleConfirm(seg.segment_id, pid, card);
+    }
   });
 
   // New person button
@@ -384,6 +445,281 @@ function buildSegmentCard(seg, idx, grouped = false) {
   });
 
   return card;
+}
+
+// ── Autocomplete Assign Input ─────────────────────────────────────────────────
+
+function _getAssignedPersonId(cardEl) {
+  const input = cardEl.querySelector(".seg-assign-input");
+  return input?.dataset.personId || "";
+}
+
+function _setAssignInput(cardEl, personId, name) {
+  const input = cardEl.querySelector(".seg-assign-input");
+  if (!input) return;
+  input.dataset.personId = personId || "";
+  input.value = name || "";
+}
+
+function _setupAssignAutocomplete(cardEl) {
+  const input = cardEl.querySelector(".seg-assign-input");
+  const dropdown = cardEl.querySelector(".seg-assign-dropdown");
+  if (!input || !dropdown) return;
+
+  let highlightIdx = -1;
+
+  function getSortedPeople(query) {
+    const q = query.toLowerCase();
+    let filtered = q
+      ? people.filter(p => p.canonical_name.toLowerCase().includes(q))
+      : people.slice();
+
+    // Sort: meeting-frequency desc, then alphabetical
+    filtered.sort((a, b) => {
+      const fa = _personFrequency.get(a.person_id) || 0;
+      const fb = _personFrequency.get(b.person_id) || 0;
+      if (fb !== fa) return fb - fa;
+      return a.canonical_name.localeCompare(b.canonical_name);
+    });
+
+    return filtered;
+  }
+
+  function renderDropdown(query) {
+    const results = getSortedPeople(query);
+    dropdown.innerHTML = "";
+    highlightIdx = -1;
+
+    if (results.length === 0) {
+      dropdown.innerHTML = '<div class="seg-assign-no-match">No matches</div>';
+      dropdown.hidden = false;
+      return;
+    }
+
+    const q = query.toLowerCase();
+    results.forEach((p, i) => {
+      const item = document.createElement("div");
+      item.className = "seg-assign-option";
+      item.dataset.personId = p.person_id;
+      item.dataset.idx = i;
+
+      // Highlight matching portion
+      if (q) {
+        const name = p.canonical_name;
+        const matchIdx = name.toLowerCase().indexOf(q);
+        if (matchIdx >= 0) {
+          item.innerHTML =
+            esc(name.slice(0, matchIdx)) +
+            '<span class="seg-assign-match">' + esc(name.slice(matchIdx, matchIdx + q.length)) + '</span>' +
+            esc(name.slice(matchIdx + q.length));
+        } else {
+          item.textContent = name;
+        }
+      } else {
+        item.textContent = p.canonical_name;
+      }
+
+      // Frequency badge
+      const freq = _personFrequency.get(p.person_id) || 0;
+      if (freq > 0) {
+        const badge = document.createElement("span");
+        badge.className = "seg-assign-freq";
+        badge.textContent = freq;
+        item.appendChild(badge);
+      }
+
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault(); // prevent blur
+        selectPerson(p);
+      });
+
+      dropdown.appendChild(item);
+    });
+
+    dropdown.hidden = false;
+  }
+
+  function selectPerson(p) {
+    input.dataset.personId = p.person_id;
+    input.value = p.canonical_name;
+    dropdown.hidden = true;
+    highlightIdx = -1;
+    input.blur();
+  }
+
+  function updateHighlight() {
+    const items = dropdown.querySelectorAll(".seg-assign-option");
+    items.forEach((el, i) => {
+      el.classList.toggle("highlighted", i === highlightIdx);
+    });
+    // Scroll highlighted item into view
+    if (highlightIdx >= 0 && items[highlightIdx]) {
+      items[highlightIdx].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  // On focus — show all candidates (unfiltered), select text so typing replaces it
+  input.addEventListener("focus", () => {
+    input.select();
+    renderDropdown("");
+  });
+
+  // On input — filter
+  input.addEventListener("input", () => {
+    // Clear selection when user types
+    input.dataset.personId = "";
+    renderDropdown(input.value);
+  });
+
+  // Keyboard navigation
+  input.addEventListener("keydown", (e) => {
+    const items = dropdown.querySelectorAll(".seg-assign-option");
+    const count = items.length;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      highlightIdx = Math.min(highlightIdx + 1, count - 1);
+      updateHighlight();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      highlightIdx = Math.max(highlightIdx - 1, 0);
+      updateHighlight();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (highlightIdx >= 0 && items[highlightIdx]) {
+        const pid = items[highlightIdx].dataset.personId;
+        const p = people.find(x => x.person_id === pid);
+        if (p) selectPerson(p);
+      }
+    } else if (e.key === "Escape") {
+      dropdown.hidden = true;
+      input.blur();
+    }
+  });
+
+  // On blur — close dropdown, restore value if no valid selection
+  input.addEventListener("blur", () => {
+    // Small delay to allow mousedown on dropdown items
+    setTimeout(() => {
+      dropdown.hidden = true;
+      // If personId is cleared (user typed but didn't select), restore or clear
+      if (!input.dataset.personId) {
+        input.value = "";
+      }
+    }, 150);
+  });
+}
+
+// ── Quick-Assign Buttons ──────────────────────────────────────────────────────
+
+function _renderQuickButtons(segmentId, cardEl) {
+  const row = cardEl.querySelector(".seg-quick-row");
+  if (!row) return;
+  row.innerHTML = "";
+
+  // Always show Ignore button
+  if (_ignorePersonId) {
+    const ignBtn = document.createElement("button");
+    ignBtn.className = "seg-quick-btn ignore";
+    ignBtn.textContent = "Ignore";
+    ignBtn.addEventListener("click", async () => {
+      _setAssignInput(cardEl, _ignorePersonId, "Ignore");
+      await handleTag(segmentId, _ignorePersonId, cardEl);
+      _personFrequency.set(_ignorePersonId, (_personFrequency.get(_ignorePersonId) || 0) + 1);
+    });
+    row.appendChild(ignBtn);
+  }
+
+  // Quick-assign people buttons (top 4 by frequency)
+  const quickPeople = _getQuickAssignPeople();
+  const visible = quickPeople.slice(0, 4);
+  const overflow = quickPeople.slice(4);
+
+  for (const p of visible) {
+    const btn = document.createElement("button");
+    btn.className = "seg-quick-btn";
+    btn.textContent = p.canonical_name;
+    btn.title = p.canonical_name;
+    btn.addEventListener("click", () => handleQuickAssign(segmentId, p.person_id, cardEl));
+    row.appendChild(btn);
+  }
+
+  // "More" button with dropdown for overflow
+  if (overflow.length > 0) {
+    const moreWrap = document.createElement("div");
+    moreWrap.style.position = "relative";
+    moreWrap.style.display = "inline-flex";
+
+    const moreBtn = document.createElement("button");
+    moreBtn.className = "seg-quick-btn seg-quick-more";
+    moreBtn.innerHTML = "More &#9662;";
+
+    const dropdown = document.createElement("div");
+    dropdown.className = "seg-quick-dropdown";
+    dropdown.hidden = true;
+
+    for (const p of overflow) {
+      const item = document.createElement("button");
+      item.className = "seg-quick-dropdown-item";
+      item.textContent = p.canonical_name;
+      item.title = p.canonical_name;
+      item.addEventListener("click", () => {
+        dropdown.hidden = true;
+        handleQuickAssign(segmentId, p.person_id, cardEl);
+      });
+      dropdown.appendChild(item);
+    }
+
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Close any other open quick-assign dropdowns
+      document.querySelectorAll(".seg-quick-dropdown").forEach(d => { d.hidden = true; });
+      dropdown.hidden = !dropdown.hidden;
+    });
+
+    moreWrap.appendChild(moreBtn);
+    moreWrap.appendChild(dropdown);
+    row.appendChild(moreWrap);
+
+    // Close dropdown when clicking elsewhere
+    const closeHandler = (e) => {
+      if (!moreWrap.contains(e.target)) {
+        dropdown.hidden = true;
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    moreBtn.addEventListener("click", () => {
+      setTimeout(() => document.addEventListener("click", closeHandler), 0);
+    });
+  }
+}
+
+async function handleQuickAssign(segmentId, personId, cardEl) {
+  // Set the autocomplete input to match
+  const person = people.find(p => p.person_id === personId);
+  _setAssignInput(cardEl, personId, person?.canonical_name || "");
+
+  const seg = segments.find(s => s.segment_id === segmentId);
+  const duration = seg ? (seg.end_time - seg.start_time) : 0;
+  const overlap = seg ? (seg.overlap_ratio || 0) : 0;
+
+  if (duration < MIN_VOICEPRINT_DURATION || overlap > MAX_OVERLAP_FOR_VOICEPRINT) {
+    await handleTag(segmentId, personId, cardEl);
+  } else {
+    await handleConfirm(segmentId, personId, cardEl);
+  }
+
+  // Update frequency and refresh quick buttons on all visible cards
+  _personFrequency.set(personId, (_personFrequency.get(personId) || 0) + 1);
+  _refreshAllQuickButtons();
+}
+
+function _refreshAllQuickButtons() {
+  const cards = transcriptList().querySelectorAll(".segment-card");
+  for (const card of cards) {
+    const segId = card.dataset.segmentId;
+    if (segId) _renderQuickButtons(segId, card);
+  }
 }
 
 // ── Inline text editing ───────────────────────────────────────────────────────
@@ -885,6 +1221,10 @@ function setupExportDropdown() {
   });
   document.getElementById("export-json").addEventListener("click", () => {
     triggerExport("json");
+    menu.classList.remove("open");
+  });
+  document.getElementById("export-pdf").addEventListener("click", () => {
+    triggerExport("pdf");
     menu.classList.remove("open");
   });
 }

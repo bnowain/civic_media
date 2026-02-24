@@ -4,7 +4,7 @@ Transcript segment endpoints.
 GET    /api/segments/{meeting_id}            — all segments, optional filter.
 GET    /api/segments/{meeting_id}/{seg_id}   — single segment detail.
 PATCH  /api/segments/{segment_id}/edit       — manually correct segment text.
-GET    /api/segments/{meeting_id}/export     — download as SRT, TXT, or JSON.
+GET    /api/segments/{meeting_id}/export     — download as SRT, TXT, JSON, or PDF.
 """
 
 import json
@@ -80,11 +80,11 @@ def list_segments(
 @router.get("/{meeting_id}/export")
 def export_transcript(
     meeting_id: str,
-    format: str = Query("srt", description="Export format: srt | txt | json"),
+    format: str = Query("srt", description="Export format: srt | txt | json | pdf"),
     db: Session = Depends(get_db),
 ):
     """
-    Export the full transcript in SRT, plain text, or JSON format.
+    Export the full transcript in SRT, plain text, JSON, or PDF format.
     Speaker names use confirmed/predicted person names where available,
     falling back to raw diarization labels.
     """
@@ -125,8 +125,14 @@ def export_transcript(
         content = _to_json(segments)
         filename = f"{safe_title}.json"
         media_type = "application/json; charset=utf-8"
+    elif fmt == "pdf":
+        from app.services.pdf_export import generate_transcript_pdf
+
+        content = generate_transcript_pdf(segments, meeting)
+        filename = f"{safe_title}.pdf"
+        media_type = "application/pdf"
     else:
-        raise HTTPException(400, "format must be srt, txt, or json")
+        raise HTTPException(400, "format must be srt, txt, json, or pdf")
 
     return Response(
         content=content,

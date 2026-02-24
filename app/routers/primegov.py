@@ -89,28 +89,53 @@ def download_meeting_assets(
     db: Session = Depends(get_db),
 ):
     """
-    Download assets (video, agenda, minutes) for a single meeting.
+    Download assets for a single meeting.
 
-    Runs as a background Celery task. Returns task_id for polling.
+    Documents (agenda/minutes/packet) are downloaded synchronously — they're
+    small HTTP GETs that complete in seconds.  Video is queued as a Celery
+    task since it requires Playwright + ffmpeg and can take minutes.
     """
     meeting = db.query(Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    from app.tasks import primegov_download_task
+    # ── Documents: download synchronously ────────────────────────────────
+    from app.services.primegov.downloader import download_document
 
-    task = primegov_download_task.delay(
-        meeting_id=meeting_id,
-        download_video=download_video,
-        download_agenda=download_agenda,
-        download_minutes=download_minutes,
-        download_packet=download_packet,
-        auto_process=auto_process,
-    )
+    doc_results = {}
+    for doc_type, requested in [
+        ("agenda", download_agenda),
+        ("minutes", download_minutes),
+        ("packet", download_packet),
+    ]:
+        if requested:
+            doc_results[doc_type] = download_document(db, meeting_id, doc_type)
+
+    # ── Video: queue in Celery (Playwright + ffmpeg) ─────────────────────
+    video_task_id = None
+    video_note = None
+    if download_video:
+        if not meeting.video_url:
+            video_note = "No video URL available for this meeting"
+        else:
+            from app.tasks import primegov_download_task
+
+            task = primegov_download_task.delay(
+                meeting_id=meeting_id,
+                download_video=True,
+                download_agenda=False,
+                download_minutes=False,
+                download_packet=False,
+                auto_process=auto_process,
+            )
+            video_task_id = task.id
+
     return {
-        "task_id": task.id,
         "meeting_id": meeting_id,
-        "status": "queued",
+        "status": "complete" if not video_task_id else "queued",
+        "task_id": video_task_id,
+        "video_note": video_note,
+        "documents": doc_results,
     }
 
 

@@ -443,13 +443,47 @@ function createMeetingCard(m) {
     try {
       const r = await fetch(`/api/primegov/download/${m.meeting_id}`, { method: "POST" });
       if (r.ok) {
-        btn.textContent = "\u23F3";
-        const badge = document.getElementById(`badge-${m.meeting_id}`);
-        if (badge) {
-          badge.textContent = "downloading";
-          badge.className = "meeting-card-badge badge-processing";
+        const result = await r.json();
+
+        // Report document download results
+        const docs = result.documents || {};
+        const docErrors = Object.entries(docs)
+          .filter(([, v]) => v.status === "error")
+          .map(([k, v]) => `${k}: ${v.error}`);
+        const docOk = Object.entries(docs)
+          .filter(([, v]) => v.status === "complete")
+          .map(([k]) => k);
+
+        // Refresh asset icons for any docs that downloaded
+        if (docOk.length > 0) fetchAssetStatus(m.meeting_id);
+
+        if (result.task_id) {
+          // Video download queued in Celery — poll for progress
+          btn.textContent = "\u23F3";
+          const badge = document.getElementById(`badge-${m.meeting_id}`);
+          if (badge) {
+            badge.textContent = "downloading video";
+            badge.className = "meeting-card-badge badge-processing";
+          }
+          startPolling(m.meeting_id);
+        } else {
+          // No video task — docs-only download complete
+          btn.style.display = "none";
+          const messages = [];
+          if (result.video_note) messages.push(result.video_note);
+          if (docErrors.length > 0) messages.push(...docErrors);
+
+          if (docOk.length > 0) {
+            const badge = document.getElementById(`badge-${m.meeting_id}`);
+            if (badge) {
+              badge.textContent = `${docOk.length} doc${docOk.length > 1 ? "s" : ""} downloaded`;
+              badge.className = "meeting-card-badge badge-unprocessed";
+            }
+          }
+          if (messages.length > 0) {
+            alert(messages.join("\n"));
+          }
         }
-        startPolling(m.meeting_id);
       } else {
         const err = await r.json().catch(() => ({}));
         alert(err.detail || "Failed to start download.");
@@ -1242,8 +1276,14 @@ async function fetchAssetStatus(meetingId) {
       assetsEl.innerHTML = icons.join(" ");
     }
 
-    // Show download button if video is available but not downloaded
-    if (assets.video_url_available && !assets.video_downloaded) {
+    // Show download button if any asset is available but not downloaded
+    const hasUndownloaded =
+      (assets.video_url_available && !assets.video_downloaded) ||
+      (assets.agenda_url_available && !assets.agenda_downloaded) ||
+      (assets.packet_url_available && !assets.packet_downloaded) ||
+      (assets.minutes_url_available && !assets.minutes_downloaded);
+
+    if (hasUndownloaded) {
       const card = document.querySelector(`[data-meeting-id="${meetingId}"]`);
       if (card) {
         const dlBtn = card.querySelector(".download-btn");

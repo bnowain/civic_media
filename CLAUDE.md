@@ -80,11 +80,11 @@ Key relationships: Meeting → MediaFile, Document, TranscriptSegment (cascade d
 
 Two-page vanilla JS SPA served from `app/static/`:
 - **index.html/js** — meeting list, upload, live progress bars
-- **review.html/js** — video player + synced transcript with speaker confirmation, text editing, filtering, and export (SRT/TXT/JSON)
+- **review.html/js** — video player + synced transcript with speaker confirmation, text editing, filtering, and export (SRT/TXT/JSON/PDF)
 
-### TXT Export Formatting
+### Transcript Export
 
-The TXT export (`GET /api/segments/{meeting_id}/export?format=txt`) applies a multi-stage text processing pipeline: segment joining with punctuation at boundaries, filler removal, sentence capitalization, phone number formatting, paragraph splitting at sentence boundaries, and smart trailing period logic. **Full spec with constants, thresholds, and known limitations**: `docs/txt_export_spec.md`. Check that doc before modifying any `_to_txt` helpers in `app/routers/segments.py`.
+Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|json|pdf`. SRT and JSON are raw/unprocessed. TXT and PDF share a text processing pipeline (filler removal, sentence capitalization, phone formatting, paragraph splitting, trailing period logic). PDF generation uses reportlab (`app/services/pdf_export.py`). **Full spec with shared helpers, constants, per-format rules, and known limitations**: `docs/export_spec.md`. Check that doc before modifying any export helpers in `app/routers/segments.py` or `app/services/pdf_export.py`.
 
 ## Key Design Decisions
 
