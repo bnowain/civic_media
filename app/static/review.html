@@ -132,6 +132,7 @@
   <header class="review-header">
     <a href="/" class="back-link">&larr; Home</a>
     <a href="/clips" class="back-link">Clips</a>
+    <span class="remote-badge" id="remote-badge" style="display:none"></span>
 
     <div class="review-title-block">
       <span class="review-governing-body" id="hdr-governing-body">—</span>
@@ -305,6 +306,42 @@
         </div>
       </div>
 
+      <div class="summary-panel" id="summary-panel">
+        <div class="summary-panel-header">
+          <span class="summary-label">SUMMARIES</span>
+          <div class="summary-tabs">
+            <button class="summary-tab active" data-summary-tab="short">Short</button>
+            <button class="summary-tab" data-summary-tab="long">Long</button>
+          </div>
+        </div>
+        <div class="summary-content" id="summary-content">
+          <div class="summary-text" id="summary-short-text">No short summary yet.</div>
+          <div class="summary-text" id="summary-long-text" style="display:none">No long summary yet.</div>
+        </div>
+        <div class="summary-actions">
+          <label class="btn btn-sm">
+            Upload Short
+            <input type="file" accept=".md,.txt" id="summary-upload-short" style="display:none">
+          </label>
+          <label class="btn btn-sm">
+            Upload Long
+            <input type="file" accept=".md,.txt" id="summary-upload-long" style="display:none">
+          </label>
+          <button class="btn btn-sm" id="summary-edit-btn">Edit</button>
+        </div>
+        <div class="summary-editor" id="summary-editor" style="display:none">
+          <textarea id="summary-editor-textarea" rows="8" placeholder="Paste summary text here..."></textarea>
+          <div class="summary-editor-actions">
+            <select id="summary-editor-type">
+              <option value="short">Short Summary</option>
+              <option value="long">Long Summary</option>
+            </select>
+            <button class="btn btn-sm btn-primary" id="summary-save-btn">Save</button>
+            <button class="btn btn-sm" id="summary-cancel-btn">Cancel</button>
+          </div>
+        </div>
+      </div>
+
       <div class="doc-panel" id="doc-panel">
         <div class="doc-panel-header">
           <div class="doc-tabs" id="doc-tabs">
@@ -389,6 +426,15 @@
   <div class="overlay" id="overlay"></div>
 
   <script>
+    // Remote access indicator
+    (function() {
+      var h = window.location.hostname;
+      if (h !== 'localhost' && h !== '127.0.0.1') {
+        var badge = document.getElementById('remote-badge');
+        badge.textContent = 'Remote: ' + h;
+        badge.style.display = '';
+      }
+    })();
     document.getElementById("shutdown-btn").addEventListener("click", async () => {
       if (!confirm("Shut down Civic Media server?")) return;
       try { await fetch("/api/system/shutdown", { method: "POST" }); } catch {}

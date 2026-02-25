@@ -7,9 +7,10 @@ GET  /api/documents/{meeting_id}/{doc_id} — single document detail.
 """
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -129,3 +130,59 @@ def serve_document_file(meeting_id: str, document_id: str, db: Session = Depends
         media_type="application/pdf",
         headers={"Content-Disposition": "inline"},
     )
+
+
+@router.patch("/{meeting_id}/{document_id}/summary")
+def update_document_summary(
+    meeting_id: str,
+    document_id: str,
+    body: schemas.SummaryUpload,
+    db: Session = Depends(get_db),
+):
+    """Upload short and/or long summary for a document."""
+    doc = (
+        db.query(models.Document)
+        .filter_by(meeting_id=meeting_id, document_id=document_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    if body.summary_short is not None:
+        doc.summary_short = body.summary_short
+    if body.summary_long is not None:
+        doc.summary_long = body.summary_long
+    doc.summary_updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(doc)
+    return {"document_id": document_id, "summary_short": doc.summary_short, "summary_long": doc.summary_long}
+
+
+@router.post("/{meeting_id}/{document_id}/summary/upload")
+async def upload_document_summary_markdown(
+    meeting_id: str,
+    document_id: str,
+    summary_type: str = Query(..., regex="^(short|long)$"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a markdown file as document summary. summary_type = 'short' | 'long'"""
+    doc = (
+        db.query(models.Document)
+        .filter_by(meeting_id=meeting_id, document_id=document_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    content = (await file.read()).decode("utf-8", errors="replace")
+
+    if summary_type == "short":
+        doc.summary_short = content
+    else:
+        doc.summary_long = content
+    doc.summary_updated_at = datetime.utcnow()
+
+    db.commit()
+    return {"document_id": document_id, "summary_type": summary_type, "length": len(content)}

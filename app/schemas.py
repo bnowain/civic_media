@@ -80,6 +80,13 @@ class MeetingUpdate(BaseModel):
     governing_body: Optional[str] = None
     meeting_type: Optional[str] = None
     venue_id: Optional[str] = None
+    summary_short: Optional[str] = None
+    summary_long: Optional[str] = None
+
+
+class SummaryUpload(BaseModel):
+    summary_short: Optional[str] = None
+    summary_long: Optional[str] = None
 
     @field_validator("meeting_date")
     @classmethod
@@ -97,6 +104,9 @@ class MeetingOut(MeetingCreate):
     media_directory: Optional[str]
     processed_at: Optional[datetime] = None
     created_at: datetime
+    summary_short: Optional[str] = None
+    summary_long: Optional[str] = None
+    summary_updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -123,6 +133,9 @@ class DocumentOut(BaseModel):
     file_path: str
     ocr_text: Optional[str]
     created_at: datetime
+    summary_short: Optional[str] = None
+    summary_long: Optional[str] = None
+    summary_updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

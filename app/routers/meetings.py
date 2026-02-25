@@ -1,9 +1,10 @@
 """Meeting CRUD endpoints."""
 
 import shutil
+from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -91,3 +92,45 @@ def delete_meeting(meeting_id: str, db: Session = Depends(get_db)):
         meeting_dir = directory / meeting_id
         if meeting_dir.exists():
             shutil.rmtree(meeting_dir)
+
+
+@router.patch("/{meeting_id}/summary")
+def update_meeting_summary(meeting_id: str, body: schemas.SummaryUpload, db: Session = Depends(get_db)):
+    """Upload short and/or long summary for a meeting."""
+    m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if not m:
+        raise HTTPException(404, "Meeting not found")
+
+    if body.summary_short is not None:
+        m.summary_short = body.summary_short
+    if body.summary_long is not None:
+        m.summary_long = body.summary_long
+    m.summary_updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(m)
+    return {"meeting_id": meeting_id, "summary_short": m.summary_short, "summary_long": m.summary_long}
+
+
+@router.post("/{meeting_id}/summary/upload")
+async def upload_summary_markdown(
+    meeting_id: str,
+    summary_type: str = Query(..., regex="^(short|long)$"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a markdown file as summary. summary_type = 'short' | 'long'"""
+    m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+    if not m:
+        raise HTTPException(404, "Meeting not found")
+
+    content = (await file.read()).decode("utf-8", errors="replace")
+
+    if summary_type == "short":
+        m.summary_short = content
+    else:
+        m.summary_long = content
+    m.summary_updated_at = datetime.utcnow()
+
+    db.commit()
+    return {"meeting_id": meeting_id, "summary_type": summary_type, "length": len(content)}

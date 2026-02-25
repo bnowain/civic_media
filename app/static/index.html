@@ -13,8 +13,10 @@
 
   <header class="app-header">
     <div class="header-brand">
+      <button class="sidebar-toggle-btn" id="sidebar-toggle-btn" title="Toggle sidebar">&#9776;</button>
       <span class="brand-icon">&#x2B21;</span>
       <span class="brand-name">CIVIC MEDIA</span>
+      <span class="remote-badge" id="remote-badge" style="display:none"></span>
     </div>
     <div class="header-nav">
       <a href="/speakers" class="nav-link">Speakers</a>
@@ -241,6 +243,21 @@
 
   <div class="overlay" id="overlay"></div>
 
+  <script>
+    // Mobile sidebar toggle
+    document.getElementById('sidebar-toggle-btn').addEventListener('click', function() {
+      document.getElementById('sidebar').classList.toggle('mobile-open');
+    });
+    // Remote access indicator
+    (function() {
+      var h = window.location.hostname;
+      if (h !== 'localhost' && h !== '127.0.0.1') {
+        var badge = document.getElementById('remote-badge');
+        badge.textContent = 'Remote: ' + h;
+        badge.style.display = '';
+      }
+    })();
+  </script>
   <script src="/static/index.js"></script>
 </body>
 </html>

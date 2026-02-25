@@ -78,8 +78,11 @@ class Meeting(Base):
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
     minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL
     packet_url        = Column(Text, nullable=True)         # PrimeGov meeting packet PDF URL
-    processed_at      = Column(DateTime, nullable=True)
-    created_at        = Column(DateTime, default=datetime.utcnow)
+    processed_at       = Column(DateTime, nullable=True)
+    created_at         = Column(DateTime, default=datetime.utcnow)
+    summary_short      = Column(Text, nullable=True)
+    summary_long       = Column(Text, nullable=True)
+    summary_updated_at = Column(DateTime, nullable=True)
 
     governing_body_ref = relationship("GoverningBody", back_populates="meetings")
     venue              = relationship("Venue")
@@ -110,9 +113,12 @@ class Document(Base):
     document_id   = Column(String, primary_key=True, default=_gen_id)
     meeting_id    = Column(String, ForeignKey("meetings.meeting_id"), nullable=False)
     document_type = Column(String, nullable=False)  # agenda | minutes | supplemental
-    file_path     = Column(String, nullable=False)
-    ocr_text      = Column(Text)
-    created_at    = Column(DateTime, default=datetime.utcnow)
+    file_path          = Column(String, nullable=False)
+    ocr_text           = Column(Text)
+    created_at         = Column(DateTime, default=datetime.utcnow)
+    summary_short      = Column(Text, nullable=True)
+    summary_long       = Column(Text, nullable=True)
+    summary_updated_at = Column(DateTime, nullable=True)
 
     meeting = relationship("Meeting", back_populates="documents")
 

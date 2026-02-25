@@ -59,6 +59,8 @@ async function init() {
   setupExportDropdown();
   setupRerunDialog();
   setupClipBuilder();
+  setupSummaryPanel();
+  renderSummaries();
 
   await checkPipelineAndPoll();
   seekToSpeakerFromURL();
@@ -1863,6 +1865,135 @@ function seekToTimeFromURL() {
       }
     }
   }
+}
+
+// ── Summary Panel ─────────────────────────────────────────────────────────────
+
+let _activeSummaryTab = "short";
+
+function setupSummaryPanel() {
+  // Tab switching
+  document.querySelectorAll(".summary-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      _activeSummaryTab = tab.dataset.summaryTab;
+      document.querySelectorAll(".summary-tab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      document.getElementById("summary-short-text").style.display = _activeSummaryTab === "short" ? "" : "none";
+      document.getElementById("summary-long-text").style.display  = _activeSummaryTab === "long"  ? "" : "none";
+    });
+  });
+
+  // File upload handlers
+  document.getElementById("summary-upload-short").addEventListener("change", e => {
+    const f = e.target.files?.[0];
+    if (f) uploadSummaryFile(f, "short");
+    e.target.value = "";
+  });
+  document.getElementById("summary-upload-long").addEventListener("change", e => {
+    const f = e.target.files?.[0];
+    if (f) uploadSummaryFile(f, "long");
+    e.target.value = "";
+  });
+
+  // Edit button
+  document.getElementById("summary-edit-btn").addEventListener("click", () => {
+    const editor = document.getElementById("summary-editor");
+    const textarea = document.getElementById("summary-editor-textarea");
+    const typeSelect = document.getElementById("summary-editor-type");
+    editor.style.display = editor.style.display === "none" ? "" : "none";
+    if (editor.style.display !== "none") {
+      typeSelect.value = _activeSummaryTab;
+      const current = _activeSummaryTab === "short" ? meeting?.summary_short : meeting?.summary_long;
+      textarea.value = current || "";
+      textarea.focus();
+    }
+  });
+
+  // Save button
+  document.getElementById("summary-save-btn").addEventListener("click", async () => {
+    const textarea = document.getElementById("summary-editor-textarea");
+    const typeSelect = document.getElementById("summary-editor-type");
+    const summaryType = typeSelect.value;
+    const text = textarea.value;
+
+    const btn = document.getElementById("summary-save-btn");
+    btn.textContent = "Saving…";
+    btn.disabled = true;
+    try {
+      const body = {};
+      body[summaryType === "short" ? "summary_short" : "summary_long"] = text;
+      const r = await fetch(`/api/meetings/${meetingId}/summary`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      meeting.summary_short = data.summary_short;
+      meeting.summary_long = data.summary_long;
+      renderSummaries();
+      document.getElementById("summary-editor").style.display = "none";
+    } catch (err) {
+      alert(`Save failed: ${err.message}`);
+    } finally {
+      btn.textContent = "Save";
+      btn.disabled = false;
+    }
+  });
+
+  // Cancel button
+  document.getElementById("summary-cancel-btn").addEventListener("click", () => {
+    document.getElementById("summary-editor").style.display = "none";
+  });
+}
+
+async function uploadSummaryFile(file, summaryType) {
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const r = await fetch(`/api/meetings/${meetingId}/summary/upload?summary_type=${summaryType}`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    // Reload meeting to get updated summaries
+    await loadMeeting();
+    renderSummaries();
+  } catch (err) {
+    alert(`Upload failed: ${err.message}`);
+  }
+}
+
+function renderSummaries() {
+  const shortEl = document.getElementById("summary-short-text");
+  const longEl  = document.getElementById("summary-long-text");
+
+  if (meeting?.summary_short) {
+    shortEl.textContent = meeting.summary_short;
+    shortEl.classList.remove("empty");
+  } else {
+    shortEl.textContent = "No short summary yet.";
+    shortEl.classList.add("empty");
+  }
+
+  if (meeting?.summary_long) {
+    // Render long summary as preformatted text (preserves markdown structure)
+    longEl.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.fontFamily = "inherit";
+    pre.style.margin = "0";
+    pre.textContent = meeting.summary_long;
+    longEl.appendChild(pre);
+    longEl.classList.remove("empty");
+  } else {
+    longEl.textContent = "No long summary yet.";
+    longEl.classList.add("empty");
+  }
+
+  // Show the active tab
+  shortEl.style.display = _activeSummaryTab === "short" ? "" : "none";
+  longEl.style.display  = _activeSummaryTab === "long"  ? "" : "none";
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

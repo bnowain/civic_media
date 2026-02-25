@@ -128,7 +128,19 @@ async function init() {
   pollWorkerHealth();
   setInterval(pollWorkerHealth, 10000);
 
+  // Close sidebar on mobile when clicking sidebar items
+  document.getElementById("sidebar").addEventListener("click", function(e) {
+    if (e.target.closest(".gb-item") || e.target.closest(".recent-item") || e.target.closest(".station-list a")) {
+      closeMobileSidebar();
+    }
+  });
+
   updateToolbar();
+}
+
+function closeMobileSidebar() {
+  var sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.classList.remove("mobile-open");
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
