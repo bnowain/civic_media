@@ -129,6 +129,9 @@ class PodbeamScraper(BaseScraper):
                 ep_image = ep_img_el.get("href")
             thumbnail = ep_image or channel_image
 
+            # Per-episode page URL from RSS <link>
+            episode_link = (item.findtext("link") or "").strip() or None
+
             episodes.append(ScrapedEpisode(
                 title=title,
                 audio_url=audio_url,
@@ -137,6 +140,7 @@ class PodbeamScraper(BaseScraper):
                 show_name=self.show_name,
                 description=description or None,
                 thumbnail_url=thumbnail,
+                page_url=episode_link,
                 duration_hint=duration,
                 extra={"feed_url": self.feed_url},
             ))

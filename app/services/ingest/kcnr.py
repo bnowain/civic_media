@@ -106,7 +106,7 @@ class KCNRScraper(BaseScraper):
                 logger.warning("  Failed to fetch page %d for %s", page, show_name)
                 break
 
-            page_episodes = self._parse_page(resp.text, show_name, archive_label)
+            page_episodes = self._parse_page(resp.text, show_name, archive_label, page_url=f"{self.base_url}{show['path']}")
             if not page_episodes:
                 logger.info("  No more episodes on page %d", page)
                 break
@@ -120,7 +120,7 @@ class KCNRScraper(BaseScraper):
         logger.info("  Total %d episodes from %s", len(episodes), show_name)
         return episodes
 
-    def _parse_page(self, html: str, show_name: str, archive_label: str) -> list[ScrapedEpisode]:
+    def _parse_page(self, html: str, show_name: str, archive_label: str, page_url: str = "") -> list[ScrapedEpisode]:
         """Parse a single archive page and extract episodes."""
         soup = BeautifulSoup(html, "html.parser")
         episodes = []
@@ -173,6 +173,7 @@ class KCNRScraper(BaseScraper):
                     source_type="kcnr",
                     show_name=show_name,
                     description=f"Source: KCNR (archive: {archive_label})",
+                    page_url=page_url,
                 ))
 
         return episodes

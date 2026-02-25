@@ -22,6 +22,7 @@ class ScrapedEpisode:
     show_name: str = ""                     # e.g. "Kevin Crye Show"
     description: Optional[str] = None       # episode notes / guest list
     thumbnail_url: Optional[str] = None     # cover art
+    page_url: Optional[str] = None         # human-browsable source page URL
     duration_hint: Optional[float] = None   # seconds, if available from metadata
     extra: dict = field(default_factory=dict)  # source-specific metadata
 

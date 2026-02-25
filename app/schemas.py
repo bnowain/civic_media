@@ -56,6 +56,7 @@ class MeetingCreate(BaseModel):
     governing_body_id: Optional[str] = None
     description: Optional[str] = None
     source_url: Optional[str] = None
+    page_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
     primegov_id: Optional[int] = None
     video_url: Optional[str] = None
@@ -83,11 +84,6 @@ class MeetingUpdate(BaseModel):
     summary_short: Optional[str] = None
     summary_long: Optional[str] = None
 
-
-class SummaryUpload(BaseModel):
-    summary_short: Optional[str] = None
-    summary_long: Optional[str] = None
-
     @field_validator("meeting_date")
     @classmethod
     def validate_date(cls, v: Optional[str]) -> Optional[str]:
@@ -97,6 +93,11 @@ class SummaryUpload(BaseModel):
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             raise ValueError("meeting_date must be YYYY-MM-DD")
         return v
+
+
+class SummaryUpload(BaseModel):
+    summary_short: Optional[str] = None
+    summary_long: Optional[str] = None
 
 
 class MeetingOut(MeetingCreate):

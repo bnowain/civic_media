@@ -75,6 +75,7 @@ class Meeting(Base):
     venue_id          = Column(String, ForeignKey("venues.venue_id"), nullable=True)
     primegov_id       = Column(Integer, nullable=True, unique=True, index=True)
     video_url         = Column(Text, nullable=True)        # Swagit video page URL
+    page_url          = Column(Text, nullable=True)        # human-browsable source page URL
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
     minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL
     packet_url        = Column(Text, nullable=True)         # PrimeGov meeting packet PDF URL

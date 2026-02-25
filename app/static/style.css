@@ -2598,6 +2598,18 @@ html, body {
   text-overflow: ellipsis;
 }
 
+.meeting-card-source {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  margin-top: 2px;
+  display: inline-block;
+}
+.meeting-card-source:hover {
+  color: var(--accent);
+}
+
 /* Card action buttons row */
 .meeting-card-actions {
   display: flex;

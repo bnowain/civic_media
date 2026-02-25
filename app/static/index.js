@@ -390,6 +390,16 @@ function createMeetingCard(m) {
   // Asset icons for PrimeGov meetings
   const assetHtml = m.primegov_id ? `<div class="asset-icons" id="assets-${m.meeting_id}"></div>` : "";
 
+  // Source provenance link
+  let sourceLinkHtml = "";
+  if (m.page_url) {
+    sourceLinkHtml = `<a class="meeting-card-source" href="${esc(m.page_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Source \u2197</a>`;
+  } else if (m.video_url) {
+    sourceLinkHtml = `<a class="meeting-card-source" href="${esc(m.video_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Source \u2197</a>`;
+  } else if (m.source_url) {
+    sourceLinkHtml = `<a class="meeting-card-source" href="${esc(m.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Source \u2197</a>`;
+  }
+
   card.innerHTML = `
     ${thumbHtml}
     <span class="meeting-card-date">${esc(displayDate)}</span>
@@ -398,6 +408,7 @@ function createMeetingCard(m) {
       <div class="meeting-card-sub">${subLine}</div>
       ${descLine}
       ${assetHtml}
+      ${sourceLinkHtml}
       <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">\u2014</span>
@@ -419,7 +430,7 @@ function createMeetingCard(m) {
   }
 
   card.addEventListener("click", e => {
-    if (e.target.closest(".delete-btn") || e.target.closest(".edit-btn") || e.target.closest(".process-btn") || e.target.closest(".download-btn") || e.target.closest(".transcode-btn")) return;
+    if (e.target.closest(".delete-btn") || e.target.closest(".edit-btn") || e.target.closest(".process-btn") || e.target.closest(".download-btn") || e.target.closest(".transcode-btn") || e.target.closest(".meeting-card-source")) return;
     window.location.href = `/review/${m.meeting_id}`;
   });
 

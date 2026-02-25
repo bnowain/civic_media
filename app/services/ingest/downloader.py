@@ -106,6 +106,7 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
         category="audio",
         description=episode.description,
         source_url=episode.audio_url,
+        page_url=episode.page_url,
         thumbnail_url=episode.thumbnail_url,
         media_directory=str(meeting_dir),
     )

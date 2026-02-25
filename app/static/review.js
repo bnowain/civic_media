@@ -81,6 +81,22 @@ async function loadMeeting() {
     document.getElementById("hdr-governing-body").textContent = meeting.governing_body;
     document.getElementById("hdr-title").textContent = meeting.title;
     document.title = `${meeting.title} — Civic Media`;
+
+    // Source provenance link
+    const srcLink = document.getElementById("hdr-source-link");
+    if (meeting.page_url) {
+      srcLink.href = meeting.page_url;
+      srcLink.textContent = "\u{1F517} Source";
+      srcLink.style.display = "";
+    } else if (meeting.video_url) {
+      srcLink.href = meeting.video_url;
+      srcLink.textContent = "\u{1F517} Video Source";
+      srcLink.style.display = "";
+    } else if (meeting.source_url) {
+      srcLink.href = meeting.source_url;
+      srcLink.textContent = "\u{1F517} Audio File";
+      srcLink.style.display = "";
+    }
   } catch (err) {
     console.error("loadMeeting:", err);
   }

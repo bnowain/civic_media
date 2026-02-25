@@ -5,6 +5,15 @@ Registers all routers, mounts static files and media directories,
 initialises the database schema on first run.
 """
 
+# Purge stale __pycache__ before any app imports — prevents Windows bytecode
+# caching bugs after code edits.  The Atlas service manager also does this,
+# but running it here ensures parity when civic_media is started standalone.
+import shutil as _shutil
+from pathlib import Path as _P
+for _cache in (_P(__file__).resolve().parent).rglob("__pycache__"):
+    _shutil.rmtree(_cache, ignore_errors=True)
+del _shutil, _P, _cache
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +23,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, MEDIA_DIR
-from app.database import engine
+from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
     assignments, clips, documents, governing_bodies, ingest, library, media,
@@ -24,6 +33,9 @@ from app.routers import (
 
 # Create all tables (idempotent)
 models.Base.metadata.create_all(bind=engine)
+
+# Auto-fix any nullable columns that exist in ORM models but not in the DB
+validate_schema_columns(models.Base)
 
 logger = logging.getLogger(__name__)
 

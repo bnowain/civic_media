@@ -207,6 +207,7 @@ class SecureNetScraper(BaseScraper):
                 show_name=show_name,
                 description=f"Source: {station} (SecureNet on-demand)",
                 thumbnail_url=cover_art or None,
+                page_url=self.station_url,
                 duration_hint=duration,
                 extra={"file_id": entry.get("fileId"), "station": station},
             ))
