@@ -26,6 +26,10 @@ _health_cache: dict = {}
 _health_cache_ts: float = 0.0
 _CACHE_TTL = 5.0  # seconds
 
+# Ghost binding flush cooldown — flush at most once per minute on dispatch
+_last_binding_flush: float = 0.0
+_BINDING_FLUSH_COOLDOWN = 60.0  # seconds
+
 
 def _pid_alive(pid: int) -> bool:
     """Check whether a process with the given PID is still running (Windows)."""
@@ -93,6 +97,114 @@ def _count_active_tasks() -> int:
         return 0
 
 
+def _flush_kombu_bindings() -> None:
+    """Flush stale Kombu routing-key registrations left by killed workers.
+
+    Matches the same logic in worker.py's celeryd_init signal, but called
+    synchronously during restart so ghost bindings are gone before the new
+    worker starts (prevents DuplicateNodenameWarning).
+    """
+    try:
+        import redis
+        r = redis.from_url(CELERY_BROKER, socket_connect_timeout=2, socket_timeout=2)
+        keys = [
+            "_kombu.binding.celeryev",
+            "_kombu.binding.celery.pidbox",
+            "_kombu.binding.reply.celery.pidbox",
+        ]
+        deleted = r.delete(*keys)
+        if deleted:
+            logger.info("Flushed %d stale Kombu binding key(s) from Redis", deleted)
+        r.close()
+    except Exception as exc:
+        logger.warning("Could not flush Kombu bindings (non-fatal): %s", exc)
+
+
+def get_active_job() -> dict | None:
+    """Scan MEDIA_DIR for the most recently updated in-progress pipeline job.
+
+    Returns a dict: {meeting_id, title, stage, pct, detail} or None.
+    Uses filesystem scan (fast) instead of Celery inspect (slow).
+    """
+    import json as _json
+    from datetime import datetime, timezone as _tz
+
+    try:
+        from app.config import MEDIA_DIR
+    except Exception:
+        return None
+
+    if not MEDIA_DIR.exists():
+        return None
+
+    TERMINAL = {"Complete", "Error", ""}
+    MAX_STALE_SECS = 300  # 5 minutes — beyond this, job is likely stuck
+
+    best: dict | None = None
+    best_ts = None
+
+    for progress_file in MEDIA_DIR.glob("*/progress.json"):
+        try:
+            data = _json.loads(progress_file.read_text())
+        except Exception:
+            continue
+
+        stage = data.get("stage", "")
+        if stage in TERMINAL:
+            continue
+
+        updated_str = data.get("updated_at")
+        if not updated_str:
+            continue
+
+        try:
+            updated_at = datetime.fromisoformat(updated_str)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=_tz.utc)
+        except (ValueError, TypeError):
+            continue
+
+        age = (datetime.now(_tz.utc) - updated_at).total_seconds()
+        if age > MAX_STALE_SECS:
+            continue
+
+        if best_ts is None or updated_at > best_ts:
+            best_ts = updated_at
+            best = {
+                "meeting_id": progress_file.parent.name,
+                "stage": stage,
+                "pct": data.get("pct", 0),
+                "detail": data.get("detail", ""),
+                "title": None,
+            }
+
+    if not best:
+        return None
+
+    # Resolve meeting title and date from DB
+    try:
+        from app.database import SessionLocal
+        from app import models
+        db = SessionLocal()
+        try:
+            meeting = db.query(models.Meeting).filter(
+                models.Meeting.meeting_id == best["meeting_id"]
+            ).first()
+            if meeting:
+                best["title"] = meeting.title or meeting.governing_body or "Unknown"
+                best["meeting_date"] = str(meeting.meeting_date)[:10] if meeting.meeting_date else None
+            else:
+                best["title"] = "Unknown meeting"
+                best["meeting_date"] = None
+        finally:
+            db.close()
+    except Exception:
+        best["title"] = "Unknown meeting"
+        best["meeting_date"] = None
+
+    return best
+
+
 def check_worker_health(use_cache: bool = True) -> dict:
     """
     Check Celery worker health. Returns a status dict.
@@ -120,6 +232,7 @@ def check_worker_health(use_cache: bool = True) -> dict:
         "active_tasks": active_tasks,
         "watchdog_alive": watchdog_alive,
         "watchdog_pid": watchdog_pid,
+        "active_job": get_active_job(),
     }
 
     _health_cache = result
@@ -127,9 +240,35 @@ def check_worker_health(use_cache: bool = True) -> dict:
     return result
 
 
+def _kill_by_cmdline(signature: str, label: str) -> None:
+    """Kill all processes whose CommandLine contains `signature` (PowerShell)."""
+    try:
+        # Use a temp PS1 file to avoid bash $_ expansion issues
+        ps_script = (
+            f"Get-CimInstance Win32_Process "
+            f"| Where-Object {{ $_.CommandLine -like '*{signature}*' }} "
+            f"| ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        )
+        result = subprocess.run(
+            ["powershell", "-Command", ps_script],
+            capture_output=True, timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("Killed all %s processes matching: %s", label, signature)
+    except Exception as exc:
+        logger.warning("Could not kill %s processes by cmdline: %s", label, exc)
+
+
 def kill_zombies() -> None:
-    """Kill orphaned celery processes and the watchdog PID tree."""
-    # Kill watchdog PID tree if it exists
+    """Kill watchdog cmd.exe, all celery shims, and all python.exe worker processes.
+
+    Three-step kill ensures no orphans survive:
+    1. Tracked watchdog PID tree (fast, catches the common case)
+    2. Any cmd.exe running .celery_watchdog.cmd (catches untracked watchdogs)
+    3. Any python.exe/celery.exe with our app.worker.celery_app signature
+       (catches python.exe grandchildren that survive celery.exe kills)
+    """
+    # Step 1: Kill tracked watchdog PID tree
     pids = _read_pids()
     watchdog_pid = pids.get("watchdog")
     if watchdog_pid and _pid_alive(watchdog_pid):
@@ -139,11 +278,12 @@ def kill_zombies() -> None:
         except Exception as exc:
             logger.warning("Failed to kill watchdog PID %s: %s", watchdog_pid, exc)
 
-    # Kill any remaining celery.exe processes
-    try:
-        os.system("taskkill /F /IM celery.exe >nul 2>&1")
-    except Exception:
-        pass
+    # Step 2: Kill untracked watchdog cmd.exe processes
+    _kill_by_cmdline(".celery_watchdog.cmd", "watchdog cmd")
+
+    # Step 3: Kill any remaining celery worker processes by app signature
+    # (catches python.exe grandchildren that survive the celery.exe shim kill)
+    _kill_by_cmdline("app.worker.celery_app", "celery worker")
 
     # Brief pause to let processes terminate
     time.sleep(0.5)
@@ -168,6 +308,10 @@ def restart_worker() -> dict:
 
     # Step 1: Kill zombies
     kill_zombies()
+
+    # Step 1b: Flush stale Kombu ghost bindings from Redis so the new worker
+    # doesn't inherit duplicate node name registrations from killed workers.
+    _flush_kombu_bindings()
 
     # Step 2: Launch watchdog in a new hidden window
     try:
@@ -224,8 +368,21 @@ def ensure_worker() -> None:
     Fast path (~0ms): uses cached health check.
     Slow path (~15s): only when worker needs restart.
 
+    Also periodically flushes stale Kombu ghost bindings from Redis
+    (at most once per minute) so that ghost node registrations left by
+    previously killed workers don't accumulate into DuplicateNodenameWarnings.
+
     Raises RuntimeError if the worker cannot be recovered.
     """
+    global _last_binding_flush
+
+    # Flush stale Kombu ghost bindings periodically — fast (~1ms Redis DELETE).
+    # Safe to run while the worker is alive; it re-registers on next heartbeat.
+    now = time.time()
+    if (now - _last_binding_flush) > _BINDING_FLUSH_COOLDOWN:
+        _flush_kombu_bindings()
+        _last_binding_flush = now
+
     # Quick check using cache
     health = check_worker_health(use_cache=True)
     if health.get("worker_online"):

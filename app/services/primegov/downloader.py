@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +26,28 @@ logger = logging.getLogger(__name__)
 M3U8_PATTERN = re.compile(
     r"https?://archive-stream\.granicus\.com[^\s\"']+playlist\.m3u8"
 )
+
+# Grace period: if a meeting is within this many days of its scheduled date,
+# a download failure means the recording isn't posted yet ("Not available yet"),
+# not a hard error. After this window, errors are real errors.
+_NOT_AVAILABLE_GRACE_DAYS = 5
+
+
+def _within_grace_period(meeting_date, grace_days: int = _NOT_AVAILABLE_GRACE_DAYS) -> bool:
+    """Return True if the meeting's date is within the grace window from today."""
+    if meeting_date is None:
+        return False
+    try:
+        if isinstance(meeting_date, datetime):
+            md = meeting_date.date()
+        elif isinstance(meeting_date, date):
+            md = meeting_date
+        else:
+            md = date.fromisoformat(str(meeting_date)[:10])
+        delta = (date.today() - md).days
+        return delta <= grace_days
+    except Exception:
+        return False
 
 
 def _write_progress(meeting_id: str, stage: str, pct: int = 0, detail: str = "", error: bool = False) -> None:
@@ -150,6 +172,11 @@ def download_video(db: Session, meeting_id: str) -> dict:
     # Extract m3u8 URL
     m3u8_url = extract_m3u8_url(meeting.video_url)
     if not m3u8_url:
+        if _within_grace_period(meeting.meeting_date):
+            _write_progress(meeting_id, "Not available yet", 0,
+                            "Recording not posted yet — will retry automatically")
+            logger.info("[%s] Video not available yet (meeting is recent, within grace period)", meeting_id)
+            return {"error": "Video not yet available", "status": "not_available_yet"}
         _write_progress(meeting_id, "Error", 0, "Could not extract video stream URL", error=True)
         return {"error": "Could not extract m3u8 URL", "status": "error"}
 
@@ -182,6 +209,10 @@ def download_video(db: Session, meeting_id: str) -> dict:
         )
         if proc.returncode != 0:
             logger.error("ffmpeg failed: %s", proc.stderr[-500:] if proc.stderr else "")
+            if _within_grace_period(meeting.meeting_date):
+                _write_progress(meeting_id, "Not available yet", 0,
+                                "Stream download failed — recording may not be ready yet")
+                return {"error": "ffmpeg failed (within grace period)", "status": "not_available_yet"}
             _write_progress(meeting_id, "Error", 0, "ffmpeg download failed", error=True)
             return {"error": "ffmpeg failed", "status": "error"}
     except subprocess.TimeoutExpired:

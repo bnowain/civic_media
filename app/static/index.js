@@ -1385,13 +1385,37 @@ async function pollWorkerHealth() {
   try {
     const r = await fetch("/api/system/worker-health");
     const data = await r.json();
-    if (data.worker_online) {
+
+    // Worker is "effectively running" if Celery ping succeeded, OR if the
+    // watchdog process is alive (ping can fail when Whisper/GPU work blocks
+    // the Celery main loop), OR if a job is actively writing progress.
+    const effectivelyRunning = data.worker_online || data.watchdog_alive || !!data.active_job;
+
+    if (effectivelyRunning) {
       workerState = "online";
-      dot.className = "worker-dot online";
-      label.textContent = "Worker";
-      btn.title = data.active_tasks
-        ? `Worker online — ${data.active_tasks} active task(s)`
-        : "Worker online";
+      const job = data.active_job;
+      if (job) {
+        dot.className = "worker-dot processing";
+        // Format date as "Feb 25" if available
+        let dateStr = "";
+        if (job.meeting_date) {
+          try {
+            const d = new Date(job.meeting_date + "T12:00:00");
+            dateStr = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+          } catch { dateStr = job.meeting_date; }
+        }
+        const title = job.title || "";
+        const shortTitle = title.length > 22 ? title.slice(0, 21) + "…" : title;
+        const meta = [dateStr, shortTitle].filter(Boolean).join(" · ");
+        label.textContent = `${job.stage} ${job.pct}%${meta ? " · " + meta : ""}`;
+        btn.title = `${job.stage} (${job.pct}%) — ${dateStr ? dateStr + " " : ""}${title || "unknown meeting"}`;
+      } else {
+        dot.className = "worker-dot online";
+        label.textContent = "Worker";
+        btn.title = data.active_tasks
+          ? `Worker online — ${data.active_tasks} active task(s)`
+          : "Worker online";
+      }
     } else {
       workerState = "offline";
       dot.className = "worker-dot offline";

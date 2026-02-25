@@ -272,7 +272,7 @@ def trigger_backfill(background_tasks: BackgroundTasks):
 @router.get("/api/reference/brown-act/sections")
 def search_brown_act(
     q:     Optional[str] = Query(None, description="Keyword or section number"),
-    limit: int = Query(10, le=50),
+    limit: int = Query(10, le=200),
     db: Session = Depends(get_db),
 ):
     """

@@ -1238,9 +1238,20 @@ html, body {
   animation: worker-pulse 1s ease-in-out infinite;
 }
 
+.worker-dot.processing {
+  background: var(--accent-blue);
+  box-shadow: 0 0 4px var(--accent-blue);
+  animation: worker-processing 2s ease-in-out infinite;
+}
+
 @keyframes worker-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--accent-amber); }
   50%      { opacity: 0.3; box-shadow: 0 0 8px var(--accent-amber); }
+}
+
+@keyframes worker-processing {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--accent-blue); }
+  50%      { opacity: 0.6; box-shadow: 0 0 8px var(--accent-blue); }
 }
 
 .nav-link {

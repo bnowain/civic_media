@@ -376,5 +376,16 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
 
     embedder.clear_audio_cache()
 
+    # Release PyTorch's CUDA memory cache back to CUDA's allocator pool so
+    # other GPU consumers (Ollama, next task) can use it without waiting for
+    # this process to exit.
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("[%s] CUDA cache cleared after pipeline completion.", meeting_id)
+    except Exception:
+        pass
+
     _write_progress(meeting_id, "Complete", 100)
     logger.info("[%s] Pipeline complete - %d segments stored.", meeting_id, len(aligned_segments))

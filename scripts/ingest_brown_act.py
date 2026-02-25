@@ -104,21 +104,36 @@ def split_into_sections(full_text: str) -> list[tuple[str, str, str]]:
     """
     Split full Brown Act text into sections.
     Returns list of (section_num, title, text).
+    Deduplicates by section_num — keeps the longest text (body over TOC entry).
     """
     matches = list(_SECTION_START.finditer(full_text))
     if not matches:
         return [("", "Full Text", full_text)]
 
-    sections = []
+    raw = []
     for i, match in enumerate(matches):
         section_num = match.group(1)
         start = match.start(1)
         end = matches[i + 1].start(1) if i + 1 < len(matches) else len(full_text)
         text = full_text[start:end].strip()
         title = _SECTION_TITLES.get(section_num, "")
-        sections.append((section_num, title, text))
+        raw.append((section_num, title, text))
 
-    return sections
+    # Deduplicate: for each section_num keep the entry with the most text
+    seen: dict[str, tuple[str, str, str]] = {}
+    for entry in raw:
+        num = entry[0]
+        if num not in seen or len(entry[2]) > len(seen[num][2]):
+            seen[num] = entry
+
+    # Preserve original ordering (first occurrence's position)
+    order = []
+    for entry in raw:
+        num = entry[0]
+        if seen.get(num) == entry and num not in [o[0] for o in order]:
+            order.append(seen[num])
+
+    return order
 
 
 # ── DB ingest ─────────────────────────────────────────────────────────────────
