@@ -88,13 +88,36 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
             return {"error": "MediaFile not found", "status": "error"}
 
         original_path = Path(media.file_path)
-        if not original_path.exists():
-            _write_progress(meeting_id, "Error", 0, "Source file not found", error=True)
-            return {"error": "Source file not found", "status": "error"}
 
         # Build output path: same dir, add _540p suffix
         stem = original_path.stem
         out_path = original_path.parent / f"{stem}_540p.mp4"
+
+        if not original_path.exists():
+            # Source file is gone — check if a valid 540p already exists on disk.
+            # This happens when transcode completed (or was done externally) but
+            # the DB record was never updated (e.g. crash after file deletion).
+            if out_path.exists() and out_path.stat().st_size > 10_000:
+                out_dur = _probe_duration(str(out_path))
+                if out_dur:
+                    logger.info(
+                        "Source missing for %s but valid 540p found — recovering DB record",
+                        meeting_id,
+                    )
+                    media.file_path = str(out_path)
+                    media.transcode_status = "transcoded"
+                    media.duration = out_dur
+                    db.commit()
+                    _write_progress(meeting_id, "Transcode complete", 100,
+                                    f"540p recovered: {out_path.stat().st_size / (1024*1024):.0f} MB")
+                    if auto_process:
+                        _auto_dispatch_pipeline(meeting_id, media_id)
+                    return {"meeting_id": meeting_id, "status": "transcoded", "recovered": True}
+            # No recovery possible — reset status so the button stays clickable
+            media.transcode_status = "pending"
+            db.commit()
+            _write_progress(meeting_id, "Error", 0, "Source file not found", error=True)
+            return {"error": "Source file not found", "status": "error"}
 
         # Check if a valid 540p already exists (e.g. previous run created it
         # but crashed before updating the DB — common with WinError 32).

@@ -28,7 +28,7 @@ from app import models
 from app.routers import (
     assignments, clips, documents, governing_bodies, ingest, library, media,
     meetings, mentions, news, people, primegov, segments, system, tags, tagging,
-    transcribe, venues,
+    transcribe, venues, votes,
 )
 
 # Create all tables (idempotent)
@@ -116,6 +116,7 @@ app.include_router(ingest.router)
 app.include_router(primegov.router)
 app.include_router(venues.router)
 app.include_router(system.router)
+app.include_router(votes.router)
 
 # ── Static files ─────────────────────────────────────────────────────────────
 _static_dir = BASE_DIR / "app" / "static"

@@ -46,17 +46,21 @@ _MIME_TYPES = {
 
 
 def _find_media_file(meeting_id: str, db: Session) -> Path | None:
-    """Return the source media file (upload or download) via DB query, or None."""
-    source = (
+    """Return the source media file (upload or download) via DB query, or None.
+
+    Scans all candidate records and returns the first whose file exists on disk,
+    so stale duplicate records (e.g. from retried downloads) are skipped silently.
+    """
+    candidates = (
         db.query(models.MediaFile)
         .filter(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
         )
-        .first()
+        .all()
     )
-    if source:
+    for source in candidates:
         p = Path(source.file_path)
         if p.exists():
             return p
@@ -158,6 +162,21 @@ async def upload_video(
     is_audio = suffix in _AUDIO_SUFFIXES
     file_type = "audio" if is_audio else "video"
 
+    # Reject if a primary source of this type already exists for the meeting.
+    existing = (
+        db.query(models.MediaFile)
+        .filter_by(meeting_id=meeting_id, file_type=file_type)
+        .filter(~models.MediaFile.file_path.like("%_extracted.wav"))
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            409,
+            f"Meeting already has a {file_type} file "
+            f"({Path(existing.file_path).name}). "
+            "Delete it first before uploading a replacement.",
+        )
+
     dest_dir  = MEDIA_DIR / meeting_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_filename = generate_media_filename(meeting.meeting_date, meeting.title, suffix)
@@ -225,17 +244,21 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    media = (
+    candidates = (
         db.query(models.MediaFile)
         .filter(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
         )
-        .first()
+        .all()
     )
-    if not media:
+    if not candidates:
         raise HTTPException(400, "No media file found for this meeting")
+
+    # Prefer a record whose file exists on disk; fall back to first record so
+    # run_transcode's recovery logic can still handle the missing-source case.
+    media = next((c for c in candidates if Path(c.file_path).exists()), candidates[0])
 
     if media.transcode_status == "transcoding":
         raise HTTPException(400, "Transcode already in progress")

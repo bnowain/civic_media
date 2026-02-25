@@ -195,15 +195,26 @@ def download_video(db: Session, meeting_id: str) -> dict:
     # Get duration
     duration = _get_duration(str(output_path))
 
-    # Create MediaFile record — mark as needing transcode
-    media_file = MediaFile(
-        meeting_id=meeting_id,
-        file_type="video",
-        file_path=str(output_path),
-        duration=duration,
-        transcode_status="pending",
+    # Upsert MediaFile record — update if a video record already exists
+    # (handles retried downloads without creating duplicate records).
+    media_file = (
+        db.query(MediaFile)
+        .filter_by(meeting_id=meeting_id, file_type="video")
+        .first()
     )
-    db.add(media_file)
+    if media_file:
+        media_file.file_path = str(output_path)
+        media_file.duration = duration
+        media_file.transcode_status = "pending"
+    else:
+        media_file = MediaFile(
+            meeting_id=meeting_id,
+            file_type="video",
+            file_path=str(output_path),
+            duration=duration,
+            transcode_status="pending",
+        )
+        db.add(media_file)
 
     # Set media directory on meeting
     meeting.media_directory = str(media_dir)

@@ -112,14 +112,25 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
     )
     db.add(meeting)
 
-    # Create MediaFile record
-    media = models.MediaFile(
-        meeting_id=meeting_id,
-        file_type="audio",
-        file_path=str(audio_path),
-        duration=episode.duration_hint,
+    # Upsert MediaFile record — update if an audio record already exists
+    # (handles retried downloads without creating duplicate records).
+    media = (
+        db.query(models.MediaFile)
+        .filter_by(meeting_id=meeting_id, file_type="audio")
+        .filter(~models.MediaFile.file_path.like("%_extracted.wav"))
+        .first()
     )
-    db.add(media)
+    if media:
+        media.file_path = str(audio_path)
+        media.duration = episode.duration_hint
+    else:
+        media = models.MediaFile(
+            meeting_id=meeting_id,
+            file_type="audio",
+            file_path=str(audio_path),
+            duration=episode.duration_hint,
+        )
+        db.add(media)
 
     db.commit()
     logger.info("  Created meeting %s: %s", meeting_id, title)

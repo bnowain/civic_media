@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from celery import Celery
-from celery.signals import worker_ready
+from celery.signals import celeryd_init, worker_ready
 
 from app.config import CELERY_BACKEND, CELERY_BROKER, MEDIA_DIR, ORPHAN_RECOVERY_SECONDS
 
@@ -35,7 +35,41 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     # Keep results for 24 hours
     result_expires=86400,
+    # Disable cluster protocols — we run a single solo worker.
+    # mingle broadcasts "who's there?" and waits for replies from ghost
+    # worker registrations left in Redis by previous killed workers,
+    # adding 3+ minutes to every startup. gossip is the continuous
+    # version of the same protocol. Neither serves any purpose here.
+    worker_enable_mingle=False,
+    worker_enable_gossip=False,
 )
+
+
+@celeryd_init.connect
+def flush_ghost_bindings(sender=None, **kwargs):
+    """Flush stale Kombu binding keys left by previously killed workers.
+
+    Every killed worker leaves its routing-key registrations in Redis without
+    deregistering. These accumulate over time but are harmless with mingle/gossip
+    disabled. We wipe them on every startup so they never build up. The new
+    worker re-registers itself immediately after this runs.
+    """
+    try:
+        import redis
+        # Short timeout — this must never delay startup or count as a crash.
+        # Any failure is non-fatal: the flush is housekeeping, not required.
+        r = redis.from_url(CELERY_BROKER, socket_connect_timeout=2, socket_timeout=2)
+        keys = [
+            "_kombu.binding.celeryev",
+            "_kombu.binding.celery.pidbox",
+            "_kombu.binding.reply.celery.pidbox",
+        ]
+        deleted = r.delete(*keys)
+        if deleted:
+            logger.info("Flushed %d stale Kombu binding key(s) from Redis", deleted)
+        r.close()
+    except Exception as exc:
+        logger.warning("Could not flush ghost bindings (non-fatal): %s", exc)
 
 
 @worker_ready.connect

@@ -14,8 +14,8 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer,
-    LargeBinary, String, Text, UniqueConstraint,
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer,
+    LargeBinary, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -93,10 +93,23 @@ class Meeting(Base):
                                cascade="all, delete-orphan")
     segments    = relationship("TranscriptSegment", back_populates="meeting",
                                cascade="all, delete-orphan")
+    votes       = relationship("MeetingVote", back_populates="meeting",
+                               cascade="all, delete-orphan")
 
 
 class MediaFile(Base):
     __tablename__ = "media_files"
+    __table_args__ = (
+        # One primary source (video or non-extracted audio) per meeting.
+        # Extracted WAVs (path ends in _extracted.wav) are excluded so the
+        # pipeline can create and recreate them freely on rerun.
+        Index(
+            "uq_media_primary_source",
+            "meeting_id", "file_type",
+            unique=True,
+            sqlite_where=text("file_path NOT LIKE '%_extracted.wav'"),
+        ),
+    )
 
     media_id         = Column(String, primary_key=True, default=_gen_id)
     meeting_id       = Column(String, ForeignKey("meetings.meeting_id"), nullable=False)
@@ -121,7 +134,11 @@ class Document(Base):
     summary_long       = Column(Text, nullable=True)
     summary_updated_at = Column(DateTime, nullable=True)
 
+    minutes_parse_status = Column(String, nullable=True)   # "ok" | "partial" | "empty" | "unrecognized"
+    minutes_parse_notes  = Column(Text, nullable=True)     # unmatched vote-like paragraphs, JSON
+
     meeting = relationship("Meeting", back_populates="documents")
+    votes   = relationship("MeetingVote", back_populates="document")
 
 
 class TranscriptSegment(Base):
@@ -372,3 +389,85 @@ class PeopleMentionDenial(Base):
     content_type = Column(String, nullable=False)
     content_id   = Column(String, nullable=False)
     denied_at    = Column(DateTime, default=datetime.utcnow)
+
+
+# ── Meeting Votes (parsed from minutes) ──────────────────────────────────────
+
+# outcome values: "Carried" | "Unanimously Carried" | "Failed" |
+#                 "Failed — No Second" | "Withdrawn"
+
+class MeetingVote(Base):
+    __tablename__ = "meeting_votes"
+
+    vote_id           = Column(String, primary_key=True, default=_gen_id)
+    meeting_id        = Column(String, ForeignKey("meetings.meeting_id"),
+                               nullable=False, index=True)
+    document_id       = Column(String, ForeignKey("documents.document_id"),
+                               nullable=True, index=True)
+    meeting_date      = Column(String, nullable=True)    # YYYY-MM-DD, denormalized
+    governing_body    = Column(String, nullable=True)    # denormalized
+    agenda_section    = Column(String, nullable=True)    # "Consent Calendar" etc.
+    item_description  = Column(Text, nullable=False)     # what was decided
+    resolution_number = Column(String, nullable=True)    # "2026-008"
+    outcome           = Column(String, nullable=False)
+    vote_tally        = Column(String, nullable=True)    # "4-1", "3-2"
+    mover             = Column(String, nullable=True)
+    seconder          = Column(String, nullable=True)    # null if failed-no-second
+    source            = Column(String, nullable=False, default="minutes_parsed")
+    created_at        = Column(DateTime, default=datetime.utcnow)
+
+    meeting  = relationship("Meeting",  back_populates="votes")
+    document = relationship("Document", back_populates="votes")
+    members  = relationship("VoteMember", back_populates="vote",
+                            cascade="all, delete-orphan")
+
+
+class VoteMember(Base):
+    __tablename__ = "vote_members"
+    __table_args__ = (
+        UniqueConstraint("vote_id", "member_name"),
+    )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    vote_id     = Column(String, ForeignKey("meeting_votes.vote_id"),
+                         nullable=False, index=True)
+    member_name = Column(String, nullable=False)
+    vote_value  = Column(String, nullable=False)  # "yes" | "no" | "abstain" | "absent"
+
+    vote = relationship("MeetingVote", back_populates="members")
+
+
+# ── Reference Documents (laws, policies, guidelines) ─────────────────────────
+
+class ReferenceDocument(Base):
+    __tablename__ = "reference_documents"
+
+    ref_doc_id  = Column(String, primary_key=True, default=_gen_id)
+    name        = Column(String, nullable=False, unique=True)  # "Brown Act 2026"
+    doc_type    = Column(String, nullable=False)               # "law" | "policy" | "guidelines"
+    year        = Column(Integer, nullable=True)
+    source_file = Column(String, nullable=True)                # path to original PDF/file
+    full_text   = Column(Text, nullable=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sections = relationship("ReferenceSection", back_populates="document",
+                            cascade="all, delete-orphan")
+
+
+class ReferenceSection(Base):
+    """One row per statutory section — the unit for RAG chunking."""
+    __tablename__ = "reference_sections"
+    __table_args__ = (
+        UniqueConstraint("ref_doc_id", "section_num"),
+    )
+
+    section_id  = Column(String, primary_key=True, default=_gen_id)
+    ref_doc_id  = Column(String, ForeignKey("reference_documents.ref_doc_id"),
+                         nullable=False, index=True)
+    section_num = Column(String, nullable=True)   # "54954.2"
+    title       = Column(String, nullable=True)   # short human-readable descriptor
+    text        = Column(Text, nullable=False)
+    seq         = Column(Integer, nullable=False)  # ordering within document
+
+    document = relationship("ReferenceDocument", back_populates="sections")

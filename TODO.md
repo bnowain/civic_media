@@ -15,7 +15,32 @@ The 2026-02-24 backfill run used old code. Several meetings were skipped/failed:
 `backfill_bos.py` is untracked. Has important fixes (stale detection, _probe_duration, auto_process=False).
 Decide if it should be tracked or stay as a local utility.
 
-## Medium Priority
+## Immediate (run these scripts)
+
+### Seed new tags
+New ACTION tags (Adversarial, Revelation, Accusation, Testimony, Conduct, Recusal, Legal Warning,
+Recess — Disruption, Room Cleared, Brown Act) and new TOPIC tag (Ethics) added to `seed_tags.py`
+but not yet seeded into the DB.
+```bash
+python seed_tags.py
+```
+
+### Ingest Brown Act
+PDF stored at `E:\0-Automated-Apps\Brown-Act-2026.pdf`. Requires PyMuPDF.
+```bash
+pip install pymupdf
+python scripts/ingest_brown_act.py
+```
+
+### Backfill meeting votes
+127+ minutes OCR text files ready to parse. Script is idempotent, safe to run multiple times.
+```bash
+python scripts/ingest_minutes_votes.py
+# After fixing any parser patterns:
+python scripts/ingest_minutes_votes.py  # auto-retries partial/unrecognized meetings
+```
+
+## High Priority
 
 ### Worker status pill on review.html
 The worker pill (green/red/yellow) is only on index.html. Review page also dispatches Celery tasks
@@ -34,6 +59,20 @@ Consider longer kill wait or unique node names.
 ### Update Master Schema and Codex
 - Update `E:\0-Automated-Apps\MASTER_SCHEMA.md` with new endpoints (worker-health, restart-worker)
 - Update `E:\0-Automated-Apps\master_codex.md` with worker health integration details
+
+### Summary ingest pipeline
+Parse `---TAGS-*:` tag footer from LLM-generated summaries → create `tag_assignments` records →
+strip footer before writing to `summary_short`/`summary_long`. Not yet built.
+Needs a `POST /api/meetings/{id}/summary/ingest` endpoint (or extend the existing summary upload endpoint).
+
+### Brown Act RAG embedding
+`reference_sections` rows are in the DB but not yet embedded into ChromaDB.
+Needs `reference_sections` added as a source type in Atlas `POST /api/rag/pre-index`.
+
+### Minutes parser extension — other governing bodies
+Redding City Council minutes format will be different from BOS.
+When adding: check `/api/votes/{id}/unmatched`, write new `_parse_*` function,
+register in `PARSER_REGISTRY` in `app/services/minutes_parser.py`.
 
 ## Low Priority
 

@@ -1,61 +1,72 @@
-# Last Session — 2026-02-23
+# Last Session — 2026-02-25
 
 ## What Was Built
 
-### PrimeGov Meeting Scraper & Backfill System
-Full integration with Shasta County's PrimeGov public portal API to discover, download, transcode, and process Board of Supervisors meetings (384 meetings across 2016–2026).
+### Meeting Votes Pipeline
+Full structured vote extraction from minutes OCR text.
 
-### New Files (7)
-- `config/primegov.yml` — PrimeGov API reference (endpoints, committee IDs, URL patterns)
-- `app/services/primegov/__init__.py` — Package exports
-- `app/services/primegov/scraper.py` — PrimeGov REST API client (httpx, no auth needed)
-- `app/services/primegov/discovery.py` — Discovery orchestrator (scrape → dedup by primegov_id → create/update Meeting records)
-- `app/services/primegov/downloader.py` — Video (Playwright + ffmpeg HLS→MP4) and PDF (httpx) downloader
-- `app/routers/primegov.py` — 6 REST endpoints for discovery, download, committees, asset status
-- `migrate_primegov_columns.py` — DB migration (5 new columns across 2 tables)
+**New models** (`app/models.py`):
+- `MeetingVote` — one row per motion (outcome, tally, mover, seconder, agenda section, governing body)
+- `VoteMember` — one row per supervisor per vote (yes/no/abstain/absent); UNIQUE on (vote_id, member_name)
+- `ReferenceDocument` — stores reference law/policy documents (e.g. Brown Act)
+- `ReferenceSection` — one row per statutory section for RAG chunking
 
-### Modified Files (9)
-- `app/models.py` — Added `Integer` import, 4 columns to Meeting (`primegov_id`, `video_url`, `agenda_url`, `minutes_url`), `transcode_status` to MediaFile
-- `app/schemas.py` — Added 4 fields to MeetingCreate, `transcode_status` to MediaFileOut + PipelineStatus
-- `app/tasks.py` — Added 3 Celery tasks: `transcode_video_task`, `primegov_discover_task`, `primegov_download_task`
-- `app/main.py` — Registered `primegov` router
-- `app/routers/media.py` — Added `POST /api/media/{meeting_id}/transcode`, updated pipeline_status for transcode awareness
-- `app/static/index.html` — Added PrimeGov discovery dialog
-- `app/static/index.js` — Discovery UI, download/transcode/process button flow, asset status icons
-- `app/static/style.css` — PrimeGov dialog, asset icons, transcode badge styles
-- `requirements.txt` — Added `httpx`, `playwright`
+**New columns on `Document`** (auto-added by `validate_schema_columns` on startup):
+- `minutes_parse_status` TEXT — "ok" | "partial" | "empty" | "unrecognized"
+- `minutes_parse_notes` TEXT — JSON `{"unmatched_paragraphs": [...]}`
+
+**New files**:
+- `app/services/minutes_parser.py` — regex vote extractor; `PARSER_REGISTRY` dict for multi-governing-body support; `ParseResult` dataclass with `votes`, `unmatched_paragraphs`, `parser_used`, `parse_status`; currently has Shasta BOS parser only
+- `app/routers/votes.py` — 6 endpoints (see below)
+- `scripts/ingest_minutes_votes.py` — idempotent backfill script; `--force`, `--dry-run`, `--retry-failed`, `--show-unmatched` flags; auto-retries `partial`/`unrecognized` meetings on every run
+- `scripts/ingest_brown_act.py` — PyMuPDF PDF → `reference_documents` + `reference_sections`; default PDF: `E:\0-Automated-Apps\Brown-Act-2026.pdf`
+
+**New API endpoints**:
+- `GET /api/votes/{meeting_id}` — all votes + member breakdown
+- `GET /api/votes/{meeting_id}/unmatched` — raw paragraphs parser couldn't match (for review/pattern writing)
+- `GET /api/votes/{meeting_id}/parse-status` — parse status of minutes docs
+- `GET /api/votes` — cross-meeting search (member, vote_value, outcome, governing_body, start_date, end_date, section, limit)
+- `POST /api/votes/backfill` — re-parse all partial/unrecognized meetings in background
+- `GET /api/reference/brown-act/sections?q=&limit=` — keyword/section-number search
+
+**Router registered** in `app/main.py`.
+
+### Summary Prompts (docs/summary_prompts.md)
+Major overhaul:
+- Short: 150–250 words, self-identifying (governing body + month+year), covers 2–4 items, 1–2 Notable Moment lines
+- Long: new Meeting Narrative section, agenda-as-framework, closed session guidance, People Present 4-column table with rotating leadership roles
+- Notable Moments format: `**[TYPE | ROLE]** [HH:MM:SS] ([Agenda Item]) | [Who]`
+- Brown Act Compliance Check block appended to Tag Instructions
+- Two-tier tagging rule documented
+
+### Tag Taxonomy (108 tags total, was 98)
+New ACTION tags (moment-type): Adversarial, Revelation, Accusation, Testimony, Conduct, Recusal, Legal Warning, Recess — Disruption, Room Cleared, Brown Act
+New TOPIC tag: Ethics
+Updated in: `seed_tags.py`, `docs/tag_taxonomy.md`, `docs/summary_prompts.md`
+
+## What Still Needs Doing
+
+### Run these scripts
+```bash
+# From civic_media root — seed new tags (Ethics, Brown Act, Conduct, etc.)
+python seed_tags.py
+
+# Ingest Brown Act PDF (requires: pip install pymupdf)
+python scripts/ingest_brown_act.py
+
+# Backfill votes from existing minutes OCR text
+python scripts/ingest_minutes_votes.py
+```
+
+### Still not implemented
+- **Summary ingest pipeline** — parsing `---TAGS-*:` footer, creating `tag_assignments`, stripping footer before storing summary text. Currently summaries are stored with the footer still attached. Needs a dedicated ingest endpoint or post-processing step.
+- **Brown Act RAG** — sections in DB but not embedded into ChromaDB yet. Needs `reference_sections` added as a source type in Atlas RAG pre-index.
+- **Agenda alignment** — matching parsed agenda items to transcript segments.
+- **Worker status pill on review.html** (from previous session, still pending)
 
 ## Key Design Decisions
 
-### Discovery is Rediscovery-Safe
-- Meetings matched by `primegov_id` (unique integer from PrimeGov API)
-- Only NULL URL fields get updated on existing records (never overwrites)
-- Handles agenda-first lifecycle: agenda appears first → re-discovery weeks later adds video_url/minutes_url
-
-### Download → Transcode → Process Pipeline
-- PrimeGov videos download as HLS streams (m3u8 → MP4 via ffmpeg -c copy)
-- Downloaded video gets `transcode_status = "pending"`
-- Manual "540p" button triggers ffmpeg transcode (scale=-2:540, crf 23)
-- Transcode deletes original, updates MediaFile.file_path
-- Process button only appears after transcode completes
-- Applies to all videos, not just PrimeGov
-
-### Video Extraction
-- Swagit/Granicus hosts videos — m3u8 URL embedded in page HTML/JS
-- Playwright headless Chromium extracts the HLS stream URL
-- ffmpeg `-c copy` for fast download (no re-encode at download time)
-
-## What Was NOT Done
-- Playwright not installed in venv yet (`pip install playwright && playwright install chromium`)
-- No testing of download/transcode flow (needs running server + worker + Redis)
-- Master schema/codex not updated yet
-
-## Migration Status
-- `migrate_primegov_columns.py` — **RAN SUCCESSFULLY** (idempotent, safe to re-run)
-- Added: `meetings.primegov_id`, `meetings.video_url`, `meetings.agenda_url`, `meetings.minutes_url`, `media_files.transcode_status`
-
-## Verified Working
-- PrimeGov API live and responding: 384 BOS meetings across 11 years
-- Scraper correctly parses meetings, documents, video URLs
-- All imports clean, 83 API routes registered
-- Migration idempotent
+- Parser is **BOS-specific and format-explicit** — no generic fallbacks. Unmatched paragraphs surfaced, not dropped.
+- Auto-retry: backfill script automatically re-queues `partial`/`unrecognized` meetings every run.
+- `POST /api/votes/backfill` is safe to call anytime — idempotent, targets failed meetings only.
+- Tag footer stripped by ingest pipeline (not yet built) — stored summaries should contain prose only.
