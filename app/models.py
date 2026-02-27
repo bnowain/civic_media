@@ -109,6 +109,7 @@ class MediaFile(Base):
             unique=True,
             sqlite_where=text("file_path NOT LIKE '%_extracted.wav'"),
         ),
+        Index('ix_media_files_meeting_id', 'meeting_id'),
     )
 
     media_id         = Column(String, primary_key=True, default=_gen_id)
@@ -143,6 +144,9 @@ class Document(Base):
 
 class TranscriptSegment(Base):
     __tablename__ = "transcript_segments"
+    __table_args__ = (
+        Index('ix_transcript_segments_meeting_id', 'meeting_id'),
+    )
 
     segment_id        = Column(String, primary_key=True, default=_gen_id)
     meeting_id        = Column(String, ForeignKey("meetings.meeting_id"), nullable=False)
@@ -471,3 +475,41 @@ class ReferenceSection(Base):
     seq         = Column(Integer, nullable=False)  # ordering within document
 
     document = relationship("ReferenceDocument", back_populates="sections")
+
+
+# ── Processing Jobs ───────────────────────────────────────────────────────────
+
+class ProcessingJob(Base):
+    """
+    One row per queued/running/completed processing task.
+
+    Replaces filesystem-based progress.json as the authoritative state store
+    for backfill tracking. progress.json is still written for backward compat
+    with existing endpoints (media status, etc.), but the DB is the source of
+    truth for the backfill API and SSE stream.
+
+    stage:  'download' | 'transcode' | 'process'
+    status: 'queued' | 'running' | 'done' | 'error'
+    """
+    __tablename__ = "processing_jobs"
+    __table_args__ = (
+        Index('ix_processing_jobs_meeting_id', 'meeting_id'),
+        Index('ix_processing_jobs_status', 'status'),
+        Index('ix_processing_jobs_meeting_stage', 'meeting_id', 'stage'),
+    )
+
+    job_id         = Column(String, primary_key=True, default=_gen_id)
+    meeting_id     = Column(String, ForeignKey("meetings.meeting_id", ondelete="CASCADE"), nullable=False)
+    stage          = Column(String, nullable=False)       # 'download' | 'transcode' | 'process'
+    status         = Column(String, nullable=False, default="queued")  # queued|running|done|error
+    celery_task_id = Column(String, nullable=True)
+    pct            = Column(Integer, default=0)
+    stage_label    = Column(String, nullable=True)        # "Transcribing", "Diarizing speakers"
+    detail         = Column(String, nullable=True)        # "Segment 50 of 120"
+    error_msg      = Column(Text, nullable=True)
+    queued_at      = Column(DateTime, default=datetime.utcnow)
+    started_at     = Column(DateTime, nullable=True)
+    completed_at   = Column(DateTime, nullable=True)
+    updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    meeting = relationship("Meeting", backref="processing_jobs")

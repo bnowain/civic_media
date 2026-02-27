@@ -22,9 +22,7 @@ Progress is written to progress.json and polled by the UI every 4 seconds.
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -40,22 +38,9 @@ from app.services import (
     transcriber,
     voiceprint,
 )
+from app.services.progress import update_progress
 
 logger = logging.getLogger(__name__)
-
-
-# ── Progress helpers ──────────────────────────────────────────────────────────
-
-def _write_progress(meeting_id: str, stage: str, pct: int, detail: str = "") -> None:
-    """Write progress.json for UI polling."""
-    p = MEDIA_DIR / meeting_id / "progress.json"
-    try:
-        p.write_text(json.dumps({
-            "stage": stage, "pct": pct, "detail": detail,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }))
-    except Exception as exc:
-        logger.warning("Could not write progress.json: %s", exc)
 
 
 # ── Diarization cache helpers ─────────────────────────────────────────────────
@@ -145,7 +130,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
 
     video_path = media.file_path
     logger.info("[%s] Pipeline start - video: %s", meeting_id, video_path)
-    _write_progress(meeting_id, "Starting...", 0)
+    update_progress(db, meeting_id, "Starting...", 0)
 
     # -- 1. Extract preprocessed mono 16kHz WAV -------------------------------
     meeting_dir = MEDIA_DIR / meeting_id
@@ -176,13 +161,13 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         logger.info("[%s] Audio already extracted - skipping.", meeting_id)
         duration = audio_record.duration
     else:
-        _write_progress(meeting_id, "Extracting audio", 1)
+        update_progress(db, meeting_id, "Extracting audio", 1)
         logger.info("[%s] Extracting audio...", meeting_id)
 
         def _audio_progress(fraction: float) -> None:
             # Map ffmpeg's 0.0–1.0 to pipeline's 1–9%
             pct = 1 + int(fraction * 8)
-            _write_progress(meeting_id, "Extracting audio", pct)
+            update_progress(db, meeting_id, "Extracting audio", pct)
 
         duration = audio_extractor.extract_audio(
             video_path, audio_path, on_progress=_audio_progress,
@@ -213,7 +198,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
                 meeting_id,
                 len(existing_segments),
             )
-            _write_progress(meeting_id, "Complete", 100)
+            update_progress(db, meeting_id, "Complete", 100)
             return
 
     # Try loading cached transcription (preserves word timestamps for
@@ -245,13 +230,13 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             for s in existing_segments
         ]
     else:
-        _write_progress(meeting_id, "Transcribing", 10)
+        update_progress(db, meeting_id, "Transcribing", 10)
         logger.info("[%s] Transcribing...", meeting_id)
 
         def _transcribe_progress(fraction: float) -> None:
             # Map transcription 0.0–1.0 to pipeline's 10–39%
             pct = 10 + int(fraction * 29)
-            _write_progress(meeting_id, "Transcribing", pct)
+            update_progress(db, meeting_id, "Transcribing", pct)
 
         raw_segments = transcriber.transcribe(
             audio_path,
@@ -288,14 +273,14 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             meeting_id, len(diar_segments),
         )
     else:
-        _write_progress(meeting_id, "Diarizing speakers", 40)
+        update_progress(db, meeting_id, "Diarizing speakers", 40)
         logger.info("[%s] Diarizing...", meeting_id)
         diar_segments = diarizer.diarize(audio_path)
         logger.info("[%s] %d diarization turns", meeting_id, len(diar_segments))
         _save_diarization(meeting_id, diar_segments)
 
     # -- 4. Align -------------------------------------------------------------
-    _write_progress(meeting_id, "Aligning transcript", 60)
+    update_progress(db, meeting_id, "Aligning transcript", 60)
     logger.info("[%s] Aligning...", meeting_id)
     aligned_segments = aligner.align(raw_segments, diar_segments)
     total = len(aligned_segments)
@@ -305,7 +290,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         "[%s] Extracting embeddings in batches (batch_size=%d) for %d segments...",
         meeting_id, embedder.BATCH_SIZE, total,
     )
-    _write_progress(meeting_id, "Extracting voice embeddings", 61, f"0/{total} segments")
+    update_progress(db, meeting_id, "Extracting voice embeddings", 61, f"0/{total} segments")
 
     # Delete the original raw transcript segments — they will be replaced by
     # the aligned (merged) segments below.  Without this, both the originals
@@ -341,10 +326,8 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     for i, (seg_data, emb_array) in enumerate(zip(aligned_segments, all_embeddings)):
         if i % 50 == 0:
             pct = 61 + int((i / total) * 34)  # 61->95%
-            _write_progress(
-                meeting_id, "Extracting voice embeddings", pct,
-                f"{i}/{total} segments"
-            )
+            update_progress(db, meeting_id, "Extracting voice embeddings", pct,
+                            f"{i}/{total} segments")
 
         segment = models.TranscriptSegment(
             meeting_id=meeting_id,
@@ -387,5 +370,5 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     except Exception:
         pass
 
-    _write_progress(meeting_id, "Complete", 100)
+    update_progress(db, meeting_id, "Complete", 100)
     logger.info("[%s] Pipeline complete - %d segments stored.", meeting_id, len(aligned_segments))

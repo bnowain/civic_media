@@ -3,15 +3,13 @@ Celery worker entry point.
 Import this module to get a configured Celery application instance.
 """
 
-import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 
 from celery import Celery
 from celery.signals import celeryd_init, worker_ready
 
-from app.config import CELERY_BACKEND, CELERY_BROKER, MEDIA_DIR, ORPHAN_RECOVERY_SECONDS
+from app.config import CELERY_BACKEND, CELERY_BROKER, ORPHAN_RECOVERY_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -42,23 +40,41 @@ celery_app.conf.update(
     # version of the same protocol. Neither serves any purpose here.
     worker_enable_mingle=False,
     worker_enable_gossip=False,
+    # Hard time limit: kill tasks that hang for more than 2 hours.
+    # Soft limit at 110 min gives the task a chance to write an error
+    # to progress.json before the hard kill fires.
+    # (Solo pool uses thread-based soft limits and process signals for hard.)
+    task_time_limit=7200,        # 2 hours — hard kill
+    task_soft_time_limit=6600,   # 110 minutes — raises SoftTimeLimitExceeded
 )
 
 
 @celeryd_init.connect
 def flush_ghost_bindings(sender=None, **kwargs):
-    """Flush stale Kombu binding keys left by previously killed workers.
+    """Flush stale Kombu binding keys and orphaned unacked tasks on startup.
 
-    Every killed worker leaves its routing-key registrations in Redis without
-    deregistering. These accumulate over time but are harmless with mingle/gossip
-    disabled. We wipe them on every startup so they never build up. The new
-    worker re-registers itself immediately after this runs.
+    Two housekeeping operations run before the worker accepts any new work:
+
+    1. Kombu binding keys — every killed worker leaves routing-key registrations
+       in Redis without deregistering.  We wipe them so they never accumulate.
+
+    2. Orphaned unacked tasks — if the worker was killed while tasks were
+       in-flight, those tasks stay in the Redis `unacked` hash forever.  On the
+       next startup the worker will immediately start re-processing them.  For
+       GPU-heavy tasks (Whisper + pyannote + SpeechBrain) this causes system-wide
+       lag as multiple multi-GB models load at once.  We detect orphans by
+       cross-checking `unacked` against the processing_jobs DB: if unacked > 0
+       but no job has a recent 'running' status, the tasks are orphaned and safe
+       to discard.  The backfill UI's next-* endpoints will re-queue legitimate
+       work deliberately.
     """
     try:
         import redis
         # Short timeout — this must never delay startup or count as a crash.
-        # Any failure is non-fatal: the flush is housekeeping, not required.
-        r = redis.from_url(CELERY_BROKER, socket_connect_timeout=2, socket_timeout=2)
+        url = CELERY_BROKER.replace("localhost", "127.0.0.1")
+        r = redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+
+        # ── 1. Kombu ghost bindings ────────────────────────────────────────
         keys = [
             "_kombu.binding.celeryev",
             "_kombu.binding.celery.pidbox",
@@ -67,13 +83,49 @@ def flush_ghost_bindings(sender=None, **kwargs):
         deleted = r.delete(*keys)
         if deleted:
             logger.info("Flushed %d stale Kombu binding key(s) from Redis", deleted)
+
+        # ── 2. Orphaned unacked tasks ──────────────────────────────────────
+        unacked_count = r.hlen("unacked")
+        if unacked_count > 0:
+            # Check if any job in the DB has a recent 'running' status.
+            # If none do, the unacked entries are orphans from a previous session.
+            has_active = False
+            try:
+                from app.database import SessionLocal
+                from app.models import ProcessingJob
+                threshold = datetime.utcnow() - timedelta(seconds=ORPHAN_RECOVERY_SECONDS)
+                db = SessionLocal()
+                try:
+                    has_active = (
+                        db.query(ProcessingJob)
+                        .filter(
+                            ProcessingJob.status == "running",
+                            ProcessingJob.updated_at >= threshold,
+                        )
+                        .count()
+                    ) > 0
+                finally:
+                    db.close()
+            except Exception as dbe:
+                logger.warning("flush_ghost_bindings DB check failed: %s", dbe)
+
+            if not has_active:
+                r.delete("unacked", "unacked_index")
+                logger.info(
+                    "Flushed %d orphaned unacked task(s) from Redis "
+                    "(no active processing_jobs found — safe to discard).",
+                    unacked_count,
+                )
+            else:
+                logger.info(
+                    "Found %d unacked task(s) in Redis with active DB jobs — "
+                    "leaving for Celery to redeliver.",
+                    unacked_count,
+                )
+
         r.close()
     except Exception as exc:
         logger.warning("Could not flush ghost bindings (non-fatal): %s", exc)
-
-
-# How many days after a meeting's date before a missing file is an error (vs "not available yet")
-_NOT_AVAILABLE_GRACE_DAYS = 5
 
 
 def _requeue_meeting(meeting_id: str, stage: str, reason: str) -> bool:
@@ -106,163 +158,54 @@ def _requeue_meeting(meeting_id: str, stage: str, reason: str) -> bool:
     return False
 
 
-def _mark_not_available(progress_file: Path, meeting_id: str) -> None:
-    """Write 'Not available yet' status to progress.json."""
-    try:
-        data = {
-            "stage": "Not available yet",
-            "pct": 0,
-            "detail": "Recording not yet posted — will retry automatically",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        progress_file.write_text(json.dumps(data))
-        logger.info("Self-heal [not_available]: marked %s as not available yet", meeting_id)
-    except Exception as exc:
-        logger.warning("Could not write not-available status for %s: %s", meeting_id, exc)
-
-
 @worker_ready.connect
 def recover_orphaned_tasks(sender=None, **kwargs):
     """
-    On worker startup, scan all meeting progress.json files and self-heal:
+    On worker startup, find processing_jobs with status='running' that are
+    stale (updated_at older than ORPHAN_RECOVERY_SECONDS), mark them as error,
+    and re-queue at most ONE for automatic recovery.
 
-    1. Stale mid-pipeline (existing behaviour):
-       Stage is in-progress, updated_at is stale → re-queue.
-
-    2. Transcode complete but never transcribed:
-       Stage = "Transcode complete", pct = 100, file exists, stale → re-queue.
-       (Pipeline was killed right after FFmpeg finished.)
-
-    3. Error with no file — missing download:
-       Stage = "Error", file missing on disk:
-         - Meeting date within _NOT_AVAILABLE_GRACE_DAYS days → mark "Not available yet"
-         - Older → re-queue (attempt re-download via process_video_task)
-
-    4. "Not available yet" that has aged out:
-       Stage = "Not available yet", meeting date > grace period → re-queue.
+    The backfill API (/api/backfill/reset-stuck + next-*) handles remaining
+    stuck meetings one at a time on user request.
     """
-    if not MEDIA_DIR.exists():
-        return
+    try:
+        from app.database import SessionLocal
+        from app.models import ProcessingJob
 
-    now = datetime.now(timezone.utc)
-    recovered = 0
-    marked_unavailable = 0
-
-    for progress_file in MEDIA_DIR.glob("*/progress.json"):
+        db = SessionLocal()
         try:
-            data = json.loads(progress_file.read_text())
-        except Exception:
-            continue
+            threshold = datetime.utcnow() - timedelta(seconds=ORPHAN_RECOVERY_SECONDS)
+            stale_jobs = (
+                db.query(ProcessingJob)
+                .filter(
+                    ProcessingJob.status == "running",
+                    ProcessingJob.updated_at < threshold,
+                )
+                .all()
+            )
 
-        stage = data.get("stage", "")
-        pct = data.get("pct", 0)
-        meeting_id = progress_file.parent.name
+            if not stale_jobs:
+                return
 
-        # ── Case 1 & 2: in-progress or transcode-complete ─────────────────────
-        is_mid_pipeline = stage not in ("Complete", "Error", "Not available yet", "") and not (
-            stage == "Transcode complete" and pct == 100
-        )
-        is_transcode_done = stage == "Transcode complete" and pct == 100
+            # Mark all stale jobs as error
+            for job in stale_jobs:
+                job.status = "error"
+                job.error_msg = "Worker restart — task was interrupted"
+            db.commit()
 
-        if is_mid_pipeline or is_transcode_done:
-            updated_at_str = data.get("updated_at")
-            if not updated_at_str:
-                continue
-            try:
-                updated_at = datetime.fromisoformat(updated_at_str)
-                if updated_at.tzinfo is None:
-                    updated_at = updated_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                continue
+            logger.info(
+                "Self-heal: reset %d stale job(s) on worker startup",
+                len(stale_jobs),
+            )
 
-            age_seconds = (now - updated_at).total_seconds()
-            if age_seconds < ORPHAN_RECOVERY_SECONDS:
-                continue  # still active
+            # Re-queue at most ONE (the most recently started one)
+            stale_jobs.sort(key=lambda j: j.queued_at or datetime.min, reverse=True)
+            for job in stale_jobs:
+                if job.stage == "process" and _requeue_meeting(job.meeting_id, job.stage, "stale_job_recovery"):
+                    logger.info("Self-heal: re-queued %s (stage=%s)", job.meeting_id, job.stage)
+                    break
+        finally:
+            db.close()
 
-            if _requeue_meeting(meeting_id, stage, "stale" if is_mid_pipeline else "transcode_done"):
-                recovered += 1
-            continue
-
-        # ── Case 3: Error with no file ─────────────────────────────────────────
-        if stage == "Error":
-            try:
-                from app.database import SessionLocal
-                from app import models
-
-                db = SessionLocal()
-                try:
-                    row = (
-                        db.query(models.Meeting.meeting_date, models.MediaFile.file_path, models.MediaFile.media_id)
-                        .join(models.MediaFile, models.MediaFile.meeting_id == models.Meeting.meeting_id)
-                        .filter(
-                            models.Meeting.meeting_id == meeting_id,
-                            models.MediaFile.file_type.in_(["video", "audio"]),
-                            ~models.MediaFile.file_path.like("%_extracted.wav"),
-                        )
-                        .first()
-                    )
-                    if not row:
-                        continue
-                    meeting_date_str, file_path, media_id = row
-
-                    # If the file already exists on disk, just re-queue (error was spurious)
-                    if file_path and Path(file_path).exists():
-                        if _requeue_meeting(meeting_id, stage, "error_file_exists"):
-                            recovered += 1
-                        continue
-
-                    # File missing — check grace period
-                    try:
-                        from datetime import date
-                        mdate = date.fromisoformat(str(meeting_date_str)[:10])
-                        age_days = (now.date() - mdate).days
-                    except Exception:
-                        age_days = 999
-
-                    if age_days <= _NOT_AVAILABLE_GRACE_DAYS:
-                        _mark_not_available(progress_file, meeting_id)
-                        marked_unavailable += 1
-                    else:
-                        # Old enough — attempt re-download
-                        if _requeue_meeting(meeting_id, stage, "error_retry"):
-                            recovered += 1
-                finally:
-                    db.close()
-            except Exception as exc:
-                logger.warning("Self-heal error-check failed for %s: %s", meeting_id, exc)
-            continue
-
-        # ── Case 4: "Not available yet" that has aged out ─────────────────────
-        if stage == "Not available yet":
-            try:
-                from app.database import SessionLocal
-                from app import models
-
-                db = SessionLocal()
-                try:
-                    meeting = (
-                        db.query(models.Meeting)
-                        .filter(models.Meeting.meeting_id == meeting_id)
-                        .first()
-                    )
-                    if not meeting:
-                        continue
-                    try:
-                        from datetime import date
-                        mdate = date.fromisoformat(str(meeting.meeting_date)[:10])
-                        age_days = (now.date() - mdate).days
-                    except Exception:
-                        age_days = 0
-
-                    if age_days > _NOT_AVAILABLE_GRACE_DAYS:
-                        if _requeue_meeting(meeting_id, stage, "not_available_aged"):
-                            recovered += 1
-                finally:
-                    db.close()
-            except Exception as exc:
-                logger.warning("Self-heal not-available check failed for %s: %s", meeting_id, exc)
-
-    if recovered:
-        logger.info("Self-heal: re-queued %d meeting(s)", recovered)
-    if marked_unavailable:
-        logger.info("Self-heal: marked %d meeting(s) as 'not available yet'", marked_unavailable)
+    except Exception as exc:
+        logger.warning("recover_orphaned_tasks failed (non-fatal): %s", exc)

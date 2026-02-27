@@ -206,3 +206,21 @@ architecture and how all projects interconnect.
 > 3. **DO NOT skip this.** The codex is how projects stay in sync. If you change
 >    something that another project depends on and don't update the codex, the next
 >    agent working on that project will build on stale assumptions and break things.
+
+
+## AI Learning CODEX — Hard Rules
+
+> **`E: -Automated-Apps\AI-Learning-CODEX\INDEX.md`** — shared technical knowledge base for all agents.
+>
+> **HARD RULE 1 — CHECK BEFORE STRUGGLING**
+> At session start (if task touches Python compat, Blender, IPC, metaclasses, timers, or OS-specific code)
+> OR after 2 failed attempts on the same problem:
+> Scan the Quick-Find symptom table in `INDEX.md`. If your symptom matches, read the linked file
+> before trying another approach. Takes under 60 seconds. May save hours.
+>
+> **HARD RULE 2 — CONTRIBUTE BEFORE CLOSING**
+> If you solved a problem that required multiple interactions or non-obvious research:
+> Add a dated entry to the relevant topic file, then update `INDEX.md` (symptom table + last-updated date).
+> Never add to a topic file without also updating INDEX.md.
+> See **`E:\0-Automated-Apps\MASTER_INDEX.md`** for fast navigation into both documents.
+> See **`E:\0-Automated-Apps\NEW_APP_INTAKE.md`** before starting any new application.

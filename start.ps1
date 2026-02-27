@@ -70,6 +70,20 @@ if ($Visible) {
 Start-Sleep -Seconds 2
 Write-Host "        Celery worker started with auto-restart watchdog." -ForegroundColor Green
 
+# -- 3b. Free port 8000 if something is already holding it --
+
+$stalePID = (netstat -ano 2>$null | Select-String ":8000\s" |
+    Where-Object { $_ -match "LISTENING" } |
+    ForEach-Object { ($_.ToString().Trim() -split "\s+")[-1] } |
+    Select-Object -First 1)
+
+if ($stalePID) {
+    Write-Host "  WARNING: Port 8000 still in use (PID $stalePID). Killing stale process..." -ForegroundColor Yellow
+    taskkill /PID $stalePID /F | Out-Null
+    Start-Sleep -Seconds 2
+    Write-Host "        Port 8000 freed." -ForegroundColor Green
+}
+
 # -- 4. FastAPI server --
 
 Write-Host "  [3/3] Starting FastAPI server..." -ForegroundColor White
@@ -118,7 +132,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
     # Wait for uvicorn to start, then open browser
     Start-Sleep -Seconds 3
-    Start-Process "http://localhost:8000"
+    Start-Process "http://127.0.0.1:8000"
 
     Write-Host "  Browser opened. This window will close." -ForegroundColor Green
     Write-Host ""

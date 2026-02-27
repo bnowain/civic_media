@@ -15,10 +15,11 @@ for _cache in (_P(__file__).resolve().parent).rglob("__pycache__"):
 del _shutil, _P, _cache
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -26,9 +27,9 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
-    assignments, clips, documents, governing_bodies, ingest, library, media,
-    meetings, mentions, news, people, primegov, segments, system, tags, tagging,
-    transcribe, venues, votes,
+    assignments, backfill, clips, documents, governing_bodies, ingest, library,
+    media, meetings, mentions, news, people, primegov, segments, system, tags,
+    tagging, transcribe, venues, votes,
 )
 
 # Create all tables (idempotent)
@@ -97,6 +98,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_perf_logger = logging.getLogger("civic_media.perf")
+
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    """Log every API request with elapsed time. Warns on requests over 500 ms."""
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    path = request.url.path
+    # Skip static assets and favicon — they don't tell us anything useful
+    if path.startswith("/static/") or path == "/favicon.ico":
+        return response
+    if elapsed_ms > 500:
+        _perf_logger.warning(
+            "SLOW  %s %s → %d  %.0f ms",
+            request.method, path, response.status_code, elapsed_ms,
+        )
+    elif elapsed_ms > 100:
+        _perf_logger.info(
+            "TIMING %s %s → %d  %.0f ms",
+            request.method, path, response.status_code, elapsed_ms,
+        )
+    return response
+
+
 # ── API routers ──────────────────────────────────────────────────────────────
 app.include_router(meetings.router)
 app.include_router(media.router)
@@ -114,6 +140,7 @@ app.include_router(mentions.router)
 app.include_router(tagging.router)
 app.include_router(ingest.router)
 app.include_router(primegov.router)
+app.include_router(backfill.router)
 app.include_router(venues.router)
 app.include_router(system.router)
 app.include_router(votes.router)
@@ -148,6 +175,11 @@ def news_review_page(newscast_id: str):
 @app.get("/clips", include_in_schema=False)
 def clips_page():
     return FileResponse(str(_static_dir / "clips.html"))
+
+
+@app.get("/backfill", include_in_schema=False)
+def backfill_page():
+    return FileResponse(str(_static_dir / "backfill.html"))
 
 
 # ── Favicon ──────────────────────────────────────────────────────────────────

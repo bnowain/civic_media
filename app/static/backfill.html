@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Backfill Manager — Civic Media</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    :root {
+      --bg-base:    #0d0e10;
+      --bg-surface: #13151a;
+      --bg-raised:  #1a1d24;
+      --bg-overlay: #22262f;
+      --bg-hover:   #272b35;
+      --border:     #2a2e3a;
+      --border-light: #363b49;
+      --border-focus: #4a7cf7;
+      --text-primary:   #e8eaf0;
+      --text-secondary: #8b90a0;
+      --text-muted:     #545870;
+      --accent-blue:    #4a7cf7;
+      --accent-blue-dim:#1d3a7a;
+      --accent-green:   #22c55e;
+      --accent-green-dim:#14532d;
+      --accent-amber:   #f59e0b;
+      --accent-amber-dim:#78350f;
+      --accent-red:     #ef4444;
+      --accent-red-dim: #7f1d1d;
+      --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+      --font-mono: "IBM Plex Mono", "Consolas", monospace;
+      --radius: 6px;
+      --radius-sm: 3px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 1200px; margin: 0 auto; padding: 24px 20px; }
+
+    /* ── Header ── */
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .page-title {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .page-title a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-family: var(--font-mono);
+    }
+    .page-title a:hover { color: var(--text-secondary); }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid;
+    }
+    .pill-blue   { background: var(--accent-blue-dim);  border-color: var(--accent-blue);  color: #93b4fd; }
+    .pill-amber  { background: var(--accent-amber-dim); border-color: var(--accent-amber); color: #fcd34d; }
+    .pill-green  { background: var(--accent-green-dim); border-color: var(--accent-green); color: #4ade80; }
+    .pill-red    { background: var(--accent-red-dim);   border-color: var(--accent-red);   color: #fca5a5; }
+    .pill-neutral{ background: var(--bg-raised);        border-color: var(--border-light); color: var(--text-secondary); }
+    .pill .label { color: inherit; opacity: 0.7; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+    .btn-primary:hover:not(:disabled) { background: #3a6ce8; }
+    .btn-ghost { background: transparent; color: var(--text-secondary); border-color: var(--border); }
+    .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
+    .btn-amber  { background: var(--accent-amber-dim); color: #fcd34d; border-color: var(--accent-amber); }
+    .btn-amber:hover:not(:disabled) { background: #92400e; }
+    .btn-red    { background: var(--accent-red-dim); color: #fca5a5; border-color: var(--accent-red); }
+    .btn-red:hover:not(:disabled) { background: #991b1b; }
+    .btn-green  { background: var(--accent-green-dim); color: #4ade80; border-color: var(--accent-green); }
+    .btn-green:hover:not(:disabled) { background: #166534; }
+    .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+    /* ── Active task panel ── */
+    .active-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent-blue);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .active-panel.idle { border-left-color: var(--border-light); }
+    .active-header {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .active-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      background: var(--accent-blue-dim);
+      color: var(--accent-blue);
+      border: 1px solid var(--accent-blue);
+    }
+    .active-badge.idle-badge {
+      background: var(--bg-raised);
+      color: var(--text-muted);
+      border-color: var(--border);
+    }
+    .active-title { font-size: 14px; font-weight: 500; color: var(--text-primary); }
+    .active-meta  { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--bg-raised);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent-blue);
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+    .progress-pct {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+      min-width: 32px;
+      text-align: right;
+    }
+    .progress-stage {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 4px;
+    }
+
+    /* ── Controls ── */
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .controls-left, .controls-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .divider { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+
+    /* ── Queue table ── */
+    .queue-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .queue-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-raised);
+    }
+    .queue-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-right: auto;
+    }
+    .search-input {
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 5px 10px;
+      width: 200px;
+      outline: none;
+    }
+    .search-input:focus { border-color: var(--border-focus); }
+    .search-input::placeholder { color: var(--text-muted); }
+
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: var(--bg-raised); }
+    th {
+      padding: 8px 12px;
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    th.th-check { width: 36px; text-align: center; }
+    th.th-date  { width: 100px; }
+    th.th-body  { width: 140px; }
+    th.th-status{ width: 90px; }
+    th.th-actions { width: 110px; text-align: right; }
+
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--bg-hover); }
+    tr.row-active td { background: color-mix(in srgb, var(--accent-blue-dim) 40%, transparent); }
+    tr.row-skipped td { opacity: 0.5; }
+
+    td.td-check { text-align: center; }
+    td.td-date  {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    td.td-body  {
+      font-size: 12px;
+      color: var(--text-secondary);
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    td.td-title {
+      font-size: 13px;
+      color: var(--text-primary);
+      max-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    td.td-actions {
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    /* Status badges */
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+    }
+    .badge-ready   { background: var(--accent-green-dim);  color: #4ade80; }
+    .badge-active  { background: var(--accent-blue-dim);   color: #93b4fd; animation: pulse 2s infinite; }
+    .badge-skipped { background: var(--bg-overlay);        color: var(--text-muted); }
+    .badge-missing { background: var(--accent-red-dim);    color: #fca5a5; }
+    .badge-pending { background: var(--accent-amber-dim);  color: #fcd34d; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    /* checkbox */
+    input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent-blue); }
+
+    /* ── Pagination ── */
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 12px;
+      border-top: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* ── Category tabs ── */
+    .cat-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .tab-btn {
+      padding: 8px 18px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { color: var(--text-primary); }
+    .tab-btn.tab-active {
+      color: var(--accent-blue);
+      border-bottom-color: var(--accent-blue);
+    }
+
+    /* ── Body chips ── */
+    .body-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .chip {
+      padding: 5px 12px;
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .chip:hover { border-color: var(--border-light); color: var(--text-primary); }
+    .chip.chip-active {
+      background: var(--accent-blue-dim);
+      border-color: var(--accent-blue);
+      color: #93b4fd;
+    }
+    .chip-count { opacity: 0.65; margin-left: 5px; }
+    .chip-type {
+      display: inline-block;
+      font-size: 9px;
+      opacity: 0.7;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    /* ── Type badges in table ── */
+    .type-badge {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-family: var(--font-mono);
+      font-weight: 500;
+      margin-right: 5px;
+      vertical-align: middle;
+      letter-spacing: 0.02em;
+    }
+    .type-gov   { background: #14532d; color: #4ade80; border: 1px solid #166534; }
+    .type-radio { background: #1e3a5f; color: #60a5fa; border: 1px solid #1d4ed8; }
+    .type-video { background: #3b1e5f; color: #c084fc; border: 1px solid #6d28d9; }
+
+    /* ── Utilities ── */
+    .hidden { display: none !important; }
+    .log-line {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+    .log-line.ok  { color: var(--accent-green); }
+    .log-line.err { color: var(--accent-red); }
+    .spinner { display: inline-block; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="page-header">
+    <div class="page-title">
+      <a href="/">← Home</a>
+      Backfill Manager
+    </div>
+    <div class="status-row">
+      <div class="pill pill-blue">
+        <span id="cnt-download">—</span>
+        <span class="label">Download</span>
+      </div>
+      <div class="pill pill-amber">
+        <span id="cnt-transcode">—</span>
+        <span class="label">Transcode</span>
+      </div>
+      <div class="pill pill-green">
+        <span id="cnt-process">—</span>
+        <span class="label">Process</span>
+      </div>
+      <div class="pill pill-red" id="pill-stuck">
+        <span id="cnt-stuck">—</span>
+        <span class="label">Stuck</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="resetStuck()">Reset Stuck</button>
+    </div>
+  </div>
+
+  <!-- Active task panel -->
+  <div class="active-panel idle" id="active-panel">
+    <div class="active-header">
+      <span class="active-badge idle-badge" id="active-badge">IDLE</span>
+      <span class="active-title" id="active-title">No task running</span>
+    </div>
+    <div id="active-progress-row" class="hidden">
+      <div class="progress-row">
+        <div class="progress-track">
+          <div class="progress-fill" id="active-bar" style="width:0%"></div>
+        </div>
+        <span class="progress-pct" id="active-pct">0%</span>
+      </div>
+      <div class="progress-stage" id="active-stage"></div>
+    </div>
+    <div class="log-line" id="status-log"></div>
+  </div>
+
+  <!-- Category tabs -->
+  <div class="cat-tabs">
+    <button class="tab-btn tab-active" data-cat="" onclick="selectCategory('')">All</button>
+    <button class="tab-btn" data-cat="meeting" onclick="selectCategory('meeting')">Government Meetings</button>
+    <button class="tab-btn" data-cat="audio" onclick="selectCategory('audio')">Shows &amp; Videos</button>
+  </div>
+
+  <!-- Body chips (shown when a category tab is active) -->
+  <div class="body-chips hidden" id="body-chips"></div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="controls-left">
+      <!-- Process -->
+      <button class="btn btn-primary" id="btn-next-process" onclick="triggerOne('process')">▶ Process Next</button>
+      <button class="btn btn-ghost"   id="btn-auto-process" onclick="toggleAuto('process')">⟳ Process All</button>
+
+      <div class="divider"></div>
+
+      <!-- Download -->
+      <button class="btn btn-ghost"   id="btn-next-download" onclick="triggerOne('download')">↓ Download Next</button>
+      <button class="btn btn-ghost"   id="btn-auto-download" onclick="toggleAuto('download')">⟳ Download All</button>
+    </div>
+    <div class="controls-right">
+      <button class="btn btn-ghost" id="btn-selected" onclick="processSelected()" disabled>
+        Process Selected (<span id="sel-count">0</span>)
+      </button>
+    </div>
+  </div>
+
+  <!-- Queue table -->
+  <div class="queue-panel">
+    <div class="queue-toolbar">
+      <input type="checkbox" id="chk-all" title="Select all visible" onchange="toggleSelectAll(this.checked)">
+      <span class="queue-title" id="queue-title">Loading…</span>
+      <input class="search-input" type="text" id="search" placeholder="Filter by title or body…" oninput="onSearch()">
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="th-check"></th>
+          <th class="th-date">Date</th>
+          <th class="th-body">Body</th>
+          <th>Title</th>
+          <th class="th-status">Status</th>
+          <th class="th-actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="queue-body">
+        <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-muted)">
+          <span class="spinner">⟳</span> Loading queue…
+        </td></tr>
+      </tbody>
+    </table>
+
+    <div class="pagination">
+      <button class="btn btn-ghost btn-sm" id="btn-prev" onclick="changePage(-1)">◀ Prev</button>
+      <span id="page-info">—</span>
+      <button class="btn btn-ghost btn-sm" id="btn-next-page" onclick="changePage(1)">Next ▶</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const PAGE_SIZE        = 50;
+const RUNNING_POLL_MS  = 2_000;   // progress polling interval (fallback when SSE drops)
+const GAP_MS           = 3_000;   // pause between consecutive queued tasks
+
+const S = {
+  meetings:       [],   // full list from API (all categories)
+  filtered:       [],   // after category + body + search filter
+  page:           0,
+  selected:       new Set(),
+  selectedQueue:  [],   // for "process selected" ordered loop
+  mode:           'idle',  // 'idle' | 'auto-process' | 'auto-download' | 'selected'
+  currentId:      null,
+  es:             null,    // EventSource instance
+  filterCategory: null,  // null | 'meeting' | 'audio'
+  filterBody:     null,  // null | string (governing_body)
+  groups:         null,  // { gov: {body: count}, shows: {body: {count, file_type}} }
+};
+
+// ── Init ───────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  loadQueue();
+  startSSE();
+});
+
+// ── Server-Sent Events ─────────────────────────────────────────────────────
+// SSE replaces all polling timers. The server sends:
+//   'init'     — on connect: current status counts + active job
+//   'progress' — pct/stage update for a running job
+//   'complete' — job finished successfully
+//   'error'    — job finished with error
+//   'status'   — aggregate counts update (sent after complete/error)
+//
+// EventSource auto-reconnects on drop. Server resends 'init' on each connect.
+function startSSE() {
+  if (S.es) { S.es.close(); }
+  S.es = new EventSource('/api/backfill/events');
+
+  S.es.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+
+    switch (data.type) {
+      case 'init':
+        if (data.status) renderStatus(data.status);
+        if (S.mode === 'idle') renderActive(data.active || null);
+        break;
+
+      case 'progress':
+        if (S.mode === 'idle') {
+          renderActive({
+            meeting_id: data.meeting_id,
+            title: S.meetings.find(m => m.meeting_id === data.meeting_id)?.title || data.meeting_id,
+            stage: data.stage_label || '',
+            pct:   data.pct || 0,
+            detail: data.detail || '',
+          });
+        }
+        // Update queue row if visible
+        updateQueueRowActive(data.meeting_id, true, data.stage_label || '', data.pct || 0);
+        break;
+
+      case 'complete':
+      case 'error':
+        updateQueueRowActive(data.meeting_id, false, '', 0);
+        // Reload status + queue to reflect new state
+        loadStatus();
+        loadQueue();
+        break;
+
+      case 'status':
+        renderStatus(data);
+        break;
+    }
+  };
+
+  S.es.onerror = () => {
+    // EventSource auto-reconnects; server sends 'init' on reconnect.
+    // No action needed — just let the browser handle it.
+  };
+}
+
+function renderStatus(s) {
+  if (!s) return;
+  document.getElementById('cnt-download').textContent  = s.download_pending ?? '—';
+  document.getElementById('cnt-transcode').textContent = s.transcode_pending ?? '—';
+  document.getElementById('cnt-process').textContent   = s.process_pending   ?? '—';
+  document.getElementById('cnt-stuck').textContent     = s.stuck             ?? '—';
+  document.getElementById('pill-stuck').style.opacity  = (s.stuck > 0) ? '1' : '0.4';
+}
+
+async function loadStatus() {
+  try {
+    const d = await api('/api/backfill/status');
+    renderStatus(d);
+  } catch (e) { /* ignore */ }
+}
+
+function updateQueueRowActive(meetingId, active, stage, pct) {
+  const row = document.querySelector(`tr[data-id="${meetingId}"]`);
+  if (!row) return;
+  const m = S.meetings.find(m => m.meeting_id === meetingId);
+  if (!m) return;
+  m.active = active;
+  m.stage  = stage;
+  m.pct    = pct;
+  const mf = S.filtered.find(m => m.meeting_id === meetingId);
+  if (mf) { mf.active = active; mf.stage = stage; mf.pct = pct; }
+  // Re-render just the status cell
+  const statusCell = row.querySelector('td:nth-child(5)');
+  if (statusCell) statusCell.innerHTML = badgeFor(m);
+  row.classList.toggle('row-active', active);
+}
+
+// ── Queue loading ──────────────────────────────────────────────────────────
+async function loadQueue() {
+  try {
+    const d = await api('/api/backfill/queue?limit=1000');
+    S.meetings = d.items;
+    S.groups   = computeGroups(S.meetings);
+    applyFilters();
+    renderTabs();
+    document.getElementById('queue-title').textContent =
+      `${S.filtered.length} pending` + (S.filterBody ? ` · ${S.filterBody}` : S.filterCategory ? ' (filtered)' : '');
+  } catch (e) {
+    setLog('Failed to load queue: ' + e.message, 'err');
+  }
+}
+
+// ── Groups (computed client-side from loaded queue) ───────────────────────
+function computeGroups(meetings) {
+  const gov = {}, shows = {};
+  for (const m of meetings) {
+    const cat  = m.category || 'meeting';
+    const body = m.governing_body || 'Unknown';
+    if (cat === 'meeting') {
+      gov[body] = (gov[body] || 0) + 1;
+    } else {
+      if (!shows[body]) shows[body] = { count: 0, file_type: m.file_type };
+      shows[body].count++;
+    }
+  }
+  return { gov, shows };
+}
+
+// ── Category tabs ──────────────────────────────────────────────────────────
+function renderTabs() {
+  const g = S.groups;
+  if (!g) return;
+  const govCount  = Object.values(g.gov).reduce((a, b) => a + b, 0);
+  const showCount = Object.values(g.shows).reduce((a, b) => a + b.count, 0);
+  const total     = S.meetings.length;
+
+  document.querySelector('[data-cat=""]').textContent        = `All (${total})`;
+  document.querySelector('[data-cat="meeting"]').textContent = `Government Meetings (${govCount})`;
+  document.querySelector('[data-cat="audio"]').textContent   = `Shows & Videos (${showCount})`;
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('tab-active', btn.dataset.cat === (S.filterCategory || ''));
+  });
+
+  renderChips();
+}
+
+function renderChips() {
+  const chips = document.getElementById('body-chips');
+  if (!S.filterCategory || !S.groups) {
+    chips.classList.add('hidden');
+    return;
+  }
+  chips.classList.remove('hidden');
+
+  const bodies = S.filterCategory === 'meeting' ? S.groups.gov : S.groups.shows;
+  const entries = Object.entries(bodies).sort((a, b) => {
+    const ca = typeof a[1] === 'number' ? a[1] : a[1].count;
+    const cb = typeof b[1] === 'number' ? b[1] : b[1].count;
+    return cb - ca;
+  });
+
+  chips.innerHTML = entries.map(([body, data]) => {
+    const count   = typeof data === 'number' ? data : data.count;
+    const ft      = typeof data === 'object' ? data.file_type : null;
+    const typeStr = ft === 'audio' ? ' · Radio' : ft === 'video' ? ' · Video' : '';
+    const active  = S.filterBody === body ? 'chip-active' : '';
+    return `<button class="chip ${active}" onclick='selectBody(${JSON.stringify(body)})'>${esc(body)}<span class="chip-type">${typeStr}</span><span class="chip-count">${count}</span></button>`;
+  }).join('');
+}
+
+function selectCategory(cat) {
+  S.filterCategory = cat || null;
+  S.filterBody     = null;
+  renderTabs();
+  applyFilters();
+  updateQueueTitle();
+}
+
+function selectBody(body) {
+  S.filterBody = S.filterBody === body ? null : body;
+  renderChips();
+  applyFilters();
+  updateQueueTitle();
+}
+
+function updateQueueTitle() {
+  const visible = S.filtered.length;
+  let label = `${visible} pending`;
+  if (S.filterBody)     label += ` · ${S.filterBody}`;
+  else if (S.filterCategory) label += ' (filtered)';
+  document.getElementById('queue-title').textContent = label;
+}
+
+// ── Combined filter (category + body + search text) ───────────────────────
+function applyFilters() {
+  const q = document.getElementById('search').value.toLowerCase();
+  S.filtered = S.meetings.filter(m => {
+    const cat = m.category || 'meeting';
+    if (S.filterCategory && cat !== S.filterCategory) return false;
+    if (S.filterBody && m.governing_body !== S.filterBody) return false;
+    if (q) {
+      return m.title.toLowerCase().includes(q) ||
+             (m.governing_body || '').toLowerCase().includes(q) ||
+             (m.meeting_date || '').includes(q);
+    }
+    return true;
+  });
+  S.page = 0;
+  renderTable();
+}
+
+function onSearch() {
+  applyFilters();
+  updateQueueTitle();
+}
+
+function changePage(dir) {
+  const pages = Math.ceil(S.filtered.length / PAGE_SIZE);
+  S.page = Math.max(0, Math.min(pages - 1, S.page + dir));
+  renderTable();
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────────
+function renderTable() {
+  const tbody = document.getElementById('queue-body');
+  const start = S.page * PAGE_SIZE;
+  const slice = S.filtered.slice(start, start + PAGE_SIZE);
+  const pages = Math.ceil(S.filtered.length / PAGE_SIZE) || 1;
+
+  document.getElementById('page-info').textContent =
+    `Page ${S.page + 1} of ${pages}  (${S.filtered.length} shown)`;
+  document.getElementById('btn-prev').disabled       = S.page === 0;
+  document.getElementById('btn-next-page').disabled  = S.page >= pages - 1;
+
+  if (!slice.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-muted)">No meetings match</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = slice.map(m => {
+    const chk        = S.selected.has(m.meeting_id) ? 'checked' : '';
+    const rowClass   = m.active ? 'row-active' : m.skipped ? 'row-skipped' : '';
+    const badge      = badgeFor(m);
+    const tbadge     = typeBadge(m);
+    const skipBtn    = m.skipped
+      ? `<button class="btn btn-ghost btn-sm" onclick="skipMeeting('${m.meeting_id}', false)">Unskip</button>`
+      : `<button class="btn btn-ghost btn-sm" onclick="skipMeeting('${m.meeting_id}', true)">Skip</button>`;
+    const processBtn = m.active
+      ? `<button class="btn btn-ghost btn-sm" disabled>Running…</button>`
+      : `<button class="btn btn-ghost btn-sm" onclick="processMeeting('${m.meeting_id}')" title="Queue now">▶</button>`;
+
+    return `<tr class="${rowClass}" data-id="${m.meeting_id}">
+      <td class="td-check"><input type="checkbox" ${chk} onchange="toggleCheck('${m.meeting_id}', this.checked)"></td>
+      <td class="td-date">${m.meeting_date}</td>
+      <td class="td-body" title="${esc(m.governing_body)}">${tbadge}${esc(m.governing_body)}</td>
+      <td class="td-title" title="${esc(m.title)}">${esc(m.title)}</td>
+      <td>${badge}</td>
+      <td class="td-actions">${skipBtn} ${processBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function badgeFor(m) {
+  if (m.active)                               return '<span class="badge badge-active">ACTIVE</span>';
+  if (!m.file_exists)                         return '<span class="badge badge-missing">NO FILE</span>';
+  if (m.transcode_status === 'pending')       return '<span class="badge badge-pending">TRANSCODE</span>';
+  if (m.skipped)                              return '<span class="badge badge-skipped">SKIPPED</span>';
+  return '<span class="badge badge-ready">READY</span>';
+}
+
+function typeBadge(m) {
+  const cat = m.category || 'meeting';
+  if (cat === 'meeting')       return '<span class="type-badge type-gov">Gov</span>';
+  if (m.file_type === 'audio') return '<span class="type-badge type-radio">Radio</span>';
+  if (m.file_type === 'video') return '<span class="type-badge type-video">Video</span>';
+  return '';
+}
+
+function renderActive(active) {
+  const panel       = document.getElementById('active-panel');
+  const badge       = document.getElementById('active-badge');
+  const title       = document.getElementById('active-title');
+  const progressRow = document.getElementById('active-progress-row');
+  const bar         = document.getElementById('active-bar');
+  const pct         = document.getElementById('active-pct');
+  const stage       = document.getElementById('active-stage');
+
+  if (active) {
+    panel.classList.remove('idle');
+    badge.className   = 'active-badge';
+    badge.textContent = 'ACTIVE';
+    title.textContent = active.title || active.meeting_id;
+    progressRow.classList.remove('hidden');
+    bar.style.width   = (active.pct || 0) + '%';
+    pct.textContent   = (active.pct || 0) + '%';
+    stage.textContent = active.stage + (active.detail ? ' — ' + active.detail : '');
+  } else {
+    panel.classList.add('idle');
+    badge.className   = 'active-badge idle-badge';
+    badge.textContent = 'IDLE';
+    title.textContent = 'No task running';
+    progressRow.classList.add('hidden');
+  }
+}
+
+// ── Selection ──────────────────────────────────────────────────────────────
+function toggleCheck(id, checked) {
+  checked ? S.selected.add(id) : S.selected.delete(id);
+  updateSelectedBtn();
+}
+
+function toggleSelectAll(checked) {
+  const slice = S.filtered.slice(S.page * PAGE_SIZE, (S.page + 1) * PAGE_SIZE);
+  slice.forEach(m => checked ? S.selected.add(m.meeting_id) : S.selected.delete(m.meeting_id));
+  renderTable();
+  updateSelectedBtn();
+}
+
+function updateSelectedBtn() {
+  const n = S.selected.size;
+  document.getElementById('sel-count').textContent = n;
+  document.getElementById('btn-selected').disabled = n === 0 || S.mode !== 'idle';
+}
+
+// ── Filter params for scoped next-* calls ─────────────────────────────────
+function filterParams() {
+  const p = new URLSearchParams();
+  if (S.filterCategory) p.set('category', S.filterCategory);
+  if (S.filterBody)     p.set('governing_body', S.filterBody);
+  const s = p.toString();
+  return s ? '?' + s : '';
+}
+
+// ── Single trigger ─────────────────────────────────────────────────────────
+async function triggerOne(type) {
+  if (S.mode !== 'idle') return;
+  setAllBtnsDisabled(true);
+  const endpoint = type === 'process'
+    ? `/api/backfill/next-process${filterParams()}`
+    : `/api/backfill/next-download${filterParams()}`;
+  try {
+    const d = await api(endpoint, 'POST');
+    if (d.queued) {
+      setLog(`Queued: ${d.title || d.meeting_id}`, 'ok');
+      S.currentId = d.meeting_id;
+      renderActive({ title: d.title, meeting_id: d.meeting_id, stage: 'Queued', pct: 0 });
+    } else {
+      setLog('Nothing to queue.', '');
+      renderActive(null);
+    }
+  } catch (e) {
+    setLog('Error: ' + e.message, 'err');
+  } finally {
+    setAllBtnsDisabled(false);
+    updateSelectedBtn();
+    loadStatus();
+  }
+}
+
+// ── Auto loop ──────────────────────────────────────────────────────────────
+async function toggleAuto(type) {
+  if (S.mode === `auto-${type}`) {
+    S.mode = 'pausing';
+    setLog('Pausing after current task…', '');
+    updateAutoBtn(type, 'pausing');
+    return;
+  }
+  if (S.mode !== 'idle') return;
+
+  S.mode = `auto-${type}`;
+  updateAutoBtn(type, 'running');
+  setAllBtnsDisabled(true);
+  updateAutoBtn(type, 'running');  // keep auto btn enabled for pause
+
+  await autoLoop(type);
+
+  S.mode = 'idle';
+  updateAutoBtn(type, 'idle');
+  setAllBtnsDisabled(false);
+  updateSelectedBtn();
+  loadQueue();
+  loadStatus();
+}
+
+async function autoLoop(type) {
+  while (S.mode === `auto-${type}`) {
+    // 1. Wait for worker idle before queuing
+    setLog('Waiting for worker to be idle…', '');
+    await waitForIdle();
+    if (S.mode !== `auto-${type}`) break;
+
+    // 2. Queue the next task (with active filter scoping)
+    const endpoint = type === 'process'
+      ? `/api/backfill/next-process${filterParams()}`
+      : `/api/backfill/next-download${filterParams()}`;
+    let data;
+    try {
+      data = await api(endpoint, 'POST');
+    } catch (e) {
+      setLog('API error: ' + e.message, 'err');
+      break;
+    }
+
+    if (!data.queued) {
+      setLog('✓ All done — queue empty.', 'ok');
+      renderActive(null);
+      break;
+    }
+
+    S.currentId = data.meeting_id;
+    setLog(`▶ ${data.title || data.meeting_id}`, 'ok');
+    renderActive({ title: data.title, meeting_id: data.meeting_id, stage: 'Queued', pct: 0 });
+
+    // 3. Poll until terminal
+    if (type === 'process') {
+      await pollUntilDone(data.meeting_id);
+    } else {
+      await waitForIdle();
+    }
+
+    if (S.mode === 'pausing') {
+      S.mode = 'idle';
+      setLog('Paused.', '');
+      renderActive(null);
+      break;
+    }
+
+    // 4. Brief gap
+    await sleep(GAP_MS);
+  }
+}
+
+async function waitForIdle() {
+  while (true) {
+    try {
+      const d = await api('/api/backfill/worker-idle');
+      if (d.idle) return;
+    } catch (e) { /* retry */ }
+    await sleep(RUNNING_POLL_MS);
+  }
+}
+
+async function pollUntilDone(meetingId) {
+  // Poll the DB-backed progress endpoint. SSE handles the active-panel display;
+  // this loop just needs to detect completion to advance the auto-queue.
+  while (true) {
+    try {
+      const d     = await api(`/api/backfill/progress/${meetingId}`);
+      const stage = d.stage || '';
+      if (stage === 'Complete' || d.status === 'done') return 'Complete';
+      if (stage === 'Error'    || d.status === 'error') return 'Error';
+      if (stage === '')                                  return '';
+      // Update active panel directly as fallback if SSE dropped
+      if (S.mode !== 'idle') {
+        renderActive({
+          meeting_id: meetingId,
+          title:  S.meetings.find(m => m.meeting_id === meetingId)?.title || meetingId,
+          stage,
+          pct:    d.pct || 0,
+          detail: d.detail || '',
+        });
+      }
+    } catch (e) { /* retry */ }
+    await sleep(RUNNING_POLL_MS);
+  }
+}
+
+function updateAutoBtn(type, state) {
+  const btnAuto = document.getElementById(`btn-auto-${type}`);
+  if (!btnAuto) return;
+  if (state === 'running') {
+    btnAuto.textContent = '⏸ Pause';
+    btnAuto.className   = 'btn btn-amber';
+    btnAuto.disabled    = false;
+  } else if (state === 'pausing') {
+    btnAuto.textContent = '⏸ Pausing…';
+    btnAuto.disabled    = true;
+  } else {
+    btnAuto.textContent = type === 'process' ? '⟳ Process All' : '⟳ Download All';
+    btnAuto.className   = 'btn btn-ghost';
+    btnAuto.disabled    = false;
+  }
+}
+
+// ── Process selected ───────────────────────────────────────────────────────
+async function processSelected() {
+  if (S.selected.size === 0 || S.mode !== 'idle') return;
+  S.selectedQueue = [...S.selected];
+  S.mode = 'selected';
+  setAllBtnsDisabled(true);
+  document.getElementById('btn-selected').disabled = true;
+
+  for (const id of S.selectedQueue) {
+    if (S.mode !== 'selected') break;
+    setLog(`▶ Queuing ${id}…`, '');
+    try {
+      await waitForIdle();
+      const d = await api(`/api/backfill/process-now/${id}`, 'POST');
+      if (d.queued) {
+        setLog(`▶ Processing: ${id}`, 'ok');
+        renderActive({ meeting_id: id, title: S.meetings.find(m => m.meeting_id === id)?.title || id, stage: 'Queued', pct: 0 });
+        await pollUntilDone(id);
+        await sleep(GAP_MS);
+      }
+    } catch (e) {
+      setLog(`Error on ${id}: ${e.message}`, 'err');
+      await sleep(1000);
+    }
+  }
+
+  S.mode = 'idle';
+  S.selected.clear();
+  setAllBtnsDisabled(false);
+  updateSelectedBtn();
+  renderActive(null);
+  loadQueue();
+  loadStatus();
+  setLog('Selected batch complete.', 'ok');
+}
+
+// ── Individual row actions ─────────────────────────────────────────────────
+async function skipMeeting(id, skip) {
+  try {
+    await api(`/api/backfill/${skip ? 'skip' : 'unskip'}/${id}`, 'POST');
+    const m = S.meetings.find(m => m.meeting_id === id);
+    if (m) m.skipped = skip;
+    const mf = S.filtered.find(m => m.meeting_id === id);
+    if (mf) mf.skipped = skip;
+    renderTable();
+  } catch (e) {
+    setLog('Skip failed: ' + e.message, 'err');
+  }
+}
+
+async function processMeeting(id) {
+  if (S.mode !== 'idle') { setLog('Finish current task first.', 'err'); return; }
+  try {
+    const d = await api(`/api/backfill/process-now/${id}`, 'POST');
+    if (d.queued) {
+      const title = S.meetings.find(m => m.meeting_id === id)?.title || id;
+      setLog(`▶ Queued: ${title}`, 'ok');
+      renderActive({ meeting_id: id, title, stage: 'Queued', pct: 0 });
+    }
+  } catch (e) {
+    setLog('Error: ' + e.message, 'err');
+  }
+}
+
+// ── Reset stuck ────────────────────────────────────────────────────────────
+async function resetStuck() {
+  try {
+    const d = await api('/api/backfill/reset-stuck', 'POST');
+    setLog(`Reset ${d.count} stuck + ${d.transcode_resets} transcode(s).`, 'ok');
+    loadStatus();
+    loadQueue();
+  } catch (e) {
+    setLog('Reset failed: ' + e.message, 'err');
+  }
+}
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+function setAllBtnsDisabled(disabled) {
+  ['btn-next-process', 'btn-auto-process', 'btn-next-download', 'btn-auto-download']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = disabled;
+    });
+  if (disabled && S.mode === 'auto-process')  document.getElementById('btn-auto-process').disabled  = false;
+  if (disabled && S.mode === 'auto-download') document.getElementById('btn-auto-download').disabled = false;
+}
+
+function setLog(msg, type) {
+  const el = document.getElementById('status-log');
+  el.textContent = msg;
+  el.className   = 'log-line' + (type ? ' ' + type : '');
+}
+
+function esc(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function api(url, method = 'GET') {
+  const res = await fetch(url, { method });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+</script>
+</body>
+</html>

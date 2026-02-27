@@ -7,11 +7,10 @@ PrimeGov asset downloader.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -51,19 +50,21 @@ def _within_grace_period(meeting_date, grace_days: int = _NOT_AVAILABLE_GRACE_DA
 
 
 def _write_progress(meeting_id: str, stage: str, pct: int = 0, detail: str = "", error: bool = False) -> None:
-    """Write download progress to meeting's progress.json."""
-    p = MEDIA_DIR / meeting_id / "progress.json"
+    """Write download progress — delegates to centralized helper (DB + file + pub/sub)."""
+    from app.services.progress import update_progress, fail_job
+    # downloader.py has a db session available at the call site; use a short-lived one here
+    # since we can't easily thread db through all call sites without refactoring.
+    from app.database import SessionLocal
+    db = SessionLocal()
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({
-            "stage": stage,
-            "pct": pct,
-            "detail": detail,
-            "error": error,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }))
+        if error:
+            fail_job(db, meeting_id, detail or stage)
+        else:
+            update_progress(db, meeting_id, stage, pct, detail)
     except Exception as exc:
-        logger.warning("Could not write progress: %s", exc)
+        logger.warning("Could not write progress for %s: %s", meeting_id, exc)
+    finally:
+        db.close()
 
 
 def extract_m3u8_url(swagit_url: str) -> Optional[str]:

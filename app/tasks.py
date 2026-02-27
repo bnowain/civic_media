@@ -55,24 +55,39 @@ def process_video_task(self, meeting_id: str, media_id: str) -> dict:
     """
     from app.database import SessionLocal
     from app.services.pipeline import run_video_pipeline
+    from app.services.progress import create_job, complete_job, fail_job
 
     db = SessionLocal()
     try:
+        create_job(db, meeting_id, "process", celery_task_id=self.request.id)
         run_video_pipeline(db, meeting_id, media_id)
 
         from app.models import TranscriptSegment
         count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
+        complete_job(db, meeting_id)
         return {"meeting_id": meeting_id, "segment_count": count, "status": "complete"}
 
     except Exception as exc:
         db.rollback()
+        # SoftTimeLimitExceeded means the task hit the 110-minute soft wall.
+        # Don't retry — write an error to progress.json and give up cleanly.
+        from celery.exceptions import SoftTimeLimitExceeded
+        if isinstance(exc, SoftTimeLimitExceeded):
+            logger.error(
+                "process_video_task: soft time limit exceeded for meeting %s — "
+                "task ran > 110 min. Marking as error (no retry).",
+                meeting_id,
+            )
+            fail_job(db, meeting_id, "Task timed out after 110 minutes")
+            return {"meeting_id": meeting_id, "status": "timeout"}
+
         logger.exception("process_video_task failed for meeting %s (attempt %d/%d)",
                          meeting_id, self.request.retries + 1, self.max_retries + 1)
         try:
             raise self.retry(exc=exc)
         except self.MaxRetriesExceededError:
             logger.error("process_video_task: all retries exhausted for meeting %s", meeting_id)
-            _write_error_progress(MEDIA_DIR, meeting_id, str(exc))
+            fail_job(db, meeting_id, str(exc))
             return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
     finally:
         db.close()
@@ -361,15 +376,20 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
     import subprocess
     from app.database import SessionLocal
     from app import models
+    from app.services.progress import create_job, update_progress, complete_job, fail_job
 
     db = SessionLocal()
     try:
+        create_job(db, meeting_id, "transcode", celery_task_id=self.request.id)
+
         media = db.query(models.MediaFile).filter_by(media_id=media_id).first()
         if not media:
+            fail_job(db, meeting_id, "MediaFile not found")
             return {"error": "MediaFile not found", "status": "error"}
 
         original_path = Path(media.file_path)
         if not original_path.exists():
+            fail_job(db, meeting_id, "Source file not found")
             return {"error": "Source file not found", "status": "error"}
 
         media.transcode_status = "transcoding"
@@ -379,14 +399,8 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
         stem = original_path.stem
         out_path = original_path.parent / f"{stem}_540p.mp4"
 
-        progress_file = MEDIA_DIR / meeting_id / "progress.json"
-        progress_file.parent.mkdir(parents=True, exist_ok=True)
-        progress_file.write_text(json.dumps({
-            "stage": "Transcoding to 540p",
-            "pct": 5,
-            "detail": f"Source: {original_path.name}",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }))
+        update_progress(db, meeting_id, "Transcoding to 540p", 5,
+                        f"Source: {original_path.name}")
 
         # ffmpeg: scale to 540p (height=540, width auto even),
         # libx264 crf 23, aac audio, fast preset
@@ -426,28 +440,21 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
                 val = decoded.split("=", 1)[1].strip()
                 if val.isdigit() and int(val) > 0 and duration_us > 0:
                     pct = min(95, int(int(val) / duration_us * 100))
-                    try:
-                        progress_file.write_text(json.dumps({
-                            "stage": "Transcoding to 540p",
-                            "pct": pct,
-                            "detail": f"{pct}% complete",
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }))
-                    except Exception:
-                        pass
+                    update_progress(db, meeting_id, "Transcoding to 540p", pct,
+                                    f"{pct}% complete")
 
         proc.wait(timeout=7200)  # 2 hour timeout
 
         if proc.returncode != 0:
             media.transcode_status = "pending"
             db.commit()
-            _write_error_progress(MEDIA_DIR, meeting_id, "Transcode failed (ffmpeg error)")
+            fail_job(db, meeting_id, "Transcode failed (ffmpeg error)")
             return {"error": "ffmpeg failed", "status": "error"}
 
         if not out_path.exists() or out_path.stat().st_size < 1000:
             media.transcode_status = "pending"
             db.commit()
-            _write_error_progress(MEDIA_DIR, meeting_id, "Transcoded file too small or missing")
+            fail_job(db, meeting_id, "Transcoded file too small or missing")
             return {"error": "Output file invalid", "status": "error"}
 
         # Get new duration
@@ -477,17 +484,7 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
             media.duration = new_duration
         db.commit()
 
-        # Write completion progress
-        progress_file.write_text(json.dumps({
-            "stage": "Transcode complete",
-            "pct": 100,
-            "detail": (
-                f"540p: {new_size / (1024*1024):.0f} MB "
-                f"(was {original_size / (1024*1024):.0f} MB, "
-                f"saved {(1 - new_size/original_size)*100:.0f}%)"
-            ),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }))
+        complete_job(db, meeting_id)
 
         logger.info(
             "Transcoded %s: %s → %s (%.0f MB → %.0f MB)",
@@ -511,7 +508,7 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
                 db.commit()
         except Exception:
             pass
-        _write_error_progress(MEDIA_DIR, meeting_id, str(exc))
+        fail_job(db, meeting_id, str(exc))
         return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
     finally:
         db.close()
@@ -567,12 +564,19 @@ def primegov_download_task(
         download_video as dl_video,
         download_document as dl_doc,
     )
+    from app.services.progress import create_job, complete_job, fail_job
 
     db = SessionLocal()
     results = {}
     try:
         if download_video:
+            create_job(db, meeting_id, "download", celery_task_id=self.request.id)
             results["video"] = dl_video(db, meeting_id)
+            video_status = results["video"].get("status", "")
+            if video_status == "complete":
+                complete_job(db, meeting_id)
+            elif video_status not in ("skipped",):
+                fail_job(db, meeting_id, results["video"].get("error", "Download failed"))
 
         if download_agenda:
             results["agenda"] = dl_doc(db, meeting_id, "agenda")
@@ -598,6 +602,7 @@ def primegov_download_task(
         try:
             raise self.retry(exc=exc)
         except self.MaxRetriesExceededError:
+            fail_job(db, meeting_id, str(exc))
             return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
     finally:
         db.close()
@@ -761,6 +766,102 @@ def export_clip_task(self, clip_id: str) -> dict:
         raise self.retry(exc=exc)
     finally:
         db.close()
+
+
+@celery_app.task(
+    name="tasks.full_ingest",
+    max_retries=0,
+)
+def full_ingest_task(meeting_id: str) -> dict:
+    """
+    Run all three pipeline stages sequentially for a single meeting:
+      1. Download video (primegov downloader)
+      2. Transcode to 540p (transcoder, auto_process=False)
+      3. Run video pipeline (diarize, transcribe, embed, voiceprint)
+
+    Intended for the backfill API's /full/{meeting_id} endpoint and for
+    new meetings where the caller wants a single Celery task to handle
+    the entire lifecycle without chaining queue entries.
+
+    All three stages create their own short-lived DB sessions.
+    """
+    from app.database import SessionLocal
+    from app.services.primegov.downloader import download_video as dl_video
+    from app.services.transcoder import run_transcode
+    from app.services.pipeline import run_video_pipeline
+
+    from app.services.progress import create_job, complete_job, fail_job
+
+    logger.info("full_ingest_task: starting for meeting %s", meeting_id)
+
+    # ── Stage 1: Download ──────────────────────────────────────────────────
+    db = SessionLocal()
+    try:
+        create_job(db, meeting_id, "download")
+        dl_result = dl_video(db, meeting_id)
+        if dl_result.get("status") == "complete":
+            complete_job(db, meeting_id)
+        else:
+            fail_job(db, meeting_id, dl_result.get("error", "Download failed"))
+    finally:
+        db.close()
+
+    if dl_result.get("status") != "complete":
+        logger.error("full_ingest_task: download failed for %s: %s", meeting_id, dl_result)
+        return {"meeting_id": meeting_id, "status": "error", "stage": "download", "detail": dl_result}
+
+    media_id = dl_result.get("media_id")
+    if not media_id:
+        logger.error("full_ingest_task: no media_id after download for %s", meeting_id)
+        return {"meeting_id": meeting_id, "status": "error", "stage": "download", "detail": "no media_id"}
+
+    logger.info("full_ingest_task: download complete for %s (media_id=%s)", meeting_id, media_id)
+
+    # ── Stage 2: Transcode ─────────────────────────────────────────────────
+    # run_transcode creates its own DB session internally
+    db = SessionLocal()
+    try:
+        create_job(db, meeting_id, "transcode")
+    finally:
+        db.close()
+
+    tc_result = run_transcode(meeting_id, media_id, auto_process=False)
+
+    db = SessionLocal()
+    try:
+        if tc_result.get("status") in ("transcoded", "skipped"):
+            complete_job(db, meeting_id)
+        else:
+            fail_job(db, meeting_id, tc_result.get("error", "Transcode failed"))
+    finally:
+        db.close()
+
+    if tc_result.get("status") not in ("transcoded", "skipped"):
+        logger.error("full_ingest_task: transcode failed for %s: %s", meeting_id, tc_result)
+        return {"meeting_id": meeting_id, "status": "error", "stage": "transcode", "detail": tc_result}
+
+    logger.info("full_ingest_task: transcode complete for %s", meeting_id)
+
+    # ── Stage 3: Pipeline (transcribe, diarize, embed, voiceprint) ─────────
+    db = SessionLocal()
+    try:
+        create_job(db, meeting_id, "process")
+        run_video_pipeline(db, meeting_id, media_id)
+        from app.models import TranscriptSegment
+        count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
+        complete_job(db, meeting_id)
+    except Exception as exc:
+        fail_job(db, meeting_id, str(exc))
+        raise
+    finally:
+        db.close()
+
+    logger.info("full_ingest_task: pipeline complete for %s (%d segments)", meeting_id, count)
+    return {
+        "meeting_id": meeting_id,
+        "status": "complete",
+        "segment_count": count,
+    }
 
 
 @celery_app.task(

@@ -8,13 +8,9 @@ for the UI to poll.
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-
-from app.config import MEDIA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -37,18 +33,19 @@ def _probe_duration(file_path: str) -> float | None:
 
 
 def _write_progress(meeting_id: str, stage: str, pct: int, detail: str = "", error: bool = False):
-    p = MEDIA_DIR / meeting_id / "progress.json"
+    """Thin wrapper: delegates to the centralized progress helper (DB + file + pub/sub)."""
+    from app.database import SessionLocal
+    from app.services.progress import update_progress, fail_job
+    db = SessionLocal()
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({
-            "stage": stage,
-            "pct": pct,
-            "detail": detail,
-            "error": error,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }))
+        if error:
+            fail_job(db, meeting_id, detail or stage)
+        else:
+            update_progress(db, meeting_id, stage, pct, detail)
     except Exception:
         pass
+    finally:
+        db.close()
 
 
 def _auto_dispatch_pipeline(meeting_id: str, media_id: str) -> None:
