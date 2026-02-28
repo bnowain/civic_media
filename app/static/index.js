@@ -9,13 +9,23 @@
 // ── State ────────────────────────────────────────────────────────────────────
 
 let activeMode = "meetings";          // "meetings" | "audio" | "news" | "web_series"
-let groupId = null;           // null = all
+let groupId = null;           // null = all (meetings tab — group_id)
+let selectedGroupId = null;   // null = all (audio/web_series tab — group_id)
 let recentSort = "processed";         // "processed" | "event"
 let gridSort = "date";                // "date" | "group"
-let selectedShow = null;              // for audio/web_series sidebar filter
+let selectedShow = null;              // display label for audio/web_series sidebar filter
 let selectedCategory = "meeting";     // dialog category
 let groups = [];             // cached list
 let editMeetingId = null;             // meeting being edited
+let dateFrom = "";                    // YYYY-MM-DD filter (inclusive)
+let dateTo = "";                      // YYYY-MM-DD filter (inclusive)
+
+// Infinite scroll state
+let pageOffset = 0;
+let isLoadingMore = false;
+let hasMorePages = false;
+let scrollObserver = null;
+const PAGE_SIZE = 50;
 
 const activePollers = {};
 const POLL_INTERVAL = 4000;
@@ -149,6 +159,7 @@ async function init() {
       loadContent();
     } else {
       selectedShow = item.dataset.show || null;
+      selectedGroupId = item.dataset.gbId || null;
       loadContent();
     }
   });
@@ -230,7 +241,15 @@ function updateToolbar() {
       <button class="toggle-btn${gridSort === "group" ? " active" : ""}" data-gsort="group">${groupLabel}</button>
     </div>`;
 
-  actions.innerHTML = actionHtml + sortHtml;
+  const dateFilterHtml = `
+    <div class="date-filter" id="date-filter">
+      <input type="date" id="filter-date-from" class="date-filter-input" title="From date" value="${dateFrom}">
+      <span class="date-filter-sep">–</span>
+      <input type="date" id="filter-date-to" class="date-filter-input" title="To date" value="${dateTo}">
+      ${dateFrom || dateTo ? `<button class="btn-icon date-filter-clear" id="date-filter-clear" title="Clear dates">✕</button>` : ""}
+    </div>`;
+
+  actions.innerHTML = actionHtml + dateFilterHtml + sortHtml;
 
   if (activeMode === "meetings") {
     document.getElementById("primegov-btn").addEventListener("click", openPrimeGovDialog);
@@ -247,6 +266,24 @@ function updateToolbar() {
     updateURL();
     loadContent();
   });
+
+  document.getElementById("filter-date-from").addEventListener("change", e => {
+    dateFrom = e.target.value;
+    loadContent();
+  });
+  document.getElementById("filter-date-to").addEventListener("change", e => {
+    dateTo = e.target.value;
+    loadContent();
+  });
+  const clearBtn = document.getElementById("date-filter-clear");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      dateFrom = "";
+      dateTo = "";
+      updateToolbar();
+      loadContent();
+    });
+  }
 }
 
 // ── API ──────────────────────────────────────────────────────────────────────
@@ -270,11 +307,12 @@ async function loadSidebarForTab() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const bodies = await r.json();
     if (activeMode === "audio" || activeMode === "web_series") {
-      list.innerHTML = `<div class="gb-item${!selectedShow ? " active" : ""}" data-show="">All</div>`;
+      list.innerHTML = `<div class="gb-item${!selectedShow ? " active" : ""}" data-show="" data-gb-id="">All</div>`;
       bodies.forEach(gb => {
         const el = document.createElement("div");
         el.className = "gb-item" + (selectedShow === gb.name ? " active" : "");
         el.dataset.show = gb.name;
+        el.dataset.gbId = gb.group_id;
         el.textContent = gb.display_name || gb.name;
         list.appendChild(el);
       });
@@ -315,6 +353,12 @@ async function loadContent() {
     clearInterval(activePollers[id]);
     delete activePollers[id];
   });
+
+  // Reset infinite scroll state
+  pageOffset = 0;
+  hasMorePages = false;
+  isLoadingMore = false;
+  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
 
   try {
     if (activeMode === "news") {
@@ -371,26 +415,40 @@ function updateShowSidebar(allItems) {
   });
 }
 
-async function loadMeetingContent(grid) {
+function buildMeetingUrl(offset) {
   const categoryMap = { meetings: "meeting", audio: "audio", web_series: "web_series" };
   const category = categoryMap[activeMode] || "meeting";
-  let url = `/api/meetings/?category=${category}`;
-  // Meetings tab uses server-side governing body filter; audio/web_series filter client-side by show
-  if (activeMode === "meetings" && groupId) url += `&group_id=${groupId}`;
+  const params = new URLSearchParams({ category, offset, limit: PAGE_SIZE });
+  if (activeMode === "meetings" && groupId) params.set("group_id", groupId);
+  if ((activeMode === "audio" || activeMode === "web_series") && selectedGroupId) params.set("group_id", selectedGroupId);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  return `/api/meetings/?${params}`;
+}
 
-  const r = await fetch(url);
+async function loadMeetingContent(grid) {
+  // For group sort, fetch a larger batch (no infinite scroll)
+  const limit = gridSort === "group" ? 500 : PAGE_SIZE;
+  const categoryMap = { meetings: "meeting", audio: "audio", web_series: "web_series" };
+  const category = categoryMap[activeMode] || "meeting";
+  const params = new URLSearchParams({ category, offset: 0, limit });
+  if (activeMode === "meetings" && groupId) params.set("group_id", groupId);
+  if ((activeMode === "audio" || activeMode === "web_series") && selectedGroupId) params.set("group_id", selectedGroupId);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+
+  const r = await fetch(`/api/meetings/?${params}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  let items = await r.json();
+  const items = await r.json();
 
-  // For audio/web shows: filter by selected show name
-  if (activeMode === "audio" || activeMode === "web_series") {
-    if (selectedShow) items = items.filter(i => i.group_name === selectedShow);
-  }
+  pageOffset = items.length;
+  hasMorePages = items.length === limit && gridSort !== "group";
 
   const labelMap = { meetings: "meeting", audio: "item", web_series: "video" };
   const label = labelMap[activeMode] || "item";
+  const countSuffix = hasMorePages ? "+" : "";
   document.getElementById("item-count").textContent =
-    `${items.length} ${label}${items.length !== 1 ? "s" : ""}`;
+    `${items.length}${countSuffix} ${label}${items.length !== 1 ? "s" : ""}`;
 
   if (items.length === 0) {
     const emptyMap = {
@@ -408,14 +466,82 @@ async function loadMeetingContent(grid) {
     renderGrouped(items, grid, m => m.group_name || null,
       activeMode === "meetings" ? "No Org" : "No Show");
   } else {
-    items.forEach(m => {
-      const card = createMeetingCard(m);
-      grid.appendChild(card);
-    });
+    appendMeetingCards(items, grid);
+    if (hasMorePages) attachScrollSentinel(grid);
   }
+}
 
-  // Kick off status checks
-  items.forEach(m => updateMeetingCardStatus(m.meeting_id));
+function appendMeetingCards(items, grid) {
+  items.forEach(m => {
+    const card = createMeetingCard(m);
+    grid.appendChild(card);
+    // Skip status polling for items already fully processed — saves hundreds of API calls
+    if (!m.processed_at) {
+      updateMeetingCardStatus(m.meeting_id);
+    }
+  });
+}
+
+function attachScrollSentinel(grid) {
+  if (scrollObserver) scrollObserver.disconnect();
+
+  const sentinel = document.createElement("div");
+  sentinel.id = "scroll-sentinel";
+  sentinel.style.height = "1px";
+  grid.appendChild(sentinel);
+
+  scrollObserver = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting && !isLoadingMore && hasMorePages) {
+      loadMoreContent(grid);
+    }
+  }, { rootMargin: "200px" });
+
+  scrollObserver.observe(sentinel);
+}
+
+async function loadMoreContent(grid) {
+  if (isLoadingMore || !hasMorePages) return;
+  isLoadingMore = true;
+
+  // Remove old sentinel while loading
+  const old = document.getElementById("scroll-sentinel");
+  if (old) old.remove();
+
+  // Show a subtle loading indicator
+  const loader = document.createElement("div");
+  loader.id = "load-more-spinner";
+  loader.className = "loading-state-sm";
+  loader.textContent = "Loading more…";
+  grid.appendChild(loader);
+
+  try {
+    const r = await fetch(buildMeetingUrl(pageOffset));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const items = await r.json();
+
+    loader.remove();
+    appendMeetingCards(items, grid);
+    pageOffset += items.length;
+    hasMorePages = items.length === PAGE_SIZE;
+
+    // Update count display
+    const countEl = document.getElementById("item-count");
+    if (countEl) {
+      const current = countEl.textContent.replace(/[^0-9]/g, "");
+      const total = parseInt(current || "0") + items.length;
+      const suffix = hasMorePages ? "+" : "";
+      const labelMap = { meetings: "meeting", audio: "item", web_series: "video" };
+      const label = labelMap[activeMode] || "item";
+      countEl.textContent = `${total}${suffix} ${label}${total !== 1 ? "s" : ""}`;
+    }
+
+    if (hasMorePages) attachScrollSentinel(grid);
+  } catch (err) {
+    loader.remove();
+    console.error("Failed to load more:", err);
+  } finally {
+    isLoadingMore = false;
+  }
 }
 
 async function loadNewsContent(grid) {

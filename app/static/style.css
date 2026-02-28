@@ -2124,6 +2124,53 @@ html, body {
   padding-top: 0;
 }
 
+/* Date range filter in toolbar */
+.date-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.date-filter-input {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  cursor: pointer;
+  width: 118px;
+}
+
+.date-filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.date-filter-sep {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 0 2px;
+}
+
+.date-filter-clear {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.date-filter-clear:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
 /* Grid sort toggle in toolbar */
 .grid-sort-toggle {
   display: flex;

@@ -19,6 +19,8 @@ def list_meetings(
     category: Optional[str] = Query(None),
     group_id: Optional[str] = Query(None),
     meeting_type: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),   # YYYY-MM-DD inclusive
+    date_to: Optional[str] = Query(None),     # YYYY-MM-DD inclusive
     limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -31,6 +33,10 @@ def list_meetings(
         q = q.filter(models.Meeting.group_id == group_id)
     if meeting_type:
         q = q.filter(models.Meeting.meeting_type == meeting_type)
+    if date_from:
+        q = q.filter(models.Meeting.meeting_date >= date_from)
+    if date_to:
+        q = q.filter(models.Meeting.meeting_date <= date_to)
 
     q = q.order_by(models.Meeting.meeting_date.desc(), models.Meeting.created_at.desc())
     q = q.offset(offset)
