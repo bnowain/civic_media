@@ -568,6 +568,10 @@ const S = {
 
 // ── Worker pill ────────────────────────────────────────────────────────────
 let workerState = 'unknown';
+// Cache of the currently-active job's metadata (title, meeting_date, meeting_id).
+// Set on 'init' SSE event or worker-health poll; preserved across 'progress' events
+// so we never fall back to showing the raw meeting UUID.
+let activeJobMeta = null;
 
 async function pollWorkerHealth() {
   const dot = document.getElementById('worker-dot');
@@ -583,12 +587,16 @@ async function pollWorkerHealth() {
       workerState = 'online';
       const job = data.active_job;
       if (job) {
+        // Cache title/date so SSE progress events can resolve it even after the meeting
+        // leaves the queue list (active jobs are not in the pending queue)
+        if (job.title && (!activeJobMeta || activeJobMeta.meeting_id === job.meeting_id)) {
+          activeJobMeta = { meeting_id: job.meeting_id, title: job.title, meeting_date: job.meeting_date || null };
+        }
         dot.className = 'worker-dot processing';
         let dateStr = '';
         if (job.meeting_date) {
           try { const d = new Date(job.meeting_date + 'T12:00:00'); dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { dateStr = job.meeting_date; }
         }
-        const shortTitle = (job.title || '').slice(0, 22);
         label.textContent = `${job.stage} ${job.pct}%${dateStr ? ' · ' + dateStr : ''}`;
         btn.title = `${job.stage} (${job.pct}%) — ${job.title || 'unknown'}`;
       } else {
@@ -671,22 +679,40 @@ function startSSE() {
     switch (data.type) {
       case 'init':
         if (data.status) renderStatus(data.status);
-        if (S.mode === 'idle') renderActive(data.active || null);
+        if (S.mode === 'idle') {
+          if (data.active) activeJobMeta = data.active;  // cache title/date from server
+          renderActive(data.active || null);
+        }
         break;
 
-      case 'progress':
+      case 'progress': {
+        // Resolve title from cache → queue list → UUID fallback
+        const metaTitle = (activeJobMeta && activeJobMeta.meeting_id === data.meeting_id)
+          ? activeJobMeta.title : null;
+        const queueTitle = S.meetings.find(m => m.meeting_id === data.meeting_id)?.title;
+        const resolvedTitle = metaTitle || queueTitle || null;
+        const resolvedDate  = (activeJobMeta && activeJobMeta.meeting_id === data.meeting_id)
+          ? activeJobMeta.meeting_date : null;
+
+        // Update cache so subsequent 'progress' events can reuse it
+        if (resolvedTitle) {
+          activeJobMeta = { meeting_id: data.meeting_id, title: resolvedTitle, meeting_date: resolvedDate };
+        }
+
         if (S.mode === 'idle') {
           renderActive({
-            meeting_id: data.meeting_id,
-            title: S.meetings.find(m => m.meeting_id === data.meeting_id)?.title || data.meeting_id,
-            stage: data.stage_label || '',
-            pct:   data.pct || 0,
-            detail: data.detail || '',
+            meeting_id:   data.meeting_id,
+            title:        resolvedTitle,
+            meeting_date: resolvedDate,
+            stage:        data.stage_label || '',
+            pct:          data.pct || 0,
+            detail:       data.detail || '',
           });
         }
         // Update queue row if visible
         updateQueueRowActive(data.meeting_id, true, data.stage_label || '', data.pct || 0);
         break;
+      }
 
       case 'complete':
       case 'error':
@@ -935,7 +961,16 @@ function renderActive(active) {
     panel.classList.remove('idle');
     badge.className   = 'active-badge';
     badge.textContent = 'ACTIVE';
-    title.textContent = active.title || active.meeting_id;
+    // Show "Title · Apr 22" if we have a date, else title, else UUID
+    let titleText = active.title || active.meeting_id;
+    if (active.meeting_date) {
+      try {
+        const d = new Date(active.meeting_date + 'T12:00:00');
+        const ds = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        titleText = `${titleText} \u00b7 ${ds}`;
+      } catch { /* skip date */ }
+    }
+    title.textContent = titleText;
     progressRow.classList.remove('hidden');
     bar.style.width   = (active.pct || 0) + '%';
     pct.textContent   = (active.pct || 0) + '%';

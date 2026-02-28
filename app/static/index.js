@@ -389,6 +389,7 @@ function renderGrouped(items, grid, keyFn, noKeyLabel = "Other") {
     groups.get(key).push(item);
   }
 
+  let cardIndex = 0;
   for (const [key, groupItems] of groups) {
     const header = document.createElement("div");
     header.className = "grid-group-header";
@@ -397,6 +398,9 @@ function renderGrouped(items, grid, keyFn, noKeyLabel = "Other") {
     groupItems.forEach(item => {
       const card = createMeetingCard(item);
       grid.appendChild(card);
+      // Stagger badge fetches (same as appendMeetingCards)
+      setTimeout(() => updateMeetingCardStatus(item.meeting_id), cardIndex * 20);
+      cardIndex++;
     });
   }
 }
@@ -472,13 +476,12 @@ async function loadMeetingContent(grid) {
 }
 
 function appendMeetingCards(items, grid) {
-  items.forEach(m => {
+  items.forEach((m, i) => {
     const card = createMeetingCard(m);
     grid.appendChild(card);
-    // Skip status polling for items already fully processed — saves hundreds of API calls
-    if (!m.processed_at) {
-      updateMeetingCardStatus(m.meeting_id);
-    }
+    // Stagger badge fetches so we don't fire 50 concurrent requests at once.
+    // Processed meetings also need initialization (segment count for badge).
+    setTimeout(() => updateMeetingCardStatus(m.meeting_id), i * 20);
   });
 }
 
