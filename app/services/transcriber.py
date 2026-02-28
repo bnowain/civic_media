@@ -97,14 +97,19 @@ def transcribe(
     audio_path: str,
     audio_duration: float = 0.0,
     on_progress: "Callable[[float], None] | None" = None,
+    on_model_loading: "Callable[[], None] | None" = None,
 ) -> list[dict]:
     """
     Transcribe a preprocessed WAV file.
 
     Args:
-        audio_path:     Path to the 16kHz mono WAV.
-        audio_duration: Total audio duration in seconds (for progress reporting).
-        on_progress:    Optional callback receiving a float 0.0–1.0.
+        audio_path:       Path to the 16kHz mono WAV.
+        audio_duration:   Total audio duration in seconds (for progress reporting).
+        on_progress:      Optional callback receiving a float 0.0–1.0.
+        on_model_loading: Optional callback fired once, just before the Whisper
+                          model is loaded from disk (only on first call when the
+                          model is not yet cached). Use this to update UI state
+                          to "Loading model..." before the first segment arrives.
 
     Returns a list of segment dicts:
         [
@@ -125,6 +130,9 @@ def transcribe(
     Suspicious segments (low confidence) are logged as warnings.
     """
     from app.services.vocab import load_initial_prompt
+
+    if on_model_loading is not None and _model is None:
+        on_model_loading()
 
     model = _get_model()
     initial_prompt = load_initial_prompt()

@@ -138,7 +138,7 @@ def get_active_job() -> dict | None:
         return None
 
     TERMINAL = {"Complete", "Error", ""}
-    MAX_STALE_SECS = 300  # 5 minutes — beyond this, job is likely stuck
+    MAX_STALE_SECS = 1800  # 30 minutes — Whisper/ffmpeg can go many minutes without a progress tick
 
     best: dict | None = None
     best_ts = None

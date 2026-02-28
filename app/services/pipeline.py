@@ -323,10 +323,15 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             pct = 10 + int(fraction * 29)
             update_progress(db, meeting_id, "Transcribing", pct)
 
+        def _model_loading() -> None:
+            update_progress(db, meeting_id, "Loading Whisper model", 9)
+            logger.info("[%s] Whisper model not yet cached — loading...", meeting_id)
+
         raw_segments = transcriber.transcribe(
             audio_path,
             audio_duration=duration or 0.0,
             on_progress=_transcribe_progress,
+            on_model_loading=_model_loading,
         )
         logger.info("[%s] %d transcript segments", meeting_id, len(raw_segments))
 
