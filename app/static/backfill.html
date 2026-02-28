@@ -93,6 +93,7 @@
     .pill-green  { background: var(--accent-green-dim); border-color: var(--accent-green); color: #4ade80; }
     .pill-red    { background: var(--accent-red-dim);   border-color: var(--accent-red);   color: #fca5a5; }
     .pill-neutral{ background: var(--bg-raised);        border-color: var(--border-light); color: var(--text-secondary); }
+    .pill-purple { background: #3b1f5e;               border-color: #a855f7;            color: #d8b4fe; }
     .pill .label { color: inherit; opacity: 0.7; }
 
     /* ── Buttons ── */
@@ -451,6 +452,10 @@
         <span id="cnt-process">—</span>
         <span class="label">Process</span>
       </div>
+      <div class="pill pill-purple">
+        <span id="cnt-diarize">—</span>
+        <span class="label">Diarize</span>
+      </div>
       <div class="pill pill-red" id="pill-stuck">
         <span id="cnt-stuck">—</span>
         <span class="label">Stuck</span>
@@ -503,6 +508,12 @@
       <!-- Download -->
       <button class="btn btn-ghost"   id="btn-next-download" onclick="triggerOne('download')">↓ Download Next</button>
       <button class="btn btn-ghost"   id="btn-auto-download" onclick="toggleAuto('download')">⟳ Download All</button>
+
+      <div class="divider"></div>
+
+      <!-- Diarize -->
+      <button class="btn btn-ghost"   id="btn-next-diarize" onclick="triggerOne('diarize')">◎ Diarize Next</button>
+      <button class="btn btn-ghost"   id="btn-auto-diarize" onclick="toggleAuto('diarize')">⟳ Diarize All</button>
     </div>
     <div class="controls-right">
       <button class="btn btn-ghost" id="btn-selected" onclick="processSelected()" disabled>
@@ -736,9 +747,10 @@ function startSSE() {
 
 function renderStatus(s) {
   if (!s) return;
-  document.getElementById('cnt-download').textContent  = s.download_pending ?? '—';
+  document.getElementById('cnt-download').textContent  = s.download_pending  ?? '—';
   document.getElementById('cnt-transcode').textContent = s.transcode_pending ?? '—';
   document.getElementById('cnt-process').textContent   = s.process_pending   ?? '—';
+  document.getElementById('cnt-diarize').textContent   = s.diarize_pending   ?? '—';
   document.getElementById('cnt-stuck').textContent     = s.stuck             ?? '—';
   document.getElementById('pill-stuck').style.opacity  = (s.stuck > 0) ? '1' : '0.4';
 }
@@ -1018,7 +1030,9 @@ async function triggerOne(type) {
   setAllBtnsDisabled(true);
   const endpoint = type === 'process'
     ? `/api/backfill/next-process${filterParams()}`
-    : `/api/backfill/next-download${filterParams()}`;
+    : type === 'diarize'
+      ? '/api/backfill/next-diarize'
+      : `/api/backfill/next-download${filterParams()}`;
   try {
     const d = await api(endpoint, 'POST');
     if (d.queued) {
@@ -1073,7 +1087,9 @@ async function autoLoop(type) {
     // 2. Queue the next task (with active filter scoping)
     const endpoint = type === 'process'
       ? `/api/backfill/next-process${filterParams()}`
-      : `/api/backfill/next-download${filterParams()}`;
+      : type === 'diarize'
+        ? '/api/backfill/next-diarize'
+        : `/api/backfill/next-download${filterParams()}`;
     let data;
     try {
       data = await api(endpoint, 'POST');
@@ -1093,7 +1109,7 @@ async function autoLoop(type) {
     renderActive({ title: data.title, meeting_id: data.meeting_id, stage: 'Queued', pct: 0 });
 
     // 3. Poll until terminal
-    if (type === 'process') {
+    if (type === 'process' || type === 'diarize') {
       await pollUntilDone(data.meeting_id);
     } else {
       await waitForIdle();
@@ -1157,7 +1173,7 @@ function updateAutoBtn(type, state) {
     btnAuto.textContent = '⏸ Pausing…';
     btnAuto.disabled    = true;
   } else {
-    btnAuto.textContent = type === 'process' ? '⟳ Process All' : '⟳ Download All';
+    btnAuto.textContent = type === 'process' ? '⟳ Process All' : type === 'diarize' ? '⟳ Diarize All' : '⟳ Download All';
     btnAuto.className   = 'btn btn-ghost';
     btnAuto.disabled    = false;
   }
@@ -1241,13 +1257,14 @@ async function resetStuck() {
 
 // ── UI helpers ─────────────────────────────────────────────────────────────
 function setAllBtnsDisabled(disabled) {
-  ['btn-next-process', 'btn-auto-process', 'btn-next-download', 'btn-auto-download']
+  ['btn-next-process', 'btn-auto-process', 'btn-next-download', 'btn-auto-download', 'btn-next-diarize', 'btn-auto-diarize']
     .forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = disabled;
     });
   if (disabled && S.mode === 'auto-process')  document.getElementById('btn-auto-process').disabled  = false;
   if (disabled && S.mode === 'auto-download') document.getElementById('btn-auto-download').disabled = false;
+  if (disabled && S.mode === 'auto-diarize')  document.getElementById('btn-auto-diarize').disabled  = false;
 }
 
 function setLog(msg, type) {

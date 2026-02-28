@@ -11,7 +11,7 @@ candidate, so reset-stuck never needs to be called manually.
 
 Endpoints
 ─────────
-GET  /api/backfill/status               Counts: download/transcode/process pending + stuck
+GET  /api/backfill/status               Counts: download/transcode/process/diarize pending + stuck
 GET  /api/backfill/queue                Paginated list of process-pending meetings
 GET  /api/backfill/active               Currently running meeting (from processing_jobs DB)
 GET  /api/backfill/progress/{id}        Latest job for a specific meeting
@@ -20,6 +20,7 @@ GET  /api/backfill/events               SSE stream: real-time progress updates
 POST /api/backfill/next-download        Queue one primegov_download_task
 POST /api/backfill/next-transcode       Queue one transcode_video_task
 POST /api/backfill/next-process         Queue one process_video_task
+POST /api/backfill/next-diarize         Queue one process_video_task for transcribed-but-not-diarized meetings
 POST /api/backfill/process-now/{id}     Queue process_video_task for a specific meeting
 POST /api/backfill/full/{id}            Queue full_ingest_task for a specific meeting
 POST /api/backfill/skip/{id}            Add meeting to skip set (excluded from auto-queue)
@@ -224,6 +225,17 @@ def backfill_status(db: Session = Depends(get_db)):
         ).count()
     )
 
+    # Diarize pending: transcription done (has segments) but pipeline not complete.
+    # The pipeline is resumable — re-queuing these skips transcription and runs
+    # diarization → alignment → embedding → voiceprint.
+    diarize_pending = (
+        db.query(models.Meeting)
+        .filter(
+            models.Meeting.processed_at.is_(None),
+            models.Meeting.meeting_id.in_(meetings_with_segments_ids),
+        ).count()
+    )
+
     # Stuck count: running jobs with no update in >10 min (DB query, not filesystem)
     threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
     stuck_count = (
@@ -239,6 +251,7 @@ def backfill_status(db: Session = Depends(get_db)):
         "download_pending": download_pending,
         "transcode_pending": transcode_pending,
         "process_pending": process_pending,
+        "diarize_pending": diarize_pending,
         "stuck": stuck_count,
     }
 
@@ -562,6 +575,13 @@ def _build_init_state(db: Session) -> dict:
             ~models.Meeting.meeting_id.in_(meetings_with_segments_ids),
         ).count()
     )
+    diarize_pending = (
+        db.query(models.Meeting)
+        .filter(
+            models.Meeting.processed_at.is_(None),
+            models.Meeting.meeting_id.in_(meetings_with_segments_ids),
+        ).count()
+    )
     threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
     stuck = (
         db.query(models.ProcessingJob)
@@ -598,6 +618,7 @@ def _build_init_state(db: Session) -> dict:
             "download_pending": len(meeting_ids_with_url - meeting_ids_with_media),
             "transcode_pending": transcode_pending,
             "process_pending": process_pending,
+            "diarize_pending": diarize_pending,
             "stuck": stuck,
         },
         "active": active,
@@ -787,6 +808,107 @@ def backfill_next_process(
             "queued": True,
             "meeting_id": meeting.meeting_id,
             "media_id": media.media_id,
+            "meeting_date": meeting.meeting_date,
+            "title": meeting.title,
+            "auto_reset": reset_summary,
+        }
+
+    return {"queued": False, "nothing_to_do": True, "auto_reset": reset_summary}
+
+
+@router.post("/next-diarize")
+def backfill_next_diarize(db: Session = Depends(get_db)):
+    """
+    Queue one process_video_task for the oldest meeting that has been fully
+    transcribed (has transcript segments) but the pipeline hasn't completed
+    (processed_at is NULL).
+
+    The pipeline is resumable: since segments already exist it skips
+    transcription and continues from diarization → alignment → embedding →
+    voiceprint matching.
+
+    Safety checks:
+    - Requires the extracted WAV to exist on disk (transcription was done on
+      the full audio, so the WAV is by definition complete — no partial audio).
+    - Skips meetings that are currently active (already being processed).
+    - Skips meetings whose WAV is suspiciously short vs. the source media
+      duration (truncated WAV guard).
+    """
+    from app import models
+    from app.tasks import process_video_task
+    from app.services.audio_extractor import get_wav_duration, _probe_duration
+
+    reset_summary = _do_reset_stuck(db)
+    skipped = _get_skipped()
+
+    # Meetings with segments but not yet complete
+    candidates = (
+        db.query(models.Meeting)
+        .filter(
+            models.Meeting.processed_at.is_(None),
+            models.Meeting.meeting_id.in_(
+                db.query(models.TranscriptSegment.meeting_id).distinct()
+            ),
+        )
+        .order_by(models.Meeting.meeting_date)
+        .all()
+    )
+
+    for meeting in candidates:
+        if meeting.meeting_id in skipped:
+            continue
+        if _is_active(db, meeting.meeting_id):
+            continue
+
+        # Find the extracted WAV for this meeting
+        wav_record = (
+            db.query(models.MediaFile)
+            .filter(
+                models.MediaFile.meeting_id == meeting.meeting_id,
+                models.MediaFile.file_type == "audio",
+                models.MediaFile.file_path.like("%_extracted.wav"),
+            )
+            .first()
+        )
+        if not wav_record or not Path(wav_record.file_path).exists():
+            logger.warning(
+                "next-diarize: skipping %s — extracted WAV missing", meeting.meeting_id
+            )
+            continue
+
+        # Truncated WAV guard: WAV must be >= 80% of source media duration.
+        # If the source media duration is unknown, skip the check.
+        source_media = (
+            db.query(models.MediaFile)
+            .filter(
+                models.MediaFile.meeting_id == meeting.meeting_id,
+                models.MediaFile.file_type.in_(["video", "audio"]),
+                ~models.MediaFile.file_path.like("%_extracted.wav"),
+            )
+            .first()
+        )
+        if source_media and Path(source_media.file_path).exists():
+            src_dur = _probe_duration(source_media.file_path)
+            wav_dur = get_wav_duration(wav_record.file_path)
+            if src_dur > 60 and wav_dur < src_dur * 0.80:
+                logger.warning(
+                    "next-diarize: skipping %s — WAV %.0fs is only %.0f%% of source %.0fs "
+                    "(truncated audio; re-extract before diarizing)",
+                    meeting.meeting_id, wav_dur, wav_dur / src_dur * 100, src_dur,
+                )
+                continue
+
+        # Find the source media ID to pass to the task
+        if not source_media:
+            logger.warning("next-diarize: skipping %s — no source media record", meeting.meeting_id)
+            continue
+
+        process_video_task.delay(meeting.meeting_id, source_media.media_id)
+        logger.info("next-diarize: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
+        return {
+            "queued": True,
+            "meeting_id": meeting.meeting_id,
+            "media_id": source_media.media_id,
             "meeting_date": meeting.meeting_date,
             "title": meeting.title,
             "auto_reset": reset_summary,
