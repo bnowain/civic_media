@@ -1,7 +1,9 @@
 """
 PrimeGov asset downloader.
 
-- Video: Playwright extracts m3u8 URL from Swagit page → ffmpeg copies to MP4
+- Video: Playwright extracts m3u8 URL from Swagit page → ffmpeg muxes to MP4
+  (video stream-copied, audio re-encoded to clean AAC-LC to prevent HLS
+  segment boundary profile mismatches from corrupting the output file)
 - Documents: httpx downloads compiled PDF from PrimeGov
 """
 
@@ -146,7 +148,7 @@ def download_video(db: Session, meeting_id: str) -> dict:
 
     1. Look up meeting's video_url (Swagit page)
     2. Extract m3u8 HLS stream URL via Playwright
-    3. Download with ffmpeg (-c copy, fast)
+    3. Download with ffmpeg (video stream-copied, audio re-encoded to AAC-LC)
     4. Create MediaFile record
 
     Returns result dict.
@@ -190,7 +192,7 @@ def download_video(db: Session, meeting_id: str) -> dict:
     output_filename = f"{meeting.meeting_date}_{safe_title}.mp4"
     output_path = media_dir / output_filename
 
-    _write_progress(meeting_id, "Downloading video...", 20, "ffmpeg stream copy")
+    _write_progress(meeting_id, "Downloading video...", 20, "ffmpeg mux (audio re-encode)")
 
     # Download with ffmpeg.
     # Video is stream-copied (fast), but audio is re-encoded to clean AAC-LC.
