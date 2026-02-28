@@ -49,6 +49,18 @@ KCNR_SHOWS = [
         "show_name": "Kevin Crye Show",
         "archive_label": "poke",
     },
+    {
+        "slug": "free_fire_radio",
+        "path": "/Show/archive/free_fire_radio",
+        "show_name": "Free Fire Radio",
+        "archive_label": "free_fire_radio",
+    },
+    {
+        "slug": "jefferson_state",
+        "path": "/Show/archive/jefferson_state",
+        "show_name": "Jefferson State of Mine",
+        "archive_label": "jefferson_state",
+    },
 ]
 
 
