@@ -34,7 +34,7 @@ def recent_media(
             date=m.meeting_date,
             processed_at=m.processed_at,
             created_at=m.created_at,
-            subtitle=m.governing_body if m.governing_body else None,
+            subtitle=m.group_name if m.group_name else None,
         ))
 
     # TV Newscasts

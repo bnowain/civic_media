@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 @router.get("/", response_model=list[schemas.MeetingOut])
 def list_meetings(
     category: Optional[str] = Query(None),
-    governing_body_id: Optional[str] = Query(None),
+    group_id: Optional[str] = Query(None),
     meeting_type: Optional[str] = Query(None),
     limit: Optional[int] = Query(None, ge=1),
     offset: int = Query(0, ge=0),
@@ -27,8 +27,8 @@ def list_meetings(
 
     if category:
         q = q.filter(models.Meeting.category == category)
-    if governing_body_id:
-        q = q.filter(models.Meeting.governing_body_id == governing_body_id)
+    if group_id:
+        q = q.filter(models.Meeting.group_id == group_id)
     if meeting_type:
         q = q.filter(models.Meeting.meeting_type == meeting_type)
 
@@ -44,8 +44,17 @@ def list_meetings(
 @router.post("/", response_model=schemas.MeetingOut, status_code=201)
 def create_meeting(payload: schemas.MeetingCreate, db: Session = Depends(get_db)):
     import uuid
+    from app.services.group_helper import ensure_group
+
     meeting_id = str(uuid.uuid4())
-    meeting = models.Meeting(meeting_id=meeting_id, **payload.model_dump())
+    data = payload.model_dump()
+
+    # Auto-create a Group for audio/web_series when group_name text is
+    # provided but no group_id was supplied.
+    if data.get("category") in ("audio", "web_series") and data.get("group_name") and not data.get("group_id"):
+        data["group_id"] = ensure_group(db, data["group_name"], group_type="show")
+
+    meeting = models.Meeting(meeting_id=meeting_id, **data)
     meeting.media_directory = str(MEDIA_DIR / meeting_id)
     db.add(meeting)
     db.commit()

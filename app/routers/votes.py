@@ -5,7 +5,7 @@ GET  /api/votes/{meeting_id}           All votes for a specific meeting
 GET  /api/votes/{meeting_id}/unmatched  Vote-like paragraphs the parser couldn't match
 GET  /api/votes/{meeting_id}/parse-status
                                         Whether minutes were parsed and how well
-GET  /api/votes?member=&outcome=&start=&end=&governing_body=
+GET  /api/votes?member=&outcome=&start=&end=&group_name=
                                         Filtered cross-meeting vote search
 POST /api/votes/backfill               Re-parse all meetings with partial/unrecognized status
 GET  /api/reference/brown-act/sections?q=
@@ -32,7 +32,7 @@ def _vote_row(v: models.MeetingVote, include_members: bool = True) -> dict:
         "meeting_id":        v.meeting_id,
         "document_id":       v.document_id,
         "meeting_date":      v.meeting_date,
-        "governing_body":    v.governing_body,
+        "group_name":    v.group_name,
         "agenda_section":    v.agenda_section,
         "item_description":  v.item_description,
         "resolution_number": v.resolution_number,
@@ -148,7 +148,7 @@ def search_votes(
     member:        Optional[str] = Query(None, description="Supervisor last name"),
     vote_value:    Optional[str] = Query(None, description="yes | no | abstain | absent"),
     outcome:       Optional[str] = Query(None, description="Unanimously Carried, Carried, Failed, etc."),
-    governing_body: Optional[str] = Query(None),
+    group_name: Optional[str] = Query(None),
     start_date:    Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date:      Optional[str] = Query(None, description="YYYY-MM-DD"),
     section:       Optional[str] = Query(None, description="Agenda section, e.g. Consent Calendar"),
@@ -175,8 +175,8 @@ def search_votes(
 
     if outcome:
         q = q.filter(models.MeetingVote.outcome.ilike(f"%{outcome}%"))
-    if governing_body:
-        q = q.filter(models.MeetingVote.governing_body.ilike(f"%{governing_body}%"))
+    if group_name:
+        q = q.filter(models.MeetingVote.group_name.ilike(f"%{group_name}%"))
     if start_date:
         q = q.filter(models.MeetingVote.meeting_date >= start_date)
     if end_date:

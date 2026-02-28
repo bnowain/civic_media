@@ -325,8 +325,8 @@ def rerun_unverified_segments(
         mtg = db.query(Meeting).filter_by(meeting_id=meeting_id).first()
         if mtg:
             effective_venue_id = mtg.venue_id or (
-                mtg.governing_body_ref.default_venue_id
-                if mtg.governing_body_ref else None
+                mtg.group_ref.default_venue_id
+                if mtg.group_ref else None
             )
 
     query = (

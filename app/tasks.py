@@ -305,7 +305,7 @@ def retag_content_task(content_type: str, content_id: str) -> dict:
             text = " ".join(s.text for s in segments if s.text)
             meeting = db.query(models.Meeting).filter_by(meeting_id=content_id).first()
             if meeting:
-                metadata = {"title": meeting.title, "governing_body": meeting.governing_body}
+                metadata = {"title": meeting.title, "group_name": meeting.group_name}
 
         elif content_type == "tv_news_segment":
             segment = db.query(models.TVNewsSegment).filter_by(segment_id=content_id).first()

@@ -100,8 +100,8 @@ def confirm_assignment(
     effective_venue_id = None
     if meeting:
         effective_venue_id = meeting.venue_id or (
-            meeting.governing_body_ref.default_venue_id
-            if meeting.governing_body_ref else None
+            meeting.group_ref.default_venue_id
+            if meeting.group_ref else None
         )
 
     if segment.embedding and seg_duration >= MIN_VOICEPRINT_DURATION and seg_overlap <= MAX_OVERLAP_FOR_VOICEPRINT:
@@ -289,8 +289,8 @@ def reprocess_segment(segment_id: str, db: Session = Depends(get_db)):
     effective_venue_id = None
     if mtg:
         effective_venue_id = mtg.venue_id or (
-            mtg.governing_body_ref.default_venue_id
-            if mtg.governing_body_ref else None
+            mtg.group_ref.default_venue_id
+            if mtg.group_ref else None
         )
 
     vp_service.run_voiceprint_matching(db, segment, venue_id=effective_venue_id)

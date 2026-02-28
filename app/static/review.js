@@ -78,7 +78,7 @@ async function loadMeeting() {
     }
     if (!r.ok) return;
     meeting = await r.json();
-    document.getElementById("hdr-governing-body").textContent = meeting.governing_body;
+    document.getElementById("hdr-group").textContent = meeting.group_name;
     document.getElementById("hdr-title").textContent = meeting.title;
     document.title = `${meeting.title} — Civic Media`;
 

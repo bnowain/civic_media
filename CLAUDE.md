@@ -8,6 +8,12 @@ civic_media is a local-first civic meeting transcription and speaker diarization
 
 **Stack**: FastAPI + SQLAlchemy (SQLite/WAL) | Celery (solo pool) + Redis | faster-whisper (large-v3) | pyannote.audio 3.1 | SpeechBrain ECAPA-TDNN | Vanilla JS frontend
 
+## UI Feature Backlog
+
+**`docs/ui-backlog.md`** — persistent list of requested UI changes. Read this at
+session start if the task touches any frontend page. Never delete an entry without
+user confirmation that it's working in the browser.
+
 ## Common Commands
 
 ```bash
@@ -183,6 +189,14 @@ ChromaDB is a cache — this spoke's SQLite DB is the source of truth.
 
 See: `Atlas/app/services/rag/deterministic_chunking.py` for this spoke's chunking strategy.
 
+## DB Field Naming Rule
+
+**HARD RULE — Field names must be globally unique and descriptive.**
+Before adding any new column, check `MASTER_SCHEMA.md` for existing field names. If your
+proposed name conflicts with or could be confused with an existing field in this or any other
+spoke (e.g., a bare `group` column when `group_name`/`group_id`/`group_type` already exist),
+stop and propose a more specific alternative. See root `CLAUDE.md §17` for the full rule.
+
 ## Master Schema & Codex References
 
 **`E:\0-Automated-Apps\MASTER_SCHEMA.md`** — Canonical cross-project database
@@ -190,6 +204,12 @@ schema and API contracts. **HARD RULE: If you add, remove, or modify any databas
 tables, columns, API endpoints, or response shapes, you MUST update the Master
 Schema before finishing your task.** Do not skip this — other projects read it to
 understand this project's data contracts.
+
+**`MASTER_SCHEMA.md` §11 — Canonical Query Patterns** — Ready-to-use SQL and REST
+examples for every common civic_media query (meetings by body type, transcript search,
+vote records, speaker attribution, etc.). **If you add a new queryable column or table,
+add a pattern to §11 in the same session.** If you are building an LLM tool that
+searches this project's data, start with §11 before writing any query.
 
 **`E:\0-Automated-Apps\MASTER_PROJECT.md`** describes the overall ecosystem
 architecture and how all projects interconnect.
@@ -224,3 +244,18 @@ architecture and how all projects interconnect.
 > Never add to a topic file without also updating INDEX.md.
 > See **`E:\0-Automated-Apps\MASTER_INDEX.md`** for fast navigation into both documents.
 > See **`E:\0-Automated-Apps\NEW_APP_INTAKE.md`** before starting any new application.
+
+---
+
+## Post-v1 TODO — Field Naming Improvements (LLM Inferability)
+
+**Do not implement during active development. Schedule after Mission Control v1 is complete.**
+
+These renames bring this project into full Rule 17 compliance (globally unique, descriptive field names).
+Each rename requires: additive migration (add new column, copy data, update queries, drop old column),
+MASTER_SCHEMA.md update, and a Changelog entry in master_codex.md.
+
+| Table | Current Field | Rename To | Reason |
+|-------|--------------|-----------|--------|
+| `tv_newscasts` | `status` | `newscast_status` | Bare `status` is ambiguous across ecosystem tables |
+| `processing_jobs` | `status` | `processing_job_status` | Bare `status` is ambiguous across ecosystem tables |

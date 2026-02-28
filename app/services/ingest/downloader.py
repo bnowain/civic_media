@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import MEDIA_DIR
+from app.services.group_helper import ensure_group
 from app.utils import generate_media_filename
 from .base import ScrapedEpisode
 
@@ -96,10 +97,17 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
     if episode.show_name and not title.lower().startswith(episode.show_name.lower()):
         title = f"{episode.show_name} — {title}"
 
+    # Ensure a Group record exists for the show
+    show_name = episode.show_name or ""
+    gb_id = None
+    if show_name:
+        gb_id = ensure_group(db, show_name, group_type="show")
+
     # Create Meeting record
     meeting = models.Meeting(
         meeting_id=meeting_id,
-        governing_body=episode.show_name or "",
+        group_name=show_name,
+        group_id=gb_id,
         meeting_type="",
         meeting_date=episode.episode_date,
         title=title,

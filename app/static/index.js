@@ -8,11 +8,13 @@
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-let activeMode = "meetings";          // "meetings" | "audio" | "news"
-let governingBodyId = null;           // null = all
+let activeMode = "meetings";          // "meetings" | "audio" | "news" | "web_series"
+let groupId = null;           // null = all
 let recentSort = "processed";         // "processed" | "event"
+let gridSort = "date";                // "date" | "group"
+let selectedShow = null;              // for audio/web_series sidebar filter
 let selectedCategory = "meeting";     // dialog category
-let governingBodies = [];             // cached list
+let groups = [];             // cached list
 let editMeetingId = null;             // meeting being edited
 
 const activePollers = {};
@@ -26,8 +28,9 @@ async function init() {
   // Parse URL state
   const params = new URLSearchParams(window.location.search);
   if (params.get("tab")) activeMode = params.get("tab");
-  if (params.get("gb")) governingBodyId = params.get("gb");
+  if (params.get("gb")) groupId = params.get("gb");
   if (params.get("sort")) recentSort = params.get("sort");
+  if (params.get("gsort")) gridSort = params.get("gsort");
 
   // Set active tab
   document.querySelectorAll(".lib-tab").forEach(t => {
@@ -46,8 +49,11 @@ async function init() {
     if (el) el.value = today;
   });
 
-  // Load data
-  await Promise.all([loadGoverningBodies(), loadRecent(), loadContent()]);
+  // Sidebar labels depend on initial activeMode
+  updateSidebarLabels();
+
+  // Load data — sidebar is type-filtered per tab
+  await Promise.all([loadGroups(), loadSidebarForTab(), loadRecent(), loadContent()]);
 
   // Event listeners — New Item dialog
   document.getElementById("new-item-btn").addEventListener("click", openDialog);
@@ -58,7 +64,7 @@ async function init() {
   document.getElementById("f-title").addEventListener("keydown", e => {
     if (e.key === "Enter") handleCreate();
   });
-  document.getElementById("add-gb-btn").addEventListener("click", handleAddGoverningBody);
+  document.getElementById("add-group-btn").addEventListener("click", handleAddGroup);
 
   // Edit dialog
   document.getElementById("close-edit-btn").addEventListener("click", closeAllDialogs);
@@ -80,6 +86,7 @@ async function init() {
     const tab = e.target.closest(".lib-tab");
     if (!tab) return;
     activeMode = tab.dataset.mode;
+    selectedShow = null;
     document.querySelectorAll(".lib-tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
 
@@ -94,6 +101,8 @@ async function init() {
       gbSection.style.display = "";
     }
 
+    updateSidebarLabels();
+    loadSidebarForTab();
     updateToolbar();
     updateURL();
     loadContent();
@@ -128,6 +137,22 @@ async function init() {
   pollWorkerHealth();
   setInterval(pollWorkerHealth, 10000);
 
+  // Sidebar gb-list click — unified handler for meetings (governing body) and audio/web shows (show name)
+  document.getElementById("gb-list").addEventListener("click", e => {
+    const item = e.target.closest(".gb-item");
+    if (!item) return;
+    document.querySelectorAll("#gb-list .gb-item").forEach(i => i.classList.remove("active"));
+    item.classList.add("active");
+    if (activeMode === "meetings") {
+      groupId = item.dataset.gbId || null;
+      updateURL();
+      loadContent();
+    } else {
+      selectedShow = item.dataset.show || null;
+      loadContent();
+    }
+  });
+
   // Close sidebar on mobile when clicking sidebar items
   document.getElementById("sidebar").addEventListener("click", function(e) {
     if (e.target.closest(".gb-item") || e.target.closest(".recent-item") || e.target.closest(".station-list a")) {
@@ -158,10 +183,23 @@ async function handleShutdown() {
 function updateURL() {
   const params = new URLSearchParams();
   if (activeMode !== "meetings") params.set("tab", activeMode);
-  if (governingBodyId) params.set("gb", governingBodyId);
+  if (groupId) params.set("gb", groupId);
   if (recentSort !== "processed") params.set("sort", recentSort);
+  if (gridSort !== "date") params.set("gsort", gridSort);
   const qs = params.toString();
   history.pushState(null, "", qs ? `/?${qs}` : "/");
+}
+
+function updateSidebarLabels() {
+  const label = document.getElementById("gb-section-label");
+  if (!label) return;
+  const labels = {
+    meetings:   "Governing Bodies",
+    audio:      "Shows",
+    web_series: "Shows",
+    news:       "Governing Bodies",
+  };
+  label.textContent = labels[activeMode] || "Governing Bodies";
 }
 
 // ── Toolbar ──────────────────────────────────────────────────────────────────
@@ -170,27 +208,88 @@ function updateToolbar() {
   const actions = document.getElementById("toolbar-actions");
   if (!actions) return;
 
+  // Action button (left side)
+  let actionHtml = "";
   if (activeMode === "meetings") {
-    actions.innerHTML = `<button class="btn btn-amber btn-sm" id="primegov-btn">Discover BOS</button>`;
+    actionHtml = `<button class="btn btn-amber btn-sm" id="primegov-btn">Discover BOS</button>`;
+  } else if (activeMode === "audio") {
+    actionHtml = `<button class="btn btn-amber btn-sm" id="ingest-btn">Ingest Radio Shows</button>`;
+  }
+
+  // Sort toggle (right side) — label changes per tab
+  const groupLabels = {
+    meetings:   "By Org",
+    audio:      "By Show",
+    news:       "By Program",
+    web_series: "By Show",
+  };
+  const groupLabel = groupLabels[activeMode] || "By Group";
+  const sortHtml = `
+    <div class="grid-sort-toggle" id="grid-sort-toggle">
+      <button class="toggle-btn${gridSort === "date" ? " active" : ""}" data-gsort="date">Date ↓</button>
+      <button class="toggle-btn${gridSort === "group" ? " active" : ""}" data-gsort="group">${groupLabel}</button>
+    </div>`;
+
+  actions.innerHTML = actionHtml + sortHtml;
+
+  if (activeMode === "meetings") {
     document.getElementById("primegov-btn").addEventListener("click", openPrimeGovDialog);
   } else if (activeMode === "audio") {
-    actions.innerHTML = `<button class="btn btn-amber btn-sm" id="ingest-btn">Ingest Radio Shows</button>`;
     document.getElementById("ingest-btn").addEventListener("click", openIngestDialog);
-  } else {
-    actions.innerHTML = "";
   }
+
+  document.getElementById("grid-sort-toggle").addEventListener("click", e => {
+    const btn = e.target.closest(".toggle-btn");
+    if (!btn || !btn.dataset.gsort) return;
+    gridSort = btn.dataset.gsort;
+    document.querySelectorAll("#grid-sort-toggle .toggle-btn").forEach(b =>
+      b.classList.toggle("active", b.dataset.gsort === gridSort));
+    updateURL();
+    loadContent();
+  });
 }
 
 // ── API ──────────────────────────────────────────────────────────────────────
 
-async function loadGoverningBodies() {
+async function loadGroups() {
   try {
-    const r = await fetch("/api/governing-bodies/");
+    const r = await fetch("/api/groups/");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    governingBodies = await r.json();
-    renderGoverningBodies();
+    groups = await r.json();
+    renderGroups();
   } catch (err) {
     console.error("Failed to load governing bodies:", err);
+  }
+}
+
+async function loadSidebarForTab() {
+  const list = document.getElementById("gb-list");
+  const type = (activeMode === "audio" || activeMode === "web_series") ? "show" : "government";
+  try {
+    const r = await fetch(`/api/groups/?group_type=${type}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const bodies = await r.json();
+    if (activeMode === "audio" || activeMode === "web_series") {
+      list.innerHTML = `<div class="gb-item${!selectedShow ? " active" : ""}" data-show="">All</div>`;
+      bodies.forEach(gb => {
+        const el = document.createElement("div");
+        el.className = "gb-item" + (selectedShow === gb.name ? " active" : "");
+        el.dataset.show = gb.name;
+        el.textContent = gb.display_name || gb.name;
+        list.appendChild(el);
+      });
+    } else {
+      list.innerHTML = `<div class="gb-item${!groupId ? " active" : ""}" data-gb-id="">All</div>`;
+      bodies.forEach(gb => {
+        const el = document.createElement("div");
+        el.className = "gb-item" + (groupId === gb.group_id ? " active" : "");
+        el.dataset.gbId = gb.group_id;
+        el.textContent = gb.display_name || gb.name;
+        list.appendChild(el);
+      });
+    }
+  } catch (err) {
+    console.error("Failed to load sidebar for tab:", err);
   }
 }
 
@@ -229,32 +328,91 @@ async function loadContent() {
   }
 }
 
+// Group items by a key function and render with section headers
+function renderGrouped(items, grid, keyFn, noKeyLabel = "Other") {
+  const sorted = [...items].sort((a, b) => {
+    const ka = keyFn(a) || noKeyLabel;
+    const kb = keyFn(b) || noKeyLabel;
+    if (ka < kb) return -1;
+    if (ka > kb) return 1;
+    return (b.meeting_date || "0000") < (a.meeting_date || "0000") ? -1 : 1;
+  });
+
+  const groups = new Map();
+  for (const item of sorted) {
+    const key = keyFn(item) || noKeyLabel;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  for (const [key, groupItems] of groups) {
+    const header = document.createElement("div");
+    header.className = "grid-group-header";
+    header.textContent = key;
+    grid.appendChild(header);
+    groupItems.forEach(item => {
+      const card = createMeetingCard(item);
+      grid.appendChild(card);
+    });
+  }
+}
+
+// Populate the sidebar with unique show names derived from fetched items (audio/web_series tabs)
+function updateShowSidebar(allItems) {
+  const list = document.getElementById("gb-list");
+  const shows = [...new Set(allItems.map(i => i.group_name).filter(Boolean))].sort();
+  list.innerHTML = `<div class="gb-item${!selectedShow ? " active" : ""}" data-show="">All</div>`;
+  shows.forEach(show => {
+    const el = document.createElement("div");
+    el.className = "gb-item" + (selectedShow === show ? " active" : "");
+    el.dataset.show = show;
+    el.textContent = show;
+    list.appendChild(el);
+  });
+}
+
 async function loadMeetingContent(grid) {
-  const category = activeMode === "audio" ? "audio" : "meeting";
+  const categoryMap = { meetings: "meeting", audio: "audio", web_series: "web_series" };
+  const category = categoryMap[activeMode] || "meeting";
   let url = `/api/meetings/?category=${category}`;
-  if (governingBodyId) url += `&governing_body_id=${governingBodyId}`;
+  // Meetings tab uses server-side governing body filter; audio/web_series filter client-side by show
+  if (activeMode === "meetings" && groupId) url += `&group_id=${groupId}`;
 
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const items = await r.json();
+  let items = await r.json();
 
-  const label = activeMode === "audio" ? "item" : "meeting";
+  // For audio/web shows: filter by selected show name
+  if (activeMode === "audio" || activeMode === "web_series") {
+    if (selectedShow) items = items.filter(i => i.group_name === selectedShow);
+  }
+
+  const labelMap = { meetings: "meeting", audio: "item", web_series: "video" };
+  const label = labelMap[activeMode] || "item";
   document.getElementById("item-count").textContent =
     `${items.length} ${label}${items.length !== 1 ? "s" : ""}`;
 
   if (items.length === 0) {
-    const msg = activeMode === "audio"
-      ? "No audio transcriptions yet."
-      : "No meetings yet. Create your first meeting to get started.";
-    grid.innerHTML = `<div class="empty-state">${msg}</div>`;
+    const emptyMap = {
+      meetings:   "No meetings yet. Create your first meeting to get started.",
+      audio:      "No audio transcriptions yet.",
+      web_series: "No web show videos yet.",
+    };
+    grid.innerHTML = `<div class="empty-state">${emptyMap[activeMode] || "Nothing here yet."}</div>`;
     return;
   }
 
   grid.innerHTML = "";
-  items.forEach(m => {
-    const card = createMeetingCard(m);
-    grid.appendChild(card);
-  });
+
+  if (gridSort === "group") {
+    renderGrouped(items, grid, m => m.group_name || null,
+      activeMode === "meetings" ? "No Org" : "No Show");
+  } else {
+    items.forEach(m => {
+      const card = createMeetingCard(m);
+      grid.appendChild(card);
+    });
+  }
 
   // Kick off status checks
   items.forEach(m => updateMeetingCardStatus(m.meeting_id));
@@ -290,16 +448,16 @@ async function getMeetingStatus(meetingId) {
 
 // ── Render: Sidebar ──────────────────────────────────────────────────────────
 
-function renderGoverningBodies() {
+function renderGroups() {
   const list = document.getElementById("gb-list");
   list.innerHTML = '<div class="gb-item active" data-gb-id="">All</div>';
 
-  governingBodies.forEach(gb => {
+  groups.forEach(gb => {
     const el = document.createElement("div");
     el.className = "gb-item";
-    el.dataset.gbId = gb.governing_body_id;
+    el.dataset.gbId = gb.group_id;
     el.textContent = gb.display_name || gb.name;
-    if (governingBodyId === gb.governing_body_id) {
+    if (groupId === gb.group_id) {
       el.classList.add("active");
       list.querySelector('[data-gb-id=""]').classList.remove("active");
     }
@@ -307,26 +465,17 @@ function renderGoverningBodies() {
   });
 
   // Also populate the dialog dropdown
-  const select = document.getElementById("f-governing-body");
+  const select = document.getElementById("f-group");
   select.innerHTML = '<option value="">Select...</option>';
-  governingBodies.forEach(gb => {
+  groups.forEach(gb => {
     const opt = document.createElement("option");
-    opt.value = gb.governing_body_id;
+    opt.value = gb.group_id;
     opt.textContent = gb.display_name || gb.name;
     select.appendChild(opt);
   });
 
-  // Click handler for sidebar filtering
-  list.addEventListener("click", e => {
-    const item = e.target.closest(".gb-item");
-    if (!item) return;
-    governingBodyId = item.dataset.gbId || null;
-    list.querySelectorAll(".gb-item").forEach(i => i.classList.remove("active"));
-    item.classList.add("active");
-    updateURL();
-    loadContent();
-  });
 }
+
 
 function renderRecent(items) {
   const list = document.getElementById("recent-list");
@@ -376,8 +525,8 @@ function createMeetingCard(m) {
   const isAudio = m.category === "audio";
 
   const subLine = isAudio
-    ? (m.governing_body ? esc(m.governing_body) : "Audio Transcription")
-    : `${esc(m.governing_body)} \u00b7 ${esc(m.meeting_type)}`;
+    ? (m.group_name ? esc(m.group_name) : "Audio Transcription")
+    : `${esc(m.group_name)} \u00b7 ${esc(m.meeting_type)}`;
 
   const descLine = m.description
     ? `<div class="meeting-card-desc">${esc(m.description)}</div>` : "";
@@ -896,23 +1045,38 @@ function closeAllDialogs() {
 }
 
 function updateDialogFields() {
-  const isMeeting = selectedCategory === "meeting";
-  const isAudio = selectedCategory === "audio";
-  const isNews = selectedCategory === "news";
+  const isMeeting   = selectedCategory === "meeting";
+  const isAudio     = selectedCategory === "audio";
+  const isNews      = selectedCategory === "news";
+  const isWebSeries = selectedCategory === "web_series";
 
-  document.getElementById("meeting-fields").style.display = isMeeting ? "" : "none";
+  document.getElementById("meeting-fields").style.display = (isMeeting || isWebSeries) ? "" : "none";
+  // For web_series: show governing body + date but hide meeting type row
+  if (isWebSeries) {
+    const mtRow = document.getElementById("f-meeting-type");
+    if (mtRow) mtRow.closest(".form-row").style.display = "none";
+  } else if (isMeeting) {
+    const mtRow = document.getElementById("f-meeting-type");
+    if (mtRow) mtRow.closest(".form-row").style.display = "";
+  }
   document.getElementById("audio-fields").style.display = isAudio ? "" : "none";
   document.getElementById("news-fields").style.display = isNews ? "" : "none";
 
-  const titles = { meeting: "New Meeting", audio: "New Audio Transcription", news: "New Newscast" };
-  document.getElementById("dialog-title").textContent = titles[selectedCategory];
+  const titles = {
+    meeting:    "New Meeting",
+    audio:      "New Audio Transcription",
+    news:       "New Newscast",
+    web_series: "New Web Show Video",
+  };
+  document.getElementById("dialog-title").textContent = titles[selectedCategory] || "New Item";
 
   const placeholders = {
-    meeting: "e.g. January Regular Meeting",
-    audio: "e.g. KQED Forum - Feb 19",
-    news: "e.g. KRCR Evening News",
+    meeting:    "e.g. January Regular Meeting",
+    audio:      "e.g. KQED Forum - Feb 19",
+    news:       "e.g. KRCR Evening News",
+    web_series: "e.g. Episode 42 — Special Coverage",
   };
-  document.getElementById("f-title").placeholder = placeholders[selectedCategory];
+  document.getElementById("f-title").placeholder = placeholders[selectedCategory] || "Title";
 }
 
 async function handleCreate() {
@@ -944,22 +1108,23 @@ async function handleCreate() {
 }
 
 async function createMeeting(title) {
-  const isMeeting = selectedCategory === "meeting";
-  const date = isMeeting
+  const isMeeting   = selectedCategory === "meeting";
+  const isWebSeries = selectedCategory === "web_series";
+  const date = (isMeeting || isWebSeries)
     ? document.getElementById("f-meeting-date").value
     : document.getElementById("f-audio-date").value;
 
   if (!date) throw new Error("Please select a date.");
 
-  const gbId = isMeeting ? document.getElementById("f-governing-body").value : "";
-  const gb = governingBodies.find(g => g.governing_body_id === gbId);
+  const gbId = (isMeeting || isWebSeries) ? document.getElementById("f-group").value : "";
+  const gb = groups.find(g => g.group_id === gbId);
 
   const payload = {
     title,
     meeting_date: date,
     category: selectedCategory,
-    governing_body: gb ? gb.name : "",
-    governing_body_id: gbId || null,
+    group_name: gb ? gb.name : "",
+    group_id: gbId || null,
     meeting_type: isMeeting ? document.getElementById("f-meeting-type").value : "",
   };
 
@@ -994,29 +1159,31 @@ async function createNewscast(title) {
   window.location.href = `/news/${newscast.newscast_id}`;
 }
 
-async function handleAddGoverningBody() {
-  const input = document.getElementById("f-new-gb");
+async function handleAddGroup() {
+  const input = document.getElementById("f-new-group");
   const name = input.value.trim();
   if (!name) return;
 
+  const bodyType = (selectedCategory === "audio" || selectedCategory === "web_series") ? "show" : "government";
+
   try {
-    const r = await fetch("/api/governing-bodies/", {
+    const r = await fetch("/api/groups/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, display_name: name }),
+      body: JSON.stringify({ name, display_name: name, group_type: bodyType }),
     });
     if (r.status === 409) {
-      alert("That governing body already exists.");
+      alert("That group already exists.");
       return;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
     input.value = "";
-    await loadGoverningBodies();
+    await loadGroups();
 
-    const select = document.getElementById("f-governing-body");
-    const newGb = governingBodies.find(g => g.name === name);
-    if (newGb) select.value = newGb.governing_body_id;
+    const select = document.getElementById("f-group");
+    const newGb = groups.find(g => g.name === name);
+    if (newGb) select.value = newGb.group_id;
   } catch (err) {
     alert(`Failed to add: ${err.message}`);
   }

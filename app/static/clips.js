@@ -45,7 +45,7 @@ async function loadSourceInfo() {
           if (!m) return;
           const date = m.meeting_date ? formatDate(m.meeting_date) : "";
           sourceCache[id] = {
-            label: m.governing_body || m.title || "Meeting",
+            label: m.group_name || m.title || "Meeting",
             date,
           };
         })

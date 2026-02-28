@@ -153,7 +153,7 @@ def get_person_appearances(
         schemas.PersonAppearance(
             meeting_id=meeting.meeting_id,
             title=meeting.title,
-            governing_body=meeting.governing_body,
+            group_name=meeting.group_name,
             meeting_type=meeting.meeting_type,
             meeting_date=meeting.meeting_date,
             category=meeting.category,

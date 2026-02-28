@@ -16,7 +16,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.config import MEDIA_DIR
-from app.models import Meeting, GoverningBody
+from app.models import Meeting, Group
+from app.services.group_helper import ensure_group
 from app.services.primegov.scraper import PrimeGovScraper, PrimeGovMeeting, COMMITTEES
 
 logger = logging.getLogger(__name__)
@@ -44,17 +45,9 @@ def _write_progress(
         logger.warning("Could not write primegov progress: %s", exc)
 
 
-def _ensure_governing_body(db: Session, committee_name: str) -> Optional[str]:
-    """Get or create a GoverningBody for the committee. Returns its ID."""
-    existing = db.query(GoverningBody).filter_by(name=committee_name).first()
-    if existing:
-        return existing.governing_body_id
-
-    gb = GoverningBody(name=committee_name, display_name=committee_name)
-    db.add(gb)
-    db.flush()
-    logger.info("Created governing body: %s", committee_name)
-    return gb.governing_body_id
+def _ensure_group(db: Session, committee_name: str) -> Optional[str]:
+    """Get or create a Group for the committee. Returns its group_id."""
+    return ensure_group(db, committee_name, group_type="government")
 
 
 def run_discovery(
@@ -89,7 +82,7 @@ def run_discovery(
         existing_ids[m.primegov_id] = m
 
     # Cache governing body lookups
-    gb_cache: dict[str, str] = {}  # committee_name -> governing_body_id
+    group_cache: dict[str, str] = {}  # committee_name -> group_id
 
     created = 0
     updated = 0
@@ -128,18 +121,18 @@ def run_discovery(
                 skipped += 1
         else:
             # Create new Meeting record
-            if pm.committee_name not in gb_cache:
-                gb_cache[pm.committee_name] = _ensure_governing_body(
+            if pm.committee_name not in group_cache:
+                group_cache[pm.committee_name] = _ensure_group(
                     db, pm.committee_name
                 )
 
             meeting = Meeting(
-                governing_body=pm.committee_name,
+                group_name=pm.committee_name,
                 meeting_type="Regular",
                 meeting_date=pm.meeting_date_iso,
                 title=pm.title,
                 category="meeting",
-                governing_body_id=gb_cache[pm.committee_name],
+                group_id=group_cache[pm.committee_name],
                 primegov_id=pm.primegov_id,
                 video_url=pm.video_url,
                 agenda_url=pm.agenda_url,

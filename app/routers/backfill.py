@@ -316,7 +316,7 @@ def backfill_queue(
         items.append({
             "meeting_id": meeting.meeting_id,
             "meeting_date": meeting.meeting_date,
-            "governing_body": meeting.governing_body,
+            "group_name": meeting.group_name,
             "title": meeting.title,
             "category": meeting.category or "meeting",
             "media_id": media.media_id if media else None,
@@ -362,7 +362,7 @@ def backfill_active(db: Session = Depends(get_db)):
             "detail": job.detail or "",
             "updated_at": job.updated_at.isoformat() if job.updated_at else None,
             "title": meeting.title if meeting else job.meeting_id,
-            "governing_body": meeting.governing_body if meeting else "",
+            "group_name": meeting.group_name if meeting else "",
         }
     }
 
@@ -572,7 +572,7 @@ def _build_init_state(db: Session) -> dict:
             "pct": job.pct or 0,
             "detail": job.detail or "",
             "title": meeting.title if meeting else job.meeting_id,
-            "governing_body": meeting.governing_body if meeting else "",
+            "group_name": meeting.group_name if meeting else "",
         }
 
     return {
@@ -590,14 +590,14 @@ def _build_init_state(db: Session) -> dict:
 
 @router.post("/next-download")
 def backfill_next_download(
-    governing_body: str | None = None,
+    group_name: str | None = None,
     category: str | None = None,
     db: Session = Depends(get_db),
 ):
     """
     Auto-reset stuck meetings, then queue one primegov_download_task for the
     oldest meeting that has a video_url but no downloaded MediaFile.
-    Skipped meetings are excluded. Optional governing_body/category filters
+    Skipped meetings are excluded. Optional group_name/category filters
     let the UI scope "Download All" to a specific show or content type.
     """
     from app import models
@@ -619,8 +619,8 @@ def backfill_next_download(
     )
     if category:
         candidates_query = candidates_query.filter(models.Meeting.category == category)
-    if governing_body:
-        candidates_query = candidates_query.filter(models.Meeting.governing_body == governing_body)
+    if group_name:
+        candidates_query = candidates_query.filter(models.Meeting.group_name == group_name)
     candidates = candidates_query.order_by(models.Meeting.meeting_date).all()
 
     for meeting in candidates:
@@ -698,7 +698,7 @@ def backfill_next_transcode(db: Session = Depends(get_db)):
 
 @router.post("/next-process")
 def backfill_next_process(
-    governing_body: str | None = None,
+    group_name: str | None = None,
     category: str | None = None,
     db: Session = Depends(get_db),
 ):
@@ -708,7 +708,7 @@ def backfill_next_process(
 
     Skips: meetings in the skip set, videos still needing transcode,
            meetings whose file no longer exists on disk.
-    Optional governing_body/category filters let the UI scope "Process All"
+    Optional group_name/category filters let the UI scope "Process All"
     to a specific show or content type.
     """
     from app import models
@@ -728,8 +728,8 @@ def backfill_next_process(
     )
     if category:
         candidates_query = candidates_query.filter(models.Meeting.category == category)
-    if governing_body:
-        candidates_query = candidates_query.filter(models.Meeting.governing_body == governing_body)
+    if group_name:
+        candidates_query = candidates_query.filter(models.Meeting.group_name == group_name)
     candidates = candidates_query.order_by(models.Meeting.meeting_date).all()
 
     if candidates:

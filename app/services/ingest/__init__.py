@@ -143,17 +143,17 @@ def run_ingest(db: Session, source_id: str | None = None):
             )
             existing_urls = {r[0] for r in rows}
 
-        # Cross-source dedup: also check by date + show_name (governing_body)
+        # Cross-source dedup: also check by date + show_name (group_name)
         # so the same episode from SecureNet and Podbean doesn't create duplicates
         existing_date_show: set[tuple[str, str]] = set()
         if audio_episodes:
             show_names = {ep.show_name for ep in audio_episodes if ep.show_name}
             if show_names:
                 rows = (
-                    db.query(models.Meeting.meeting_date, models.Meeting.governing_body)
+                    db.query(models.Meeting.meeting_date, models.Meeting.group_name)
                     .filter(
                         models.Meeting.category == "audio",
-                        models.Meeting.governing_body.in_(show_names),
+                        models.Meeting.group_name.in_(show_names),
                     )
                     .all()
                 )

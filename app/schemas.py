@@ -28,17 +28,19 @@ class VenueOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── Governing Bodies ─────────────────────────────────────────────────────────
+# ── Groups ───────────────────────────────────────────────────────────────────
 
-class GoverningBodyCreate(BaseModel):
+class GroupCreate(BaseModel):
     name: str
     display_name: Optional[str] = None
+    group_type: Optional[str] = None
 
 
-class GoverningBodyOut(BaseModel):
-    governing_body_id: str
+class GroupOut(BaseModel):
+    group_id: str
     name: str
     display_name: Optional[str]
+    group_type: Optional[str] = None
     default_venue_id: Optional[str] = None
     created_at: datetime
 
@@ -48,12 +50,12 @@ class GoverningBodyOut(BaseModel):
 # ── Meetings ─────────────────────────────────────────────────────────────────
 
 class MeetingCreate(BaseModel):
-    governing_body: str = ""
+    group_name: str = ""
     meeting_type: str = ""
     meeting_date: str   # YYYY-MM-DD
     title: str
     category: str = "meeting"
-    governing_body_id: Optional[str] = None
+    group_id: Optional[str] = None
     description: Optional[str] = None
     source_url: Optional[str] = None
     page_url: Optional[str] = None
@@ -78,7 +80,7 @@ class MeetingUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     meeting_date: Optional[str] = None
-    governing_body: Optional[str] = None
+    group_name: Optional[str] = None
     meeting_type: Optional[str] = None
     venue_id: Optional[str] = None
     summary_short: Optional[str] = None
@@ -146,7 +148,7 @@ class DocumentOut(BaseModel):
 class PersonAppearance(BaseModel):
     meeting_id: str
     title: Optional[str]
-    governing_body: Optional[str]
+    group_name: Optional[str]
     meeting_type: Optional[str]
     meeting_date: Optional[str]
     category: str

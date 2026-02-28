@@ -27,7 +27,7 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
-    assignments, backfill, clips, documents, governing_bodies, ingest, library,
+    assignments, backfill, clips, documents, groups, ingest, library,
     media, meetings, mentions, news, people, primegov, segments, system, tags,
     tagging, transcribe, venues, votes,
 )
@@ -37,6 +37,71 @@ models.Base.metadata.create_all(bind=engine)
 
 # Auto-fix any nullable columns that exist in ORM models but not in the DB
 validate_schema_columns(models.Base)
+
+# One-time startup backfill: set group_type on any Group rows that have NULL
+# group_type (legacy rows), and link any meetings that have group_name text
+# but no group_id FK (shouldn't exist post-migration, but defensive).
+def _backfill_group_types() -> None:
+    from app.database import SessionLocal as _SL
+    from app.models import Group as _G, Meeting as _M
+    _db = _SL()
+    try:
+        # 1. Tag government groups: any Group referenced by a category='meeting' meeting
+        govt_ids = {
+            row[0] for row in
+            _db.query(_M.group_id)
+            .filter(_M.category == "meeting", _M.group_id.isnot(None))
+            .all()
+        }
+        if govt_ids:
+            _db.query(_G).filter(
+                _G.group_id.in_(govt_ids),
+                _G.group_type.is_(None),
+            ).update({"group_type": "government"}, synchronize_session=False)
+
+        # 2. Tag show groups: any Group referenced by audio/web_series meetings
+        show_ids = {
+            row[0] for row in
+            _db.query(_M.group_id)
+            .filter(_M.category.in_(["audio", "web_series"]), _M.group_id.isnot(None))
+            .all()
+        }
+        if show_ids:
+            _db.query(_G).filter(
+                _G.group_id.in_(show_ids),
+                _G.group_type.is_(None),
+            ).update({"group_type": "show"}, synchronize_session=False)
+
+        # 3. Orphaned meetings with group_name text but no group_id FK
+        from app.services.group_helper import ensure_group as _eg
+        orphans = (
+            _db.query(_M)
+            .filter(
+                _M.category.in_(["audio", "web_series"]),
+                _M.group_id.is_(None),
+                _M.group_name != "",
+                _M.group_name.isnot(None),
+            )
+            .all()
+        )
+        for m in orphans:
+            m.group_id = _eg(_db, m.group_name, group_type="show")
+
+        _db.commit()
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "group_type backfill: %d govt, %d show groups tagged; %d orphan meetings linked",
+            len(govt_ids), len(show_ids), len(orphans),
+        )
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("group_type backfill failed", exc_info=True)
+        _db.rollback()
+    finally:
+        _db.close()
+
+
+_backfill_group_types()
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +196,7 @@ app.include_router(segments.router)
 app.include_router(people.router)
 app.include_router(assignments.router)
 app.include_router(transcribe.router)
-app.include_router(governing_bodies.router)
+app.include_router(groups.router)
 app.include_router(library.router)
 app.include_router(news.router)
 app.include_router(clips.router)

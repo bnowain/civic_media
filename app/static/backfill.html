@@ -558,7 +558,7 @@ const S = {
   currentId:      null,
   es:             null,    // EventSource instance
   filterCategory: null,  // null | 'meeting' | 'audio'
-  filterBody:     null,  // null | string (governing_body)
+  filterBody:     null,  // null | string (group_name)
   groups:         null,  // { gov: {body: count}, shows: {body: {count, file_type}} }
 };
 
@@ -677,7 +677,7 @@ function computeGroups(meetings) {
   const gov = {}, shows = {};
   for (const m of meetings) {
     const cat  = m.category || 'meeting';
-    const body = m.governing_body || 'Unknown';
+    const body = m.group_name || 'Unknown';
     if (cat === 'meeting') {
       gov[body] = (gov[body] || 0) + 1;
     } else {
@@ -760,10 +760,10 @@ function applyFilters() {
   S.filtered = S.meetings.filter(m => {
     const cat = m.category || 'meeting';
     if (S.filterCategory && cat !== S.filterCategory) return false;
-    if (S.filterBody && m.governing_body !== S.filterBody) return false;
+    if (S.filterBody && m.group_name !== S.filterBody) return false;
     if (q) {
       return m.title.toLowerCase().includes(q) ||
-             (m.governing_body || '').toLowerCase().includes(q) ||
+             (m.group_name || '').toLowerCase().includes(q) ||
              (m.meeting_date || '').includes(q);
     }
     return true;
@@ -815,7 +815,7 @@ function renderTable() {
     return `<tr class="${rowClass}" data-id="${m.meeting_id}">
       <td class="td-check"><input type="checkbox" ${chk} onchange="toggleCheck('${m.meeting_id}', this.checked)"></td>
       <td class="td-date">${m.meeting_date}</td>
-      <td class="td-body" title="${esc(m.governing_body)}">${tbadge}${esc(m.governing_body)}</td>
+      <td class="td-body" title="${esc(m.group_name)}">${tbadge}${esc(m.group_name)}</td>
       <td class="td-title" title="${esc(m.title)}">${esc(m.title)}</td>
       <td>${badge}</td>
       <td class="td-actions">${skipBtn} ${processBtn}</td>
@@ -889,7 +889,7 @@ function updateSelectedBtn() {
 function filterParams() {
   const p = new URLSearchParams();
   if (S.filterCategory) p.set('category', S.filterCategory);
-  if (S.filterBody)     p.set('governing_body', S.filterBody);
+  if (S.filterBody)     p.set('group_name', S.filterBody);
   const s = p.toString();
   return s ? '?' + s : '';
 }

@@ -319,8 +319,8 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     effective_venue_id = None
     if meeting_obj:
         effective_venue_id = meeting_obj.venue_id or (
-            meeting_obj.governing_body_ref.default_venue_id
-            if meeting_obj.governing_body_ref else None
+            meeting_obj.group_ref.default_venue_id
+            if meeting_obj.group_ref else None
         )
 
     for i, (seg_data, emb_array) in enumerate(zip(aligned_segments, all_embeddings)):

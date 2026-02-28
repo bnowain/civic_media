@@ -243,8 +243,8 @@ def generate_transcript_pdf(segments: list, meeting) -> bytes:
         meta_parts = []
         if meeting.meeting_date:
             meta_parts.append(str(meeting.meeting_date))
-        if hasattr(meeting, "governing_body") and meeting.governing_body:
-            meta_parts.append(meeting.governing_body)
+        if hasattr(meeting, "group_name") and meeting.group_name:
+            meta_parts.append(meeting.group_name)
         if meta_parts:
             story.append(Paragraph(_esc(" — ".join(meta_parts)), _STYLE_META))
 

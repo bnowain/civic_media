@@ -9,7 +9,7 @@ Currently implemented:
 
 Adding a new format:
   1. Write a function `parse_<body>(text, ...) -> ParseResult`
-  2. Register it in PARSER_REGISTRY keyed by a governing_body string or alias
+  2. Register it in PARSER_REGISTRY keyed by a group_name string or alias
   3. The dispatch in `parse_minutes()` selects it automatically
 
 Graceful degradation:
@@ -42,7 +42,7 @@ class ParsedVote:
     meeting_id:        str = ""
     document_id:       Optional[str] = None
     meeting_date:      Optional[str] = None
-    governing_body:    Optional[str] = None
+    group_name:    Optional[str] = None
     agenda_section:    Optional[str] = None
     item_description:  str = ""
     resolution_number: Optional[str] = None
@@ -187,7 +187,7 @@ def _parse_shasta_bos(
     meeting_id: str,
     document_id: Optional[str],
     meeting_date: Optional[str],
-    governing_body: Optional[str],
+    group_name: Optional[str],
 ) -> ParseResult:
     members_present = [m.group(1) for m in _MEMBER_HEADER.finditer(ocr_text)]
     normalised = _normalise(ocr_text)
@@ -206,7 +206,7 @@ def _parse_shasta_bos(
         if m:
             v = ParsedVote(
                 meeting_id=meeting_id, document_id=document_id,
-                meeting_date=meeting_date, governing_body=governing_body,
+                meeting_date=meeting_date, group_name=group_name,
                 agenda_section=section,
                 item_description=_truncate(m.group(3)),
                 resolution_number=_extract_resolution(para),
@@ -222,7 +222,7 @@ def _parse_shasta_bos(
                 yes_list = [n for n in members_present if n.lower() != no_name.lower()]
                 v = ParsedVote(
                     meeting_id=meeting_id, document_id=document_id,
-                    meeting_date=meeting_date, governing_body=governing_body,
+                    meeting_date=meeting_date, group_name=group_name,
                     agenda_section=section,
                     item_description=_truncate(m.group(5)),
                     resolution_number=_extract_resolution(para),
@@ -239,7 +239,7 @@ def _parse_shasta_bos(
                 yes_list = [n for n in members_present if n.lower() not in no_lower]
                 v = ParsedVote(
                     meeting_id=meeting_id, document_id=document_id,
-                    meeting_date=meeting_date, governing_body=governing_body,
+                    meeting_date=meeting_date, group_name=group_name,
                     agenda_section=section,
                     item_description=_truncate(m.group(5)),
                     resolution_number=_extract_resolution(para),
@@ -253,7 +253,7 @@ def _parse_shasta_bos(
             if m:
                 v = ParsedVote(
                     meeting_id=meeting_id, document_id=document_id,
-                    meeting_date=meeting_date, governing_body=governing_body,
+                    meeting_date=meeting_date, group_name=group_name,
                     agenda_section=section,
                     item_description=_truncate(m.group(2)),
                     resolution_number=_extract_resolution(para),
@@ -266,7 +266,7 @@ def _parse_shasta_bos(
             if m:
                 v = ParsedVote(
                     meeting_id=meeting_id, document_id=document_id,
-                    meeting_date=meeting_date, governing_body=governing_body,
+                    meeting_date=meeting_date, group_name=group_name,
                     agenda_section=section,
                     item_description=_truncate(para),
                     outcome=OUTCOME_WITHDRAWN,
@@ -302,9 +302,9 @@ def _parse_shasta_bos(
 #
 # Each entry maps one or more governing body name substrings (lowercase) to
 # a parser function with signature:
-#   fn(ocr_text, meeting_id, document_id, meeting_date, governing_body) -> ParseResult
+#   fn(ocr_text, meeting_id, document_id, meeting_date, group_name) -> ParseResult
 #
-# The dispatch in parse_minutes() checks governing_body.lower() for each key.
+# The dispatch in parse_minutes() checks group_name.lower() for each key.
 
 PARSER_REGISTRY: dict[str, callable] = {
     "board of supervisors": _parse_shasta_bos,
@@ -324,12 +324,12 @@ def parse_minutes(
     meeting_id: str,
     document_id: Optional[str] = None,
     meeting_date: Optional[str] = None,
-    governing_body: Optional[str] = None,
+    group_name: Optional[str] = None,
 ) -> ParseResult:
     """
     Parse meeting minutes OCR text into structured vote records.
 
-    Selects the appropriate parser based on governing_body. Falls back to the
+    Selects the appropriate parser based on group_name. Falls back to the
     Shasta BOS parser if no match is found — check parse_result.parser_used and
     parse_result.parse_status to detect mismatches.
 
@@ -338,14 +338,14 @@ def parse_minutes(
         meeting_id:     UUID of the meeting in the DB.
         document_id:    UUID of the source Document record (nullable).
         meeting_date:   ISO date string "YYYY-MM-DD".
-        governing_body: Name of the governing body.
+        group_name: Name of the group (government body or show).
 
     Returns:
         ParseResult with votes, unmatched paragraphs, and parse status.
     """
     parser = _DEFAULT_PARSER
-    if governing_body:
-        gb_lower = governing_body.lower()
+    if group_name:
+        gb_lower = group_name.lower()
         for key, fn in PARSER_REGISTRY.items():
             if key in gb_lower:
                 parser = fn
@@ -356,5 +356,5 @@ def parse_minutes(
         meeting_id=meeting_id,
         document_id=document_id,
         meeting_date=meeting_date,
-        governing_body=governing_body,
+        group_name=group_name,
     )

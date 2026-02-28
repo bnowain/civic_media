@@ -191,7 +191,7 @@ def get_active_job() -> dict | None:
                 models.Meeting.meeting_id == best["meeting_id"]
             ).first()
             if meeting:
-                best["title"] = meeting.title or meeting.governing_body or "Unknown"
+                best["title"] = meeting.title or meeting.group_name or "Unknown"
                 best["meeting_date"] = str(meeting.meeting_date)[:10] if meeting.meeting_date else None
             else:
                 best["title"] = "Unknown meeting"

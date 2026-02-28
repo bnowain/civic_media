@@ -41,18 +41,19 @@ class Venue(Base):
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-# ── Governing Bodies ─────────────────────────────────────────────────────────
+# ── Groups ───────────────────────────────────────────────────────────────────
 
-class GoverningBody(Base):
-    __tablename__ = "governing_bodies"
+class Group(Base):
+    __tablename__ = "groups"
 
-    governing_body_id = Column(String, primary_key=True, default=_gen_id)
-    name              = Column(String, nullable=False, unique=True)
-    display_name      = Column(String)
-    default_venue_id  = Column(String, ForeignKey("venues.venue_id"), nullable=True)
-    created_at        = Column(DateTime, default=datetime.utcnow)
+    group_id         = Column(String, primary_key=True, default=_gen_id)
+    name             = Column(String, nullable=False, unique=True)
+    display_name     = Column(String)
+    group_type       = Column(String, nullable=True)  # "government" | "show"
+    default_venue_id = Column(String, ForeignKey("venues.venue_id"), nullable=True)
+    created_at       = Column(DateTime, default=datetime.utcnow)
 
-    meetings      = relationship("Meeting", back_populates="governing_body_ref")
+    meetings      = relationship("Meeting", back_populates="group_ref")
     default_venue = relationship("Venue")
 
 
@@ -61,14 +62,14 @@ class GoverningBody(Base):
 class Meeting(Base):
     __tablename__ = "meetings"
 
-    meeting_id        = Column(String, primary_key=True, default=_gen_id)
-    governing_body    = Column(String, nullable=False)
-    meeting_type      = Column(String, nullable=False)
-    meeting_date      = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
-    title             = Column(String, nullable=False)
-    category          = Column(String, nullable=False, default="meeting")  # "meeting" | "audio"
-    media_directory   = Column(String)
-    governing_body_id = Column(String, ForeignKey("governing_bodies.governing_body_id"), nullable=True)
+    meeting_id   = Column(String, primary_key=True, default=_gen_id)
+    group_name   = Column(String, nullable=False)
+    meeting_type = Column(String, nullable=False)
+    meeting_date = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
+    title        = Column(String, nullable=False)
+    category     = Column(String, nullable=False, default="meeting")  # "meeting" | "audio" | "news" | "web_series"
+    media_directory = Column(String)
+    group_id     = Column(String, ForeignKey("groups.group_id"), nullable=True)
     description       = Column(Text, nullable=True)       # episode title, guest names
     source_url        = Column(Text, nullable=True)        # original audio URL (dedup key)
     thumbnail_url     = Column(Text, nullable=True)        # cover art URL from source
@@ -85,8 +86,8 @@ class Meeting(Base):
     summary_long       = Column(Text, nullable=True)
     summary_updated_at = Column(DateTime, nullable=True)
 
-    governing_body_ref = relationship("GoverningBody", back_populates="meetings")
-    venue              = relationship("Venue")
+    group_ref = relationship("Group", back_populates="meetings")
+    venue     = relationship("Venue")
     media_files = relationship("MediaFile", back_populates="meeting",
                                cascade="all, delete-orphan")
     documents   = relationship("Document",  back_populates="meeting",
@@ -408,8 +409,8 @@ class MeetingVote(Base):
                                nullable=False, index=True)
     document_id       = Column(String, ForeignKey("documents.document_id"),
                                nullable=True, index=True)
-    meeting_date      = Column(String, nullable=True)    # YYYY-MM-DD, denormalized
-    governing_body    = Column(String, nullable=True)    # denormalized
+    meeting_date = Column(String, nullable=True)    # YYYY-MM-DD, denormalized
+    group_name   = Column(String, nullable=True)    # denormalized
     agenda_section    = Column(String, nullable=True)    # "Consent Calendar" etc.
     item_description  = Column(Text, nullable=False)     # what was decided
     resolution_number = Column(String, nullable=True)    # "2026-008"

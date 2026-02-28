@@ -382,7 +382,7 @@ html, body {
   overflow: hidden;
 }
 
-.review-governing-body {
+.review-group {
   font-family: var(--font-mono);
   font-size: 9px;
   letter-spacing: 0.12em;
@@ -2085,6 +2085,12 @@ html, body {
   margin-bottom: 16px;
 }
 
+#toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .item-count {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2097,6 +2103,31 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* Grouped sort headers */
+.grid-group-header {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 14px 0 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.grid-group-header:first-child {
+  margin-top: 0;
+  border-top: none;
+  padding-top: 0;
+}
+
+/* Grid sort toggle in toolbar */
+.grid-sort-toggle {
+  display: flex;
+  gap: 0;
+  margin-left: 12px;
 }
 
 /* Empty state */

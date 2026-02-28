@@ -280,7 +280,7 @@ function renderAppearances(appearances) {
     const isAudio = a.category === "audio";
 
     const metaParts = [displayDate];
-    if (!isAudio && a.governing_body) metaParts.push(a.governing_body);
+    if (!isAudio && a.group_name) metaParts.push(a.group_name);
     if (!isAudio && a.meeting_type) metaParts.push(a.meeting_type);
     if (isAudio) metaParts.push("Audio");
     const metaLine = metaParts.join(" \u00b7 ");

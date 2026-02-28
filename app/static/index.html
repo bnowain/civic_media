@@ -21,6 +21,7 @@
     <div class="header-nav">
       <a href="/speakers" class="nav-link">Speakers</a>
       <a href="/clips" class="nav-link">Clips</a>
+      <a href="/backfill" class="nav-link">Backfill</a>
       <button class="btn btn-primary" id="new-item-btn">+ New</button>
       <button class="worker-status" id="worker-status-btn" title="Worker status">
         <span class="worker-dot" id="worker-dot"></span>
@@ -47,7 +48,7 @@
       </div>
 
       <div class="sidebar-section">
-        <span class="sidebar-label">Governing Bodies</span>
+        <span class="sidebar-label" id="gb-section-label">Governing Bodies</span>
         <div class="gb-list" id="gb-list">
           <div class="gb-item active" data-gb-id="">All</div>
         </div>
@@ -65,6 +66,7 @@
         <button class="lib-tab active" data-mode="meetings">Meetings</button>
         <button class="lib-tab" data-mode="audio">Audio</button>
         <button class="lib-tab" data-mode="news">News</button>
+        <button class="lib-tab" data-mode="web_series">Web Shows</button>
       </div>
 
       <div class="library-toolbar">
@@ -91,6 +93,7 @@
           <button type="button" class="cat-btn active" data-cat="meeting">Meeting</button>
           <button type="button" class="cat-btn" data-cat="audio">Audio</button>
           <button type="button" class="cat-btn" data-cat="news">News</button>
+          <button type="button" class="cat-btn" data-cat="web_series">Web Shows</button>
         </div>
       </div>
 
@@ -98,13 +101,13 @@
       <div id="meeting-fields">
         <div class="form-group">
           <label class="form-label">Governing Body</label>
-          <select id="f-governing-body" class="form-input">
+          <select id="f-group" class="form-input">
             <option value="">Select...</option>
           </select>
           <div class="form-inline-add">
-            <input type="text" id="f-new-gb" class="form-input form-input-sm"
+            <input type="text" id="f-new-group" class="form-input form-input-sm"
                    placeholder="Or add new..." autocomplete="off">
-            <button class="btn btn-ghost btn-sm" id="add-gb-btn">Add</button>
+            <button class="btn btn-ghost btn-sm" id="add-group-btn">Add</button>
           </div>
         </div>
         <div class="form-row">
