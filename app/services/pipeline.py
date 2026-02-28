@@ -209,9 +209,54 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             pct = 1 + int(fraction * 8)
             update_progress(db, meeting_id, "Extracting audio", pct)
 
-        duration = audio_extractor.extract_audio(
-            video_path, audio_path, on_progress=_audio_progress,
-        )
+        # Quick audio health check before committing to a full extraction.
+        # Catches HLS-concatenated AAC profile mismatches early.
+        audio_err = audio_extractor.probe_audio_errors(video_path)
+        if audio_err:
+            logger.warning("[%s] Audio pre-check: %s — will attempt source-URL fallback if local fails", meeting_id, audio_err)
+
+        try:
+            duration = audio_extractor.extract_audio(
+                video_path, audio_path, on_progress=_audio_progress,
+            )
+        except RuntimeError as local_err:
+            # Local extraction failed. Try extracting from the source URL if available.
+            # HLS sources re-initialise the AAC decoder per-segment, bypassing
+            # the profile-mismatch issue that breaks the remuxed local MP4.
+            source_url = None
+            if meeting_obj:
+                source_url = meeting_obj.video_url
+            if not source_url:
+                # Re-query in case meeting_obj wasn't loaded yet
+                _m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+                if _m:
+                    source_url = _m.video_url
+
+            if source_url:
+                logger.info(
+                    "[%s] Local extraction failed (%s). Retrying from source URL: %s",
+                    meeting_id, local_err, source_url,
+                )
+                update_progress(db, meeting_id, "Extracting audio (source fallback)", 2)
+                # Use yt-dlp to resolve the page URL to a direct stream URL,
+                # then pass that to ffmpeg which handles HLS segments correctly.
+                import subprocess as _sp
+                resolve = _sp.run(
+                    ["python", "-m", "yt_dlp", "--get-url", "-f", "bestaudio", source_url],
+                    stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=30,
+                )
+                if resolve.returncode == 0 and resolve.stdout.strip():
+                    stream_url = resolve.stdout.strip().decode("utf-8", errors="replace")
+                    logger.info("[%s] Resolved stream URL: %s", meeting_id, stream_url[:80])
+                    duration = audio_extractor.extract_audio_from_url(stream_url, audio_path)
+                else:
+                    # yt-dlp couldn't resolve — try the URL directly (works for m3u8)
+                    duration = audio_extractor.extract_audio_from_url(source_url, audio_path)
+            else:
+                raise RuntimeError(
+                    f"Local audio extraction failed and no source URL available: {local_err}"
+                ) from local_err
+
         media.duration = duration
         audio_record = models.MediaFile(
             meeting_id=meeting_id,

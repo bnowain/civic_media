@@ -192,12 +192,19 @@ def download_video(db: Session, meeting_id: str) -> dict:
 
     _write_progress(meeting_id, "Downloading video...", 20, "ffmpeg stream copy")
 
-    # Download with ffmpeg
+    # Download with ffmpeg.
+    # Video is stream-copied (fast), but audio is re-encoded to clean AAC-LC.
+    # This prevents the "HLS segment boundary AAC profile mismatch" corruption that
+    # occurs when segments with different AAC configurations (band limits, sample
+    # rate headers) are concatenated with -c copy: the resulting MP4 plays in
+    # most players but causes ffmpeg's audio decoder to fail mid-extraction,
+    # producing a truncated WAV and a pipeline crash on the process step.
     cmd = [
         "ffmpeg", "-y",
         "-i", m3u8_url,
-        "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
+        "-c:v", "copy",         # Video: stream copy (no re-encode, fast)
+        "-c:a", "aac",          # Audio: re-encode to clean AAC-LC
+        "-b:a", "128k",         # Match typical HLS audio bitrate
         str(output_path),
     ]
 

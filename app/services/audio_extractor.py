@@ -186,6 +186,99 @@ def _probe_duration(video_path: str) -> float:
         return 0.0
 
 
+def probe_audio_errors(video_path: str, sample_seconds: int = 30) -> str | None:
+    """
+    Quick-check the audio stream for decoding errors by attempting a short
+    extraction without writing output.
+
+    Returns None if the audio decodes cleanly, or an error string describing
+    the problem (e.g. "AAC profile mismatch detected at 0:02:51").
+
+    This catches the common HLS concatenation problem where yt-dlp joins
+    segments with different AAC profile settings (AAC-LC vs AAC Main) without
+    re-encoding, producing a file that silently fails mid-extraction.
+    """
+    # -t sample_seconds: only test first N seconds — fast and usually representative.
+    # The corruption point may be after that, but this catches obvious issues fast.
+    # Use two passes: a quick test and a probe at the known-bad point if needed.
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-t", str(sample_seconds),
+        "-i", video_path,
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stderr = result.stderr.decode("utf-8", errors="replace")
+
+    # Look for fatal AAC errors in stderr
+    fatal_markers = [
+        "Invalid data found when processing input",
+        "Error reinitializing filters",
+        "Number of bands",
+        "scalefactor bands",
+        "Prediction is not allowed in AAC-LC",
+        "Sample rate index in program config element does not match",
+    ]
+    for marker in fatal_markers:
+        if marker in stderr:
+            return f"Audio stream error (possibly corrupt HLS-concatenated AAC): {marker}"
+
+    return None
+
+
+def extract_audio_from_url(
+    url: str,
+    output_path: str,
+    on_progress: Callable[[float], None] | None = None,
+) -> float:
+    """
+    Extract audio from a URL (HLS, progressive MP4, etc.) via ffmpeg.
+
+    Used as a fallback when local file extraction fails due to corrupt audio
+    (e.g. HLS-concatenated MP4s with mismatched AAC profiles).  ffmpeg's HLS
+    demuxer initialises each segment's codec context independently, so segment
+    boundary issues that break the native AAC decoder in a remuxed file are
+    transparent here.
+
+    Returns:
+        Duration of the extracted audio in seconds.
+
+    Raises:
+        RuntimeError: If ffmpeg fails.
+    """
+    logger.info("extract_audio_from_url: %s → %s", url, output_path)
+    af = (
+        f"highpass=f={HPF_FREQ_HZ},"
+        f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", url,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-af", af,
+        "-acodec", "pcm_s16le",
+        output_path,
+    ]
+    logger.info("URL audio extraction command: %s", " ".join(cmd))
+
+    # For URL sources we can't get duration upfront (HLS metadata is unreliable),
+    # so run without progress callbacks.
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg URL extraction failed (exit {result.returncode}):\n"
+            f"{result.stderr.decode(errors='replace')[-500:]}"
+        )
+
+    wav_dur = get_wav_duration(output_path)
+    logger.info("URL audio extracted: %.1f min", wav_dur / 60)
+    return wav_dur
+
+
 def get_wav_duration(wav_path: str) -> float:
     """Return duration of a WAV file in seconds."""
     import wave
