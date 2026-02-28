@@ -332,6 +332,7 @@ html, body {
 
 .badge-pending   { background: var(--bg-overlay); color: var(--text-muted); }
 .badge-processing { background: var(--accent-blue-dim); color: var(--accent-blue); }
+.badge-download  { background: var(--accent-amber-dim); color: var(--accent-amber); }
 .badge-complete  { background: var(--accent-green-dim); color: var(--accent-green); }
 
 .loading-state, .empty-state {

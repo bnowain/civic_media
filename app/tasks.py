@@ -564,28 +564,37 @@ def primegov_download_task(
         download_video as dl_video,
         download_document as dl_doc,
     )
-    from app.services.progress import create_job, complete_job, fail_job
+    from app.services.progress import create_job, update_progress, complete_job, fail_job
 
     db = SessionLocal()
     results = {}
     try:
+        # Always create the job up front so progress is tracked regardless
+        # of which assets are requested.
+        create_job(db, meeting_id, "download", celery_task_id=self.request.id)
+
         if download_video:
-            create_job(db, meeting_id, "download", celery_task_id=self.request.id)
             results["video"] = dl_video(db, meeting_id)
             video_status = results["video"].get("status", "")
-            if video_status == "complete":
-                complete_job(db, meeting_id)
-            elif video_status not in ("skipped",):
+            if video_status == "error":
                 fail_job(db, meeting_id, results["video"].get("error", "Download failed"))
+                return {"meeting_id": meeting_id, "results": results}
+            # "not_available_yet" and "skipped" continue to docs without error
 
+        # Document downloads — each has its own visible progress stage
         if download_agenda:
+            update_progress(db, meeting_id, "Downloading agenda PDF...", 50)
             results["agenda"] = dl_doc(db, meeting_id, "agenda")
 
         if download_minutes:
+            update_progress(db, meeting_id, "Downloading minutes PDF...", 65)
             results["minutes"] = dl_doc(db, meeting_id, "minutes")
 
         if download_packet:
+            update_progress(db, meeting_id, "Downloading packet PDF...", 80)
             results["packet"] = dl_doc(db, meeting_id, "packet")
+
+        complete_job(db, meeting_id)
 
         # Auto-process if video was downloaded successfully
         if auto_process and results.get("video", {}).get("status") == "complete":

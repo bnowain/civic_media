@@ -545,7 +545,10 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     # "Transcode complete" at pct=100 is NOT pipeline complete
     is_transcode_stage = stage and "transcode" in stage.lower()
     is_download_stage = stage and any(
-        k in stage.lower() for k in ("download", "extract", "video downloaded")
+        k in stage.lower() for k in (
+            "download", "extract", "video downloaded",
+            "agenda", "minutes", "packet", "ocr",
+        )
     )
 
     if not has_media:

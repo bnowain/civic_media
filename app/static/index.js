@@ -812,8 +812,20 @@ function applyStatusToBadge(badge, status, meetingId) {
     hideProcessBtn(meetingId);
     hideTranscodeBtn(meetingId);
   } else if (status.status === "processing") {
-    badge.textContent = "processing";
-    badge.className = "meeting-card-badge badge-processing";
+    const stageLower = (status.stage || "").toLowerCase();
+    const isDownload = stageLower && (
+      stageLower.includes("download") || stageLower.includes("extract") ||
+      stageLower.includes("agenda")   || stageLower.includes("minutes") ||
+      stageLower.includes("packet")   || stageLower.includes("ocr")
+    );
+    if (isDownload) {
+      // Show the actual stage label so user knows exactly what's happening
+      badge.textContent = stageLower.replace(/\.\.\.$/, "").trim();
+      badge.className = "meeting-card-badge badge-download";
+    } else {
+      badge.textContent = "processing";
+      badge.className = "meeting-card-badge badge-processing";
+    }
     hideProcessBtn(meetingId);
     hideTranscodeBtn(meetingId);
   } else if (status.status === "pending" && status.segment_count === 0) {

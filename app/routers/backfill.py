@@ -133,11 +133,12 @@ def _do_reset_stuck(db: Session) -> dict:
 
     threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
 
-    # Reset stale running jobs in DB
+    # Reset stale running OR queued jobs in DB
+    # "queued" jobs that never transitioned are orphaned worker-crash artifacts
     stale_jobs = (
         db.query(models.ProcessingJob)
         .filter(
-            models.ProcessingJob.status == "running",
+            models.ProcessingJob.status.in_(["running", "queued"]),
             models.ProcessingJob.updated_at < threshold,
         )
         .all()
