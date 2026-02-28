@@ -57,7 +57,7 @@ class PodbeamScraper(BaseScraper):
     def source_type(self) -> str:
         return "podbean"
 
-    def scrape(self) -> list[ScrapedEpisode]:
+    def scrape(self, show_cutoffs: dict[str, str] | None = None) -> list[ScrapedEpisode]:
         logger.info("  Fetching Podbean RSS feed: %s", self.feed_url)
         try:
             resp = requests.get(self.feed_url, timeout=DOWNLOAD_TIMEOUT)
@@ -85,6 +85,8 @@ class PodbeamScraper(BaseScraper):
         img_el = channel.find("itunes:image", ns)
         if img_el is not None:
             channel_image = img_el.get("href")
+
+        stop_after_date = (show_cutoffs or {}).get(self.show_name)
 
         episodes = []
         for item in channel.findall("item"):
@@ -131,6 +133,14 @@ class PodbeamScraper(BaseScraper):
 
             # Per-episode page URL from RSS <link>
             episode_link = (item.findtext("link") or "").strip() or None
+
+            # RSS is sorted newest-first — stop as soon as we hit the cutoff.
+            if stop_after_date and episode_date <= stop_after_date:
+                logger.info(
+                    "  Early stop: episode date %s at/before cutoff %s",
+                    episode_date, stop_after_date,
+                )
+                break
 
             episodes.append(ScrapedEpisode(
                 title=title,

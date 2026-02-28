@@ -31,9 +31,14 @@ class BaseScraper(abc.ABC):
     """Abstract base for all ingest scrapers."""
 
     @abc.abstractmethod
-    def scrape(self) -> list[ScrapedEpisode]:
+    def scrape(self, show_cutoffs: dict[str, str] | None = None) -> list[ScrapedEpisode]:
         """
         Scrape the source and return a list of ScrapedEpisode objects.
+
+        show_cutoffs: mapping of show_name -> newest episode date already in DB
+            (YYYY-MM-DD).  Scrapers use this to stop paginating once they reach
+            already-known content.  None = no cutoff (full historical scrape).
+
         Should be idempotent — callers handle deduplication.
         """
         ...

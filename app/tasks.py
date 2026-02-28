@@ -521,17 +521,21 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
 def primegov_discover_task(
     committee_ids: list[int] | None = None,
     years: list[int] | None = None,
+    mode: str = "update",
 ) -> dict:
     """
     Run PrimeGov meeting discovery: scrape API → deduplicate → create/update
     Meeting records.  Does NOT download any assets.
+
+    mode="update" (default): only fetch meetings within 90 days of newest in DB.
+    mode="full": fetch all history.
     """
     from app.database import SessionLocal
     from app.services.primegov.discovery import run_discovery
 
     db = SessionLocal()
     try:
-        return run_discovery(db, committee_ids, years)
+        return run_discovery(db, committee_ids, years, mode=mode)
     except Exception:
         db.rollback()
         logger.exception("primegov_discover_task failed")

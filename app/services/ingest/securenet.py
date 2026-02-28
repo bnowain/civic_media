@@ -124,7 +124,7 @@ class SecureNetScraper(BaseScraper):
     def source_type(self) -> str:
         return "securenet"
 
-    def scrape(self) -> list[ScrapedEpisode]:
+    def scrape(self, show_cutoffs: dict[str, str] | None = None) -> list[ScrapedEpisode]:
         logger.info("  Fetching SecureNet page: %s", self.station_url)
         try:
             resp = requests.get(self.station_url, timeout=30)
@@ -213,4 +213,20 @@ class SecureNetScraper(BaseScraper):
             ))
 
         logger.info("  %d episodes after show filter", len(episodes))
+
+        # SecureNet is a single page (no pagination) — filter by cutoff date after the fact.
+        if show_cutoffs and episodes:
+            filtered = []
+            for ep in episodes:
+                cutoff = show_cutoffs.get(ep.show_name)
+                if cutoff and ep.episode_date <= cutoff:
+                    continue
+                filtered.append(ep)
+            if len(filtered) < len(episodes):
+                logger.info(
+                    "  Skipped %d episodes at/before cutoff dates",
+                    len(episodes) - len(filtered),
+                )
+            episodes = filtered
+
         return episodes

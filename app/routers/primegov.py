@@ -30,18 +30,24 @@ PROGRESS_FILE = MEDIA_DIR / "primegov_progress.json"
 def discover_meetings(
     committee_ids: Optional[list[int]] = Query(default=None),
     years: Optional[list[int]] = Query(default=None),
+    mode: str = Query(default="update"),
     background: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
     """
     Run PrimeGov meeting discovery.
 
-    - Fetches all meetings from the PrimeGov API
     - Creates new Meeting records for undiscovered meetings
     - Updates existing records with newly available URLs (agenda/minutes/video)
+    - Auto-queues document downloads for meetings that just gained doc URLs
     - Idempotent: safe to re-run
 
-    Set `background=false` to run synchronously (useful for testing).
+    mode="update" (default): only fetch meetings within 90 days of newest in DB.
+        Fast for daily/weekly sync runs.
+    mode="full": fetch all years of history.  Use for first-time setup or
+        catching gaps (same as backfill).
+
+    Set background=false to run synchronously (useful for testing).
     """
     if background:
         from app.tasks import primegov_discover_task
@@ -51,16 +57,17 @@ def discover_meetings(
         task = primegov_discover_task.delay(
             committee_ids=committee_ids or [3],
             years=years,
+            mode=mode,
         )
         return {
             "task_id": task.id,
             "status": "queued",
-            "message": "Discovery started in background",
+            "message": f"Discovery started in background (mode={mode})",
         }
     else:
         from app.services.primegov.discovery import run_discovery
 
-        result = run_discovery(db, committee_ids or [3], years)
+        result = run_discovery(db, committee_ids or [3], years, mode=mode)
         return {"status": "complete", **result}
 
 

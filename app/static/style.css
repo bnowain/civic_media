@@ -2858,6 +2858,26 @@ html, body {
   accent-color: var(--accent-blue);
 }
 
+/* PrimeGov mode toggle (Full history checkbox) */
+.primegov-mode-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.primegov-mode-label input[type="checkbox"] {
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
 /* PrimeGov progress area */
 .primegov-progress-area {
   margin-top: 12px;

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy import func
+
 from app import models
 from app.config import BASE_DIR
 from .base import ScrapedEpisode
@@ -84,15 +86,32 @@ def _enrich_from_metadata(db: Session, metadata_episodes: list[ScrapedEpisode]):
     db.commit()
 
 
+def _build_show_cutoffs(db: Session) -> dict[str, str]:
+    """
+    Return a dict mapping show_name -> newest episode date already in DB.
+
+    Used to give scrapers a cursor so they can stop paginating once they reach
+    already-known content.  Shows with no episodes are omitted (no cutoff).
+    """
+    rows = (
+        db.query(models.Meeting.group_name, func.max(models.Meeting.meeting_date))
+        .filter(models.Meeting.category == "audio")
+        .group_by(models.Meeting.group_name)
+        .all()
+    )
+    return {name: date for name, date in rows if name and date}
+
+
 def run_ingest(db: Session, source_id: str | None = None):
     """
     Run the ingest pipeline for one or all enabled sources.
 
     Steps:
     1. Load source configs from DB
-    2. Scrape each source for episodes
-    3. Deduplicate against existing meetings (by source_url)
-    4. Download audio and create unprocessed Meeting + MediaFile records
+    2. Build per-show date cutoffs from existing DB records
+    3. Scrape each source for episodes (scrapers stop early when cutoff hit)
+    4. Deduplicate against existing meetings (by source_url / date+show)
+    5. Download audio and create unprocessed Meeting + MediaFile records
     """
     if source_id:
         sources = [db.query(models.IngestSource).filter_by(
@@ -106,6 +125,16 @@ def run_ingest(db: Session, source_id: str | None = None):
         logger.warning("No enabled ingest sources found")
         _write_progress(running=False, error="No enabled sources")
         return
+
+    # Build cutoffs once — shared across all sources this run
+    show_cutoffs = _build_show_cutoffs(db)
+    if show_cutoffs:
+        logger.info(
+            "Ingest cutoffs: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(show_cutoffs.items())),
+        )
+    else:
+        logger.info("No existing audio episodes — full historical scrape")
 
     total_found = 0
     total_downloaded = 0
@@ -122,7 +151,7 @@ def run_ingest(db: Session, source_id: str | None = None):
 
         try:
             scraper = _get_scraper(source)
-            episodes = scraper.scrape()
+            episodes = scraper.scrape(show_cutoffs=show_cutoffs)
             logger.info("  Found %d episodes from %s", len(episodes), source.name)
         except Exception:
             logger.exception("  Failed to scrape %s", source.name)

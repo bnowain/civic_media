@@ -1540,7 +1540,9 @@ async function handleRunPrimeGov() {
   }
 
   try {
-    const params = ids.map(id => `committee_ids=${id}`).join("&");
+    const fullHistory = document.getElementById("primegov-full-history")?.checked;
+    const mode = fullHistory ? "full" : "update";
+    const params = ids.map(id => `committee_ids=${id}`).join("&") + `&mode=${mode}`;
     const r = await fetch(`/api/primegov/discover?${params}`, { method: "POST" });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));

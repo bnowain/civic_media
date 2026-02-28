@@ -93,15 +93,16 @@ class KCNRScraper(BaseScraper):
     def source_type(self) -> str:
         return "kcnr"
 
-    def scrape(self) -> list[ScrapedEpisode]:
+    def scrape(self, show_cutoffs: dict[str, str] | None = None) -> list[ScrapedEpisode]:
         episodes = []
         for show in KCNR_SHOWS:
             if self.shows and show["slug"] not in self.shows:
                 continue
-            episodes.extend(self._scrape_show(show))
+            stop_after = (show_cutoffs or {}).get(show["show_name"])
+            episodes.extend(self._scrape_show(show, stop_after_date=stop_after))
         return episodes
 
-    def _scrape_show(self, show: dict) -> list[ScrapedEpisode]:
+    def _scrape_show(self, show: dict, stop_after_date: str | None = None) -> list[ScrapedEpisode]:
         """Scrape all pages for a single show."""
         episodes = []
         show_name = show["show_name"]
@@ -123,7 +124,20 @@ class KCNRScraper(BaseScraper):
                 logger.info("  No more episodes on page %d", page)
                 break
 
-            episodes.extend(page_episodes)
+            # Early stop: if we have a cutoff date, only keep episodes newer than it.
+            # If the page contained any episode at or before the cutoff, we've reached
+            # already-known territory — stop paginating after this page.
+            if stop_after_date:
+                new_episodes = [ep for ep in page_episodes if ep.episode_date > stop_after_date]
+                episodes.extend(new_episodes)
+                if len(new_episodes) < len(page_episodes):
+                    logger.info(
+                        "  Early stop on page %d: %d new, %d at/before cutoff %s",
+                        page, len(new_episodes), len(page_episodes) - len(new_episodes), stop_after_date,
+                    )
+                    break
+            else:
+                episodes.extend(page_episodes)
 
             # Check if there's a next page
             if not self._has_next_page(resp.text):

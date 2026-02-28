@@ -57,7 +57,9 @@ class FreedomInActionScraper(BaseScraper):
     def source_type(self) -> str:
         return "freedominaction"
 
-    def scrape(self) -> list[ScrapedEpisode]:
+    def scrape(self, show_cutoffs: dict[str, str] | None = None) -> list[ScrapedEpisode]:
+        stop_after_date = (show_cutoffs or {}).get("Freedom in Action")
+
         episodes: list[ScrapedEpisode] = []
         url: str | None = self.blog_url
         pages_fetched = 0
@@ -75,11 +77,24 @@ class FreedomInActionScraper(BaseScraper):
                 break
 
             page_episodes, next_path = self._parse_page(resp.text)
-            episodes.extend(page_episodes)
             pages_fetched += 1
 
             if not page_episodes:
                 break  # empty page — stop paginating
+
+            # Early stop: keep only episodes newer than the cutoff; stop if we hit it.
+            if stop_after_date:
+                new_episodes = [ep for ep in page_episodes if ep.episode_date > stop_after_date]
+                episodes.extend(new_episodes)
+                if len(new_episodes) < len(page_episodes):
+                    logger.info(
+                        "  Early stop on page %d: %d new, %d at/before cutoff %s",
+                        pages_fetched, len(new_episodes),
+                        len(page_episodes) - len(new_episodes), stop_after_date,
+                    )
+                    break
+            else:
+                episodes.extend(page_episodes)
 
             if next_path:
                 # next_path is relative: "/blog-news?offset=..."

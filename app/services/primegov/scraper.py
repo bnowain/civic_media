@@ -157,6 +157,7 @@ class PrimeGovScraper:
         committee_ids: list[int] | None = None,
         years: list[int] | None = None,
         include_upcoming: bool = True,
+        min_date: str | None = None,
     ) -> list[PrimeGovMeeting]:
         """
         Full discovery: fetch all meetings across committees and years.
@@ -165,12 +166,21 @@ class PrimeGovScraper:
             committee_ids: Which committees to fetch. Defaults to [3] (BOS).
             years: Which years to fetch. None = all available years.
             include_upcoming: Also fetch upcoming (future) meetings.
+            min_date: YYYY-MM-DD cutoff — skip meetings before this date and
+                only fetch years >= this date's year.  None = no cutoff.
         """
         if committee_ids is None:
             committee_ids = [3]
 
         if years is None:
-            years = self.get_archived_years()
+            available_years = self.get_archived_years()
+            if min_date:
+                # Only fetch years from min_date's year onward — skip old history
+                min_year = int(min_date[:4])
+                years = [y for y in available_years if y >= min_year]
+                logger.info("Update mode: limiting to years %s (min_date=%s)", years, min_date)
+            else:
+                years = available_years
 
         all_meetings: list[PrimeGovMeeting] = []
         seen_ids: set[int] = set()
@@ -213,6 +223,15 @@ class PrimeGovScraper:
                         "PrimeGov: failed to fetch %s upcoming: %s",
                         committee_name, e,
                     )
+
+        # Apply min_date post-filter (catches any slipthrough from year-level filter)
+        if min_date:
+            before = len(all_meetings)
+            all_meetings = [m for m in all_meetings if m.meeting_date_iso >= min_date]
+            logger.info(
+                "min_date filter: kept %d of %d meetings (cutoff %s)",
+                len(all_meetings), before, min_date,
+            )
 
         # Sort by date descending
         all_meetings.sort(key=lambda m: m.date_time, reverse=True)
