@@ -46,15 +46,15 @@ $watchdogPath = "$Root\.celery_watchdog.cmd"
 $watchdogContent = @"
 @echo off
 title Civic Media - Celery Worker (watchdog)
+if not exist "$Root\logs" mkdir "$Root\logs"
 :restart
 cd /d "$Root"
 call "$Root\venv\Scripts\activate.bat"
 set PYTHONPATH=.
 set HF_TOKEN=$hfToken
-echo [%date% %time%] Starting Celery worker...
-celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo
-echo.
-echo [%date% %time%] Worker exited. Restarting in 5 seconds... (Ctrl+C to stop)
+echo [%date% %time%] Starting Celery worker... >> "$Root\logs\celery.log" 2>&1
+celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --pool=solo >> "$Root\logs\celery.log" 2>&1
+echo [%date% %time%] Worker exited (see logs\celery.log). Restarting in 5 seconds...
 timeout /t 5 /nobreak >nul
 goto restart
 "@

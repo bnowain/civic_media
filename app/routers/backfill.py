@@ -472,7 +472,10 @@ async def backfill_events():
 
         url = CELERY_BROKER.replace("localhost", "127.0.0.1")
         try:
-            r = aioredis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+            # socket_timeout=None — never time out on idle pub/sub reads.
+            # Long jobs (transcription, diarization) can go 10+ minutes without
+            # a progress message; a short socket_timeout would kill the stream.
+            r = aioredis.from_url(url, socket_connect_timeout=5, socket_timeout=None)
             pubsub = r.pubsub()
             await pubsub.subscribe("civic_media:progress")
         except Exception as exc:
@@ -484,12 +487,26 @@ async def backfill_events():
             return
 
         try:
-            async for message in pubsub.listen():
-                if message["type"] == "message":
-                    data = message["data"]
-                    if isinstance(data, bytes):
-                        data = data.decode("utf-8", errors="replace")
-                    yield f"data: {data}\n\n"
+            # Use get_message() with asyncio.wait_for so we can send SSE keepalives
+            # during long silent phases without closing the Redis connection.
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True),
+                        timeout=25,
+                    )
+                except asyncio.TimeoutError:
+                    # No progress message for 25s — send SSE keepalive comment
+                    yield ": keepalive\n\n"
+                    continue
+                if message is None:
+                    # Subscription acknowledged but no data yet
+                    await asyncio.sleep(0.05)
+                    continue
+                data = message["data"]
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                yield f"data: {data}\n\n"
         finally:
             try:
                 await pubsub.unsubscribe("civic_media:progress")
@@ -893,3 +910,30 @@ def backfill_reset_stuck(db: Session = Depends(get_db)):
         "count": len(result["reset_ids"]),
         "transcode_resets": result["transcode_resets"],
     }
+
+
+# ── Clear error history for a specific meeting ────────────────────────────────
+
+@router.post("/clear-errors/{meeting_id}")
+def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
+    """
+    Delete all error-status process jobs for a meeting, allowing it to be
+    retried after the crash counter (3 failures) has blocked it.
+    Also resets running jobs for the meeting to allow immediate retry.
+    """
+    from app import models
+    deleted = (
+        db.query(models.ProcessingJob)
+        .filter(
+            models.ProcessingJob.meeting_id == meeting_id,
+            models.ProcessingJob.stage == "process",
+            models.ProcessingJob.status.in_(["error", "running"]),
+        )
+        .all()
+    )
+    count = len(deleted)
+    for job in deleted:
+        db.delete(job)
+    db.commit()
+    logger.info("clear-errors: deleted %d process job(s) for meeting %s", count, meeting_id)
+    return {"meeting_id": meeting_id, "cleared": count}

@@ -456,6 +456,10 @@
         <span class="label">Stuck</span>
       </div>
       <button class="btn btn-ghost btn-sm" onclick="resetStuck()">Reset Stuck</button>
+      <button class="worker-status" id="worker-status-btn" title="Worker status">
+        <span class="worker-dot" id="worker-dot"></span>
+        <span class="worker-label" id="worker-label">Worker</span>
+      </button>
     </div>
   </div>
 
@@ -562,10 +566,89 @@ const S = {
   groups:         null,  // { gov: {body: count}, shows: {body: {count, file_type}} }
 };
 
+// ── Worker pill ────────────────────────────────────────────────────────────
+let workerState = 'unknown';
+
+async function pollWorkerHealth() {
+  const dot = document.getElementById('worker-dot');
+  const label = document.getElementById('worker-label');
+  const btn = document.getElementById('worker-status-btn');
+  if (!dot || !label || !btn) return;
+  if (workerState === 'restarting') return;
+  try {
+    const r = await fetch('/api/system/worker-health');
+    const data = await r.json();
+    const effectivelyRunning = data.worker_online || data.watchdog_alive || !!data.active_job;
+    if (effectivelyRunning) {
+      workerState = 'online';
+      const job = data.active_job;
+      if (job) {
+        dot.className = 'worker-dot processing';
+        let dateStr = '';
+        if (job.meeting_date) {
+          try { const d = new Date(job.meeting_date + 'T12:00:00'); dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { dateStr = job.meeting_date; }
+        }
+        const shortTitle = (job.title || '').slice(0, 22);
+        label.textContent = `${job.stage} ${job.pct}%${dateStr ? ' · ' + dateStr : ''}`;
+        btn.title = `${job.stage} (${job.pct}%) — ${job.title || 'unknown'}`;
+      } else {
+        dot.className = 'worker-dot online';
+        label.textContent = 'Worker';
+        btn.title = 'Worker online';
+      }
+    } else {
+      workerState = 'offline';
+      dot.className = 'worker-dot offline';
+      label.textContent = 'Offline';
+      btn.title = 'Worker offline — click to restart';
+    }
+  } catch {
+    workerState = 'offline';
+    dot.className = 'worker-dot offline';
+    label.textContent = 'Offline';
+  }
+}
+
+async function handleWorkerClick() {
+  if (workerState === 'online' || workerState === 'restarting') return;
+  const dot = document.getElementById('worker-dot');
+  const label = document.getElementById('worker-label');
+  workerState = 'restarting';
+  dot.className = 'worker-dot restarting';
+  label.textContent = 'Restarting...';
+  try {
+    const r = await fetch('/api/system/restart-worker', { method: 'POST' });
+    const data = await r.json();
+    if (data.worker_online) {
+      workerState = 'online';
+      dot.className = 'worker-dot online';
+      label.textContent = 'Worker';
+    } else {
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const pr = await fetch('/api/system/worker-health');
+          const pd = await pr.json();
+          if (pd.worker_online) { clearInterval(poll); workerState = 'online'; dot.className = 'worker-dot online'; label.textContent = 'Worker'; }
+        } catch { }
+        if (attempts >= 10) { clearInterval(poll); workerState = 'offline'; dot.className = 'worker-dot offline'; label.textContent = 'Offline'; }
+      }, 2000);
+    }
+  } catch {
+    workerState = 'offline';
+    dot.className = 'worker-dot offline';
+    label.textContent = 'Offline';
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   loadQueue();
   startSSE();
+  document.getElementById('worker-status-btn').addEventListener('click', handleWorkerClick);
+  pollWorkerHealth();
+  setInterval(pollWorkerHealth, 10000);
 });
 
 // ── Server-Sent Events ─────────────────────────────────────────────────────

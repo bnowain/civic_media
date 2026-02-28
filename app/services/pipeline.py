@@ -22,6 +22,7 @@ Progress is written to progress.json and polled by the UI every 4 seconds.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -130,6 +131,29 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
 
     video_path = media.file_path
     logger.info("[%s] Pipeline start - video: %s", meeting_id, video_path)
+
+    # -- Guard: skip meetings that have crashed too many times ----------------
+    # Prevents the worker from repeatedly crashing on a bad video. After 3
+    # failed process jobs the meeting is auto-skipped. The user can clear the
+    # error history via POST /api/backfill/clear-errors/{meeting_id}.
+    error_count = (
+        db.query(models.ProcessingJob)
+        .filter(
+            models.ProcessingJob.meeting_id == meeting_id,
+            models.ProcessingJob.stage == "process",
+            models.ProcessingJob.status == "error",
+        )
+        .count()
+    )
+    if error_count >= 3:
+        msg = (
+            f"Auto-skip: this meeting has failed processing {error_count} times. "
+            "Clear the error history with POST /api/backfill/clear-errors/{meeting_id} "
+            "before retrying."
+        )
+        logger.error("[%s] %s", meeting_id, msg)
+        raise RuntimeError(msg)
+
     update_progress(db, meeting_id, "Starting...", 0)
 
     # -- 1. Extract preprocessed mono 16kHz WAV -------------------------------
@@ -155,6 +179,22 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         )
         .first()
     )
+
+    # Guard: detect truncated WAV files (ffmpeg killed mid-run leaves a partial file
+    # that passes the file-exists check but produces garbage transcription).
+    if audio_record and Path(audio_record.file_path).exists():
+        _wav_dur = audio_extractor.get_wav_duration(audio_record.file_path)
+        _vid_dur = audio_extractor._probe_duration(video_path)
+        if _vid_dur > 60 and _wav_dur < _vid_dur * 0.1:
+            logger.warning(
+                "[%s] Truncated WAV detected: %.1fs extracted vs %.1fs expected (%.0f%%). "
+                "Deleting and re-extracting.",
+                meeting_id, _wav_dur, _vid_dur, 100 * _wav_dur / _vid_dur,
+            )
+            Path(audio_record.file_path).unlink(missing_ok=True)
+            db.delete(audio_record)
+            db.commit()
+            audio_record = None  # fall through to extraction block below
 
     if audio_record and Path(audio_record.file_path).exists():
         audio_path = audio_record.file_path
