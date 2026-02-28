@@ -516,7 +516,14 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
             transcode_status=transcode_status,
         )
 
-    # Check for stale progress (worker crashed without writing error)
+    # Check for stale progress (worker crashed without writing error).
+    # Two zones:
+    #   PROGRESS_STALE_SECONDS (10 min): "recently stalled" → show error badge so user
+    #     knows the active worker crashed and needs restart.
+    #   PROGRESS_ABANDONED_SECONDS (2 hours): "old abandoned job" → the progress.json is
+    #     a leftover from a previous session that was never cleaned up.  Treat it as
+    #     if there is no progress file and fall through to the normal status logic.
+    PROGRESS_ABANDONED_SECONDS = 7200  # 2 hours
     updated_at_str = progress.get("updated_at")
     if (updated_at_str
         and stage not in (None, "Complete", "")
@@ -526,7 +533,8 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=timezone.utc)
             age = (datetime.now(timezone.utc) - updated_at).total_seconds()
-            if age > PROGRESS_STALE_SECONDS:
+            if PROGRESS_STALE_SECONDS < age <= PROGRESS_ABANDONED_SECONDS:
+                # Recently stalled — worker crashed mid-job. Show error.
                 return schemas.PipelineStatus(
                     meeting_id=meeting_id,
                     segment_count=segment_count,
@@ -539,6 +547,10 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
                     error=True,
                     transcode_status=transcode_status,
                 )
+            elif age > PROGRESS_ABANDONED_SECONDS:
+                # Very old leftover — ignore stale progress, fall through to DB-based status.
+                stage = None
+                pct = None
         except (ValueError, TypeError):
             pass
 
