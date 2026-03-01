@@ -67,6 +67,11 @@ def _load_diarization(meeting_id: str) -> list[dict] | None:
         return None
     try:
         data = json.loads(p.read_text())
+        # An empty list means the write was interrupted before any turns were
+        # saved — treat as a cache miss so diarization runs again.
+        if not data:
+            logger.warning("[%s] Diarization cache is empty, re-running.", meeting_id)
+            return None
         logger.info(
             "[%s] Loaded %d diarization turns from cache.", meeting_id, len(data)
         )
@@ -276,12 +281,18 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     )
 
     if existing_segments:
-        complete = any(s.embedding is not None for s in existing_segments)
-        if complete:
+        # Use processed_at as the authoritative completion flag — NOT embedding
+        # existence.  If a previous run was interrupted mid-embedding, some
+        # segments may have embeddings already; using any(embedding) would
+        # incorrectly treat that as "done" and leave the meeting permanently
+        # stuck with a partial transcript.  processed_at is only set after
+        # every pipeline stage finishes successfully.
+        if meeting_obj and meeting_obj.processed_at is not None:
             logger.info(
-                "[%s] Pipeline already complete (%d segments) - skipping.",
+                "[%s] Pipeline already complete (%d segments, processed_at=%s) - skipping.",
                 meeting_id,
                 len(existing_segments),
+                meeting_obj.processed_at,
             )
             update_progress(db, meeting_id, "Complete", 100)
             return
