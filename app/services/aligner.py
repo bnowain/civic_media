@@ -324,9 +324,22 @@ def _assign_speakers_by_word(
         logprobs  = [w["avg_logprob"]   for w in group if w.get("avg_logprob") is not None]
         no_speech = [w["no_speech_prob"] for w in group if w.get("no_speech_prob") is not None]
 
+        seg_start = group[0]["start"]
+        seg_end   = group[-1]["end"]
+
+        # Zero-duration groups are Whisper alignment artifacts (a word whose
+        # start == end gets speaker=None and forms its own isolated group,
+        # producing a duplicate timestamp in the output).  Merge the text into
+        # the previous segment instead of emitting a zero-length entry.
+        if seg_end <= seg_start:
+            if segments:
+                segments[-1]["text"] = segments[-1]["text"].rstrip() + " " + text
+            # else: nothing before it — silently drop (edge case)
+            continue
+
         segments.append({
-            "start":             group[0]["start"],
-            "end":               group[-1]["end"],
+            "start":             seg_start,
+            "end":               seg_end,
             "text":              text,
             "raw_speaker_label": group[0]["speaker"],
             "avg_logprob":       round(sum(logprobs) / len(logprobs), 4) if logprobs else None,
