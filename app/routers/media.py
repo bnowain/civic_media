@@ -502,19 +502,34 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
     detail = progress.get("detail", "")
     is_error = progress.get("error", False)
 
-    # Check for explicit error state in progress.json
+    # Check for explicit error state in progress.json.
+    # Exception: if the error stage was a download/extract step but the meeting
+    # now has media, the error is stale (a subsequent attempt succeeded).
+    # Ignore it and fall through to the normal DB-based status logic.
     if is_error:
-        return schemas.PipelineStatus(
-            meeting_id=meeting_id,
-            segment_count=segment_count,
-            task_id=None,
-            status="error",
-            stage=stage or "Error",
-            progress_pct=pct or 0,
-            detail=detail,
-            error=True,
-            transcode_status=transcode_status,
+        _stage_lower = (stage or "").lower()
+        _is_stale_download_error = has_media and any(
+            k in _stage_lower for k in (
+                "download", "extract", "video downloaded",
+                "agenda", "minutes", "packet", "ocr",
+            )
         )
+        if not _is_stale_download_error:
+            return schemas.PipelineStatus(
+                meeting_id=meeting_id,
+                segment_count=segment_count,
+                task_id=None,
+                status="error",
+                stage=stage or "Error",
+                progress_pct=pct or 0,
+                detail=detail,
+                error=True,
+                transcode_status=transcode_status,
+            )
+        # Stale download error — clear it so stale-detection below doesn't fire either
+        stage = None
+        pct = None
+        is_error = False
 
     # Check for stale progress (worker crashed without writing error).
     # Two zones:
