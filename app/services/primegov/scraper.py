@@ -262,10 +262,23 @@ class PrimeGovScraper:
         except (ValueError, TypeError):
             dt = datetime.utcnow()
 
-        # Video URL
+        # Video URL — PrimeGov sometimes concatenates a base Swagit URL with an
+        # already-absolute swagitId, producing a doubled URL like:
+        #   "https://shastacountyca.new.swagit.com/https://staffordtx.new.swagit.com/videos/362717"
+        # Detect this and extract the inner URL.  Fall back to swagitId if videoUrl
+        # is missing or still invalid.
         video_url = raw.get("videoUrl") or None
-        if video_url and not video_url.startswith("http"):
-            video_url = None
+        swagit_id_raw = raw.get("swagitId") or None
+        if video_url:
+            # Fix doubled URL: "https://...new.swagit.com/https://..." → extract inner URL
+            inner = video_url.find("https://", 8)
+            if inner != -1:
+                video_url = video_url[inner:]
+            if not video_url.startswith("http"):
+                video_url = None
+        # Use swagitId as fallback when it's a full URL
+        if not video_url and swagit_id_raw and swagit_id_raw.startswith("http"):
+            video_url = swagit_id_raw
 
         return PrimeGovMeeting(
             primegov_id=raw["id"],

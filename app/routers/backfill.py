@@ -1039,16 +1039,14 @@ def backfill_reset_stuck(db: Session = Depends(get_db)):
 @router.post("/clear-errors/{meeting_id}")
 def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
     """
-    Delete all error-status process jobs for a meeting, allowing it to be
-    retried after the crash counter (3 failures) has blocked it.
-    Also resets running jobs for the meeting to allow immediate retry.
+    Delete all error-status jobs (any stage) for a meeting, allowing it to be
+    retried.  Also resets running jobs for the meeting to allow immediate retry.
     """
     from app import models
     deleted = (
         db.query(models.ProcessingJob)
         .filter(
             models.ProcessingJob.meeting_id == meeting_id,
-            models.ProcessingJob.stage == "process",
             models.ProcessingJob.status.in_(["error", "running"]),
         )
         .all()
@@ -1057,5 +1055,5 @@ def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
     for job in deleted:
         db.delete(job)
     db.commit()
-    logger.info("clear-errors: deleted %d process job(s) for meeting %s", count, meeting_id)
+    logger.info("clear-errors: deleted %d job(s) for meeting %s", count, meeting_id)
     return {"meeting_id": meeting_id, "cleared": count}
