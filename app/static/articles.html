@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>News Articles — Civic Media</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .articles-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 0 16px;
+    }
+    .articles-toolbar input[type="text"],
+    .articles-toolbar input[type="date"],
+    .articles-toolbar select {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-family: 'IBM Plex Sans', sans-serif;
+      font-size: 0.82rem;
+      padding: 5px 10px;
+      height: 32px;
+    }
+    .articles-toolbar input[type="text"] { width: 220px; }
+    .articles-toolbar select             { width: 200px; }
+    .articles-toolbar input[type="date"] { width: 138px; }
+    .articles-toolbar label {
+      font-size: 0.72rem;
+      color: #888;
+      white-space: nowrap;
+    }
+    .articles-toolbar .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* Article card */
+    .article-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+    .article-card:hover { border-color: rgba(255,255,255,0.2); }
+    .article-card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 14px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .article-card-header:hover { background: rgba(255,255,255,0.03); }
+    .article-meta {
+      flex: 0 0 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 3px;
+      min-width: 100px;
+    }
+    .article-source-badge {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.62rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: rgba(74,172,255,0.15);
+      color: #4aacff;
+      white-space: nowrap;
+    }
+    .article-date {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.68rem;
+      color: #888;
+      white-space: nowrap;
+    }
+    .article-body { flex: 1 1 0; min-width: 0; }
+    .article-headline {
+      font-size: 0.93rem;
+      font-weight: 500;
+      color: #e8e8e8;
+      line-height: 1.35;
+      margin-bottom: 3px;
+    }
+    .article-author {
+      font-size: 0.72rem;
+      color: #777;
+      margin-bottom: 3px;
+    }
+    .article-excerpt {
+      font-size: 0.78rem;
+      color: #aaa;
+      line-height: 1.45;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .article-chevron {
+      flex: 0 0 auto;
+      color: #555;
+      font-size: 0.9rem;
+      transition: transform 0.2s;
+      padding-top: 2px;
+    }
+    .article-card.expanded .article-chevron { transform: rotate(90deg); }
+
+    /* Article detail */
+    .article-detail {
+      display: none;
+      padding: 0 14px 14px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+    }
+    .article-card.expanded .article-detail { display: block; }
+    .article-detail-actions {
+      display: flex;
+      gap: 8px;
+      padding: 10px 0 12px;
+      align-items: center;
+    }
+    .article-detail-actions a {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.7rem;
+      color: #4aacff;
+      text-decoration: none;
+      padding: 3px 8px;
+      border: 1px solid rgba(74,172,255,0.3);
+      border-radius: 3px;
+    }
+    .article-detail-actions a:hover { background: rgba(74,172,255,0.1); }
+    .article-full-text {
+      font-size: 0.82rem;
+      color: #c8c8c8;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 500px;
+      overflow-y: auto;
+      padding: 10px 12px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 4px;
+      margin-bottom: 12px;
+    }
+    .article-image-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .article-image-strip img {
+      height: 90px;
+      width: auto;
+      border-radius: 4px;
+      object-fit: cover;
+      cursor: pointer;
+      opacity: 0.85;
+      transition: opacity 0.15s;
+    }
+    .article-image-strip img:hover { opacity: 1; }
+    .article-links-section {
+      margin-top: 8px;
+    }
+    .article-links-title {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.68rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+    .article-links-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .article-links-list li {
+      font-size: 0.76rem;
+      padding: 2px 0;
+    }
+    .article-links-list a {
+      color: #6bc5ff;
+      word-break: break-all;
+    }
+    .article-tags-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .article-tag {
+      font-size: 0.67rem;
+      font-family: 'IBM Plex Mono', monospace;
+      color: #999;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 3px;
+    }
+
+    /* Pagination */
+    .pagination-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 0 4px;
+      font-size: 0.78rem;
+      color: #888;
+    }
+    .pagination-bar button {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px;
+      color: #ccc;
+      cursor: pointer;
+      font-size: 0.78rem;
+      padding: 4px 12px;
+    }
+    .pagination-bar button:disabled { opacity: 0.35; cursor: default; }
+    .pagination-bar button:not(:disabled):hover { background: rgba(255,255,255,0.1); }
+  </style>
+</head>
+<body class="page-index">
+
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">&#x2B21;</span>
+      <span class="brand-name">CIVIC MEDIA</span>
+    </div>
+    <div class="header-nav">
+      <a href="/" class="nav-link">Home</a>
+      <a href="/speakers" class="nav-link">Speakers</a>
+      <a href="/articles" class="nav-link active">News</a>
+      <a href="/clips" class="nav-link">Clips</a>
+      <button class="btn btn-ghost btn-sm" id="shutdown-btn" title="Shutdown server"
+              style="margin-left:8px;font-size:1.1em;padding:4px 8px;">&#x23FB;</button>
+    </div>
+  </header>
+
+  <main class="index-main">
+    <div class="index-content">
+
+      <div class="section-header">
+        <h2>News Articles</h2>
+        <span class="meeting-count" id="article-count">&mdash;</span>
+      </div>
+
+      <!-- Filters -->
+      <div class="articles-toolbar">
+        <div class="toolbar-group">
+          <input type="text" id="search-input" placeholder="Search headlines &amp; text…" />
+        </div>
+        <div class="toolbar-group">
+          <label>Source</label>
+          <select id="source-select">
+            <option value="">All sources</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label>From</label>
+          <input type="date" id="date-from" />
+        </div>
+        <div class="toolbar-group">
+          <label>To</label>
+          <input type="date" id="date-to" />
+        </div>
+        <button class="btn btn-sm" id="filter-btn" style="height:32px;">Filter</button>
+        <button class="btn btn-ghost btn-sm" id="clear-btn" style="height:32px;">Clear</button>
+      </div>
+
+      <!-- Article list -->
+      <div id="articles-list">
+        <div class="loading-state">Loading articles…</div>
+      </div>
+
+      <!-- Pagination -->
+      <div class="pagination-bar" id="pagination-bar" style="display:none;">
+        <button id="prev-btn">← Prev</button>
+        <span id="page-info"></span>
+        <button id="next-btn">Next →</button>
+      </div>
+
+    </div>
+  </main>
+
+  <script>
+    document.getElementById("shutdown-btn").addEventListener("click", async () => {
+      if (!confirm("Shut down Civic Media server?")) return;
+      try { await fetch("/api/system/shutdown", { method: "POST" }); } catch {}
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#888;"><div style="text-align:center"><h2>Server stopped</h2><p>Close this tab or restart with .\\start.ps1</p></div></div>';
+    });
+  </script>
+  <script src="/static/articles.js"></script>
+</body>
+</html>

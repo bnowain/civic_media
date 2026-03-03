@@ -449,3 +449,52 @@ class IngestStatusResponse(BaseModel):
     episodes_downloaded: int = 0
     stage: Optional[str] = None
     error: Optional[str] = None
+
+
+# ── News Articles ─────────────────────────────────────────────────────────────
+
+class NewsArticleCreate(BaseModel):
+    canonical_url: str
+    source_slug: str
+    capture_method: str = "rss"
+    headline: Optional[str] = None
+    author: Optional[str] = None
+    published_at: Optional[str] = None           # ISO datetime or date string
+    article_text: Optional[str] = None
+    description: Optional[str] = None
+    preview_image_url: Optional[str] = None
+    image_urls: Optional[list[str]] = None       # inline image URLs
+    embedded_links: Optional[list[dict]] = None  # [{text, href}, ...]
+    source_tags: Optional[list[str]] = None      # tags from RSS feed
+    section: Optional[str] = None                # 'local', 'politics', 'crime-courts', 'opinion'
+    article_type: Optional[str] = None           # 'news', 'opinion', 'letter', 'analysis'
+    source_modified_at: Optional[str] = None     # article:modified_time from source meta
+    word_count: Optional[int] = None
+    filter_reason: Optional[str] = None          # which relevance rule passed
+    fetch_status: Optional[str] = None           # 'full', 'partial', 'metadata_only'
+    external_document_urls: Optional[list[str]] = None  # linked PDFs / gov docs
+
+
+class NewsArticleOut(BaseModel):
+    article_id: str
+    canonical_url: str
+    source_slug: str
+    capture_method: str
+    headline: Optional[str]
+    author: Optional[str]
+    published_at: Optional[str]
+    article_text: Optional[str]
+    description: Optional[str]
+    preview_image_url: Optional[str]
+    image_urls: Optional[list[str]]
+    embedded_links: Optional[list[dict]]
+    source_tags: Optional[list[str]]
+    section: Optional[str]
+    article_type: Optional[str]
+    source_modified_at: Optional[str]
+    word_count: Optional[int]
+    filter_reason: Optional[str]
+    fetch_status: Optional[str]
+    external_document_urls: Optional[list[str]]
+    created_at: datetime
+    updated_at: Optional[datetime]

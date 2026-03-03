@@ -27,7 +27,7 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
-    assignments, backfill, clips, documents, groups, ingest, library,
+    articles, assignments, backfill, clips, documents, groups, ingest, library,
     media, meetings, mentions, news, people, primegov, segments, system, tags,
     tagging, transcribe, venues, votes,
 )
@@ -189,6 +189,7 @@ async def log_request_timing(request: Request, call_next):
 
 
 # ── API routers ──────────────────────────────────────────────────────────────
+app.include_router(articles.router)
 app.include_router(meetings.router)
 app.include_router(media.router)
 app.include_router(documents.router)
@@ -245,6 +246,16 @@ def clips_page():
 @app.get("/backfill", include_in_schema=False)
 def backfill_page():
     return FileResponse(str(_static_dir / "backfill.html"))
+
+
+@app.get("/articles", include_in_schema=False)
+def articles_page():
+    return FileResponse(str(_static_dir / "articles.html"))
+
+
+@app.get("/articles/{article_id}", include_in_schema=False)
+def article_detail_page(article_id: str):
+    return FileResponse(str(_static_dir / "articles.html"))
 
 
 # ── Favicon ──────────────────────────────────────────────────────────────────

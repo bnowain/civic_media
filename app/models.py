@@ -5,7 +5,7 @@ Tables: meetings, governing_bodies, media_files, documents,
 transcript_segments, people, voiceprints, segment_assignments,
 tv_newscasts, tv_news_segments, tv_news_transcription_chunks,
 tags, tag_assignments, tag_denials, people_mentions, people_mention_denials,
-clips.
+clips, news_articles.
 """
 
 from __future__ import annotations
@@ -515,3 +515,47 @@ class ProcessingJob(Base):
     updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     meeting = relationship("Meeting", backref="processing_jobs")
+
+
+# ── News Articles (RSS + authenticated scrape) ────────────────────────────────
+
+class NewsArticle(Base):
+    """
+    Text articles ingested from RSS feeds or authenticated scrapers.
+
+    Deduplication key: canonical_url (query-string-stripped URL).
+    source_slug identifies the outlet (e.g. 'shasta-scout', 'record-searchlight').
+    capture_method: 'rss' | 'authenticated' | 'stealth'
+    JSON columns (image_urls, embedded_links, source_tags) stored as TEXT.
+    """
+    __tablename__ = "news_articles"
+    __table_args__ = (
+        Index('ix_news_articles_source_slug', 'source_slug'),
+        Index('ix_news_articles_published_at', 'published_at'),
+    )
+
+    article_id        = Column(String,   primary_key=True, default=_gen_id)
+    canonical_url     = Column(Text,     nullable=False, unique=True)
+    source_slug       = Column(String,   nullable=False)   # e.g. 'shasta-scout'
+    capture_method    = Column(String,   nullable=False, default='rss')
+    headline          = Column(Text,     nullable=True)
+    author            = Column(String,   nullable=True)
+    published_at      = Column(String,   nullable=True)    # ISO datetime string
+    article_text      = Column(Text,     nullable=True)    # full body
+    description       = Column(Text,     nullable=True)    # lead / summary
+    preview_image_url = Column(Text,     nullable=True)
+    image_urls        = Column(Text,     nullable=True)    # JSON list of inline img URLs
+    embedded_links    = Column(Text,     nullable=True)    # JSON list of {text, href}
+    source_tags       = Column(Text,     nullable=True)    # JSON list from feed
+
+    # ── Additional metadata ──────────────────────────────────────────────────
+    section               = Column(String,   nullable=True)  # 'local', 'politics', 'crime-courts', 'opinion', etc.
+    article_type          = Column(String,   nullable=True)  # 'news', 'opinion', 'letter', 'analysis', 'press_release'
+    source_modified_at    = Column(String,   nullable=True)  # article:modified_time from OG meta
+    word_count            = Column(Integer,  nullable=True)  # len(article_text.split())
+    filter_reason         = Column(String,   nullable=True)  # relevance filter rule: 'trusted-source', 'keyword:budget'
+    fetch_status          = Column(String,   nullable=True)  # 'full', 'partial', 'metadata_only'
+    external_document_urls = Column(Text,    nullable=True)  # JSON list of linked doc URLs (.pdf, .docx, gov portals)
+
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
