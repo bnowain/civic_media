@@ -82,13 +82,17 @@ class FreedomInActionScraper(BaseScraper):
             if not page_episodes:
                 break  # empty page — stop paginating
 
-            # Early stop: keep only episodes newer than the cutoff; stop if we hit it.
+            # Early stop: keep episodes on or after the cutoff date; stop when
+            # we see content strictly before it.  Using >= (not >) so that shows
+            # publishing multiple episodes per day (Hour One / Hour Two) don't
+            # lose a second episode whose date equals the cutoff.  URL-based
+            # dedup in run_ingest() will skip anything already downloaded.
             if stop_after_date:
-                new_episodes = [ep for ep in page_episodes if ep.episode_date > stop_after_date]
+                new_episodes = [ep for ep in page_episodes if ep.episode_date >= stop_after_date]
                 episodes.extend(new_episodes)
                 if len(new_episodes) < len(page_episodes):
                     logger.info(
-                        "  Early stop on page %d: %d new, %d at/before cutoff %s",
+                        "  Early stop on page %d: %d new, %d before cutoff %s",
                         pages_fetched, len(new_episodes),
                         len(page_episodes) - len(new_episodes), stop_after_date,
                     )

@@ -113,6 +113,20 @@ Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|js
 
 `config/vocab_hints.yml` contains domain-specific terms (people, places, agencies) fed to Whisper's `initial_prompt` via `app/services/vocab.py`. Each term has an `active` flag. The prompt is capped at 850 chars.
 
+## Meeting Processing Rules
+
+**`docs/meeting_processing_rules.md`** — Canonical rules for processing government
+meeting transcripts: speaker inference (regex + LLM + role fallback), agenda detection,
+grounding/anti-hallucination, and processing checklist. Read before building or modifying
+any meeting summary pipeline.
+
+Also in `docs/`:
+- `summary_prompts.md` — Short/long summary prompt templates, Notable Moment types, Brown Act compliance
+- `tag_taxonomy.md` — 107 canonical tags across 5 dimensions (TOPIC, AGENCY, ACTION, MONEY, PLACE)
+- `diarization_codex.md` — Audio/voiceprint pipeline (speaker ID from audio, not text)
+
+---
+
 ## Atlas Integration
 
 This project is a spoke in the **Atlas** hub-and-spoke ecosystem. Atlas is a central orchestration hub that routes queries across spoke apps. It lives in a sibling directory (`E:\0-Automated-Apps\Atlas`).
@@ -126,6 +140,7 @@ This project is a spoke in the **Atlas** hub-and-spoke ecosystem. Atlas is a cen
 5. **No spoke-to-spoke dependencies.** All cross-app communication goes through Atlas.
    **Approved exceptions** (documented peer service calls):
    - `Shasta-PRA-Backup → civic_media POST /api/transcribe` — Transcription-as-a-Service
+   - `Atlas → Mission_Control POST /models/run` (and related LLM endpoints) — Atlas delegates all LLM execution to Mission Control rather than using its own built-in LLM service.
    New cross-spoke calls must be approved and added to this exception list.
 6. If modifying or removing an API endpoint that Atlas may depend on, **stop and warn** before proceeding.
 7. New endpoints added for Atlas integration should be general-purpose and useful standalone, not tightly coupled to Atlas internals.
@@ -259,3 +274,20 @@ MASTER_SCHEMA.md update, and a Changelog entry in master_codex.md.
 |-------|--------------|-----------|--------|
 | `tv_newscasts` | `status` | `newscast_status` | Bare `status` is ambiguous across ecosystem tables |
 | `processing_jobs` | `status` | `processing_job_status` | Bare `status` is ambiguous across ecosystem tables |
+
+## Unified Tools — Syllego (MMI)
+
+If this project needs to download media from an external URL and doesn't have its own ingest path for that platform, **Syllego (MMI)** is available as an optional shared library.
+
+```python
+import os
+os.environ["MMI_CALLER"] = "civic-media"   # identifies this app in Syllego's log
+import mmi
+result = mmi.ingest(url)   # returns IngestionResult
+if result.success:
+    print(result.filename)
+```
+
+**Install:** `pip install -e "E:/0-Automated-Apps/Unified-Tools/Syllego"`
+**Supports:** YouTube, Facebook, Rumble, TikTok, Instagram, Reddit, Vimeo, and more.
+**Full API:** `E:\0-Automated-Apps\Unified-Tools\Syllego\AGENT_SPEC.md`

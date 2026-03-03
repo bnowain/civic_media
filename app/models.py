@@ -68,6 +68,7 @@ class Meeting(Base):
     meeting_date = Column(String, nullable=False)   # ISO date string YYYY-MM-DD
     title        = Column(String, nullable=False)
     category     = Column(String, nullable=False, default="meeting")  # "meeting" | "audio" | "news" | "web_series"
+    program_type = Column(String, nullable=True)  # "governing_meeting" | "media_broadcast" | "news_broadcast" | "web_show"
     media_directory = Column(String)
     group_id     = Column(String, ForeignKey("groups.group_id"), nullable=True)
     description       = Column(Text, nullable=True)       # episode title, guest names

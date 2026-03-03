@@ -55,6 +55,7 @@ class MeetingCreate(BaseModel):
     meeting_date: str   # YYYY-MM-DD
     title: str
     category: str = "meeting"
+    program_type: Optional[str] = None  # "governing_meeting" | "media_broadcast" | "news_broadcast" | "web_show"
     group_id: Optional[str] = None
     description: Optional[str] = None
     source_url: Optional[str] = None
@@ -82,6 +83,7 @@ class MeetingUpdate(BaseModel):
     meeting_date: Optional[str] = None
     group_name: Optional[str] = None
     meeting_type: Optional[str] = None
+    program_type: Optional[str] = None
     venue_id: Optional[str] = None
     summary_short: Optional[str] = None
     summary_long: Optional[str] = None

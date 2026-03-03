@@ -71,7 +71,7 @@ def run_discovery(
     if mode == "update" and years is None:
         newest = (
             db.query(func.max(Meeting.meeting_date))
-            .filter(Meeting.category == "meeting")
+            .filter(Meeting.program_type == "governing_meeting")
             .scalar()
         )
         if newest:
@@ -168,6 +168,7 @@ def run_discovery(
                 meeting_date=pm.meeting_date_iso,
                 title=pm.title,
                 category="meeting",
+                program_type="governing_meeting",
                 group_id=group_cache[pm.committee_name],
                 primegov_id=pm.primegov_id,
                 video_url=pm.video_url,

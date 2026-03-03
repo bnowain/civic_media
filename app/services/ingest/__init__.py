@@ -173,8 +173,14 @@ def run_ingest(db: Session, source_id: str | None = None):
             existing_urls = {r[0] for r in rows}
 
         # Cross-source dedup: also check by date + show_name (group_name)
-        # so the same episode from SecureNet and Podbean doesn't create duplicates
+        # so the same episode from SecureNet and Podbean doesn't create duplicates.
+        #
+        # Exception: shows that publish multiple episodes per day (e.g. Freedom in
+        # Action Hour One / Hour Two) must NOT be blocked by date+show dedup —
+        # each hour has a unique audio_url and would appear as a false duplicate.
+        # We detect multi-episode-per-day shows dynamically from the DB.
         existing_date_show: set[tuple[str, str]] = set()
+        multi_episode_shows: set[str] = set()
         if audio_episodes:
             show_names = {ep.show_name for ep in audio_episodes if ep.show_name}
             if show_names:
@@ -188,12 +194,34 @@ def run_ingest(db: Session, source_id: str | None = None):
                 )
                 existing_date_show = {(r[0], r[1]) for r in rows}
 
+                # Find shows that have >1 episode on any single date — skip
+                # cross-source dedup for these (URL dedup handles them instead).
+                multi_ep_rows = (
+                    db.query(models.Meeting.group_name)
+                    .filter(
+                        models.Meeting.category == "audio",
+                        models.Meeting.group_name.in_(show_names),
+                    )
+                    .group_by(models.Meeting.group_name, models.Meeting.meeting_date)
+                    .having(func.count() > 1)
+                    .all()
+                )
+                multi_episode_shows = {r[0] for r in multi_ep_rows}
+                if multi_episode_shows:
+                    logger.info(
+                        "  Multi-episode-per-day shows (URL dedup only): %s",
+                        sorted(multi_episode_shows),
+                    )
+
         new_episodes = []
         for ep in audio_episodes:
             if ep.audio_url in existing_urls:
                 continue
-            # Cross-source dedup: skip if same show + date already exists
-            if ep.show_name and (ep.episode_date, ep.show_name) in existing_date_show:
+            # Cross-source dedup: skip if same show + date already exists,
+            # but only for single-episode-per-day shows.
+            if (ep.show_name
+                    and ep.show_name not in multi_episode_shows
+                    and (ep.episode_date, ep.show_name) in existing_date_show):
                 logger.info("  Cross-source dup skipped: %s on %s", ep.show_name, ep.episode_date)
                 continue
             new_episodes.append(ep)

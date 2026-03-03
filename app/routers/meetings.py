@@ -14,9 +14,18 @@ from app.config import MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
 
+_CATEGORY_TO_PROGRAM_TYPE = {
+    "meeting":    "governing_meeting",
+    "audio":      "media_broadcast",
+    "news":       "news_broadcast",
+    "web_series": "web_show",
+}
+
+
 @router.get("/", response_model=list[schemas.MeetingOut])
 def list_meetings(
     category: Optional[str] = Query(None),
+    program_type: Optional[str] = Query(None),
     group_id: Optional[str] = Query(None),
     meeting_type: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),   # YYYY-MM-DD inclusive
@@ -27,6 +36,8 @@ def list_meetings(
 ):
     q = db.query(models.Meeting)
 
+    if program_type:
+        q = q.filter(models.Meeting.program_type == program_type)
     if category:
         q = q.filter(models.Meeting.category == category)
     if group_id:
@@ -54,6 +65,10 @@ def create_meeting(payload: schemas.MeetingCreate, db: Session = Depends(get_db)
 
     meeting_id = str(uuid.uuid4())
     data = payload.model_dump()
+
+    # Auto-derive program_type from category if not supplied
+    if not data.get("program_type") and data.get("category"):
+        data["program_type"] = _CATEGORY_TO_PROGRAM_TYPE.get(data["category"])
 
     # Auto-create a Group for audio/web_series when group_name text is
     # provided but no group_id was supplied.
