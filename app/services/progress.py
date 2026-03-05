@@ -114,10 +114,35 @@ def create_job(
     celery_task_id: Optional[str] = None,
 ):
     """
-    Insert a new ProcessingJob row with status='queued'.
-    Returns the created job.
+    Insert a new ProcessingJob row with status='queued', or return an existing
+    queued job for the same meeting_id (idempotent for multi-worker dedup).
+
+    When the backfill endpoint creates a job before delay(), and the task itself
+    calls create_job again, this finds the existing queued row and updates its
+    stage/celery_task_id instead of creating a duplicate.
     """
     from app.models import ProcessingJob
+
+    # Reuse existing queued job for this meeting (dedup guard)
+    existing = (
+        db.query(ProcessingJob)
+        .filter(
+            ProcessingJob.meeting_id == meeting_id,
+            ProcessingJob.status == "queued",
+        )
+        .first()
+    )
+    if existing:
+        existing.stage = stage
+        if celery_task_id:
+            existing.celery_task_id = celery_task_id
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        logger.debug("create_job: reused existing queued job %s for %s/%s",
+                      existing.job_id, meeting_id, stage)
+        return existing
+
     job = ProcessingJob(
         meeting_id=meeting_id,
         stage=stage,

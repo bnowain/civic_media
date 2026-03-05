@@ -153,23 +153,29 @@ def confirm_assignment(
     #    Multi-clip extraction is queued BEFORE rerun so that with
     #    concurrency=1 the extra voiceprints exist by the time
     #    re-evaluation starts.
-    from app.config import MULTI_CLIP_MIN_SEGMENT
-    from app.tasks import extract_multi_voiceprints_task, rerun_voiceprints_task
-    from app.services.worker_manager import ensure_worker
+    #    If workers are busy (solo pool can't respond to ping while processing),
+    #    the tasks still go to Redis and will be picked up when a worker is free.
+    try:
+        from app.config import MULTI_CLIP_MIN_SEGMENT
+        from app.tasks import extract_multi_voiceprints_task, rerun_voiceprints_task
 
-    ensure_worker()
-    if segment.embedding and seg_duration >= MULTI_CLIP_MIN_SEGMENT:
-        extract_multi_voiceprints_task.delay(segment_id, payload.person_id)
+        if segment.embedding and seg_duration >= MULTI_CLIP_MIN_SEGMENT:
+            extract_multi_voiceprints_task.delay(segment_id, payload.person_id)
+            logger.info(
+                "Queued multi-clip voiceprint extraction for segment %s (%.1fs)",
+                segment_id, seg_duration,
+            )
+
+        rerun_voiceprints_task.delay(segment.meeting_id)
         logger.info(
-            "Queued multi-clip voiceprint extraction for segment %s (%.1fs)",
-            segment_id, seg_duration,
+            "Queued background voiceprint re-evaluation for meeting %s",
+            segment.meeting_id,
         )
-
-    rerun_voiceprints_task.delay(segment.meeting_id)
-    logger.info(
-        "Queued background voiceprint re-evaluation for meeting %s",
-        segment.meeting_id,
-    )
+    except Exception as e:
+        logger.warning(
+            "Could not queue background tasks for segment %s: %s (confirm still saved)",
+            segment_id, e,
+        )
 
     return assign
 
@@ -225,14 +231,18 @@ def unconfirm_assignment(
     db.refresh(assign)
 
     # ── Trigger background rerun so system re-matches this segment ─────────
-    from app.tasks import rerun_voiceprints_task
-    from app.services.worker_manager import ensure_worker
-    ensure_worker()
-    rerun_voiceprints_task.delay(segment.meeting_id)
-    logger.info(
-        "Queued background voiceprint re-evaluation for meeting %s (unconfirm)",
-        segment.meeting_id,
-    )
+    try:
+        from app.tasks import rerun_voiceprints_task
+        rerun_voiceprints_task.delay(segment.meeting_id)
+        logger.info(
+            "Queued background voiceprint re-evaluation for meeting %s (unconfirm)",
+            segment.meeting_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not queue rerun for meeting %s: %s (unconfirm still saved)",
+            segment.meeting_id, e,
+        )
 
     return assign
 
@@ -313,8 +323,6 @@ def reprocess_meeting(meeting_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Meeting not found")
 
     from app.tasks import rerun_voiceprints_task
-    from app.services.worker_manager import ensure_worker
-    ensure_worker()
     rerun_voiceprints_task.delay(meeting_id)
     return {"meeting_id": meeting_id, "status": "queued"}
 

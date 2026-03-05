@@ -165,7 +165,7 @@ class PersonCreate(BaseModel):
 
 class PersonOut(PersonCreate):
     person_id: str
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -461,6 +461,7 @@ class NewsArticleCreate(BaseModel):
     author: Optional[str] = None
     published_at: Optional[str] = None           # ISO datetime or date string
     article_text: Optional[str] = None
+    content_html: Optional[str] = None           # source HTML preserving structure
     description: Optional[str] = None
     preview_image_url: Optional[str] = None
     image_urls: Optional[list[str]] = None       # inline image URLs
@@ -484,6 +485,7 @@ class NewsArticleOut(BaseModel):
     author: Optional[str]
     published_at: Optional[str]
     article_text: Optional[str]
+    content_html: Optional[str]
     description: Optional[str]
     preview_image_url: Optional[str]
     image_urls: Optional[list[str]]
@@ -498,3 +500,144 @@ class NewsArticleOut(BaseModel):
     external_document_urls: Optional[list[str]]
     created_at: datetime
     updated_at: Optional[datetime]
+    comment_count: Optional[int] = None
+
+
+# ── Article Comments ─────────────────────────────────────────────────────────
+
+class ArticleCommentCreate(BaseModel):
+    platform_comment_id: Optional[str] = None
+    parent_comment_id: Optional[str] = None       # our UUID, resolved during ingest
+    platform_parent_id: Optional[str] = None       # source platform parent ID (for mapping)
+    author_name: Optional[str] = None
+    author_avatar_url: Optional[str] = None
+    author_url: Optional[str] = None
+    comment_text: Optional[str] = None
+    comment_html: Optional[str] = None
+    published_at: Optional[str] = None
+    comment_status: Optional[str] = "approved"
+    reaction_count: Optional[int] = None
+
+
+class ArticleCommentOut(BaseModel):
+    comment_id: str
+    article_id: str
+    platform_comment_id: Optional[str]
+    parent_comment_id: Optional[str]
+    author_name: Optional[str]
+    author_avatar_url: Optional[str]
+    author_url: Optional[str]
+    comment_text: Optional[str]
+    comment_html: Optional[str]
+    published_at: Optional[str]
+    comment_status: Optional[str]
+    reaction_count: Optional[int]
+    reply_count: Optional[int] = 0
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ArticleCommentBulkCreate(BaseModel):
+    comments: list[ArticleCommentCreate]
+
+
+# ── Facebook Pages ──────────────────────────────────────────────────────────
+
+class FacebookPageOut(BaseModel):
+    page_id: str
+    page_name: str
+    page_url: Optional[str]
+    page_type: Optional[str]
+    post_count: Optional[int] = 0
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Facebook Posts ──────────────────────────────────────────────────────────
+
+class FacebookPostCreate(BaseModel):
+    page_name: str
+    page_url: Optional[str] = None
+    post_url: str
+    platform_post_id: Optional[str] = None
+    author_name: Optional[str] = None
+    author_profile_url: Optional[str] = None
+    post_text: Optional[str] = None
+    published_at: Optional[str] = None
+    content_type: str = "post"
+    shared_from_url: Optional[str] = None
+    shared_from_author: Optional[str] = None
+    reaction_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    share_count: Optional[int] = None
+    view_count: Optional[int] = None
+    engagement_json: Optional[str] = None
+    media_urls: Optional[list[str]] = None
+    external_links: Optional[list[str]] = None
+    capture_method: str = "signal-desk"
+    extraction_strategy: Optional[str] = None
+
+
+class FacebookPostOut(BaseModel):
+    post_id: str
+    page_id: Optional[str]
+    page_name: Optional[str] = None
+    platform_post_id: Optional[str]
+    post_url: str
+    author_name: Optional[str]
+    author_profile_url: Optional[str]
+    post_text: Optional[str]
+    published_at: Optional[str]
+    content_type: Optional[str]
+    shared_from_url: Optional[str]
+    shared_from_author: Optional[str]
+    reaction_count: Optional[int]
+    comment_count: Optional[int]
+    share_count: Optional[int]
+    view_count: Optional[int]
+    media_urls: Optional[list[str]] = None
+    external_links: Optional[list[str]] = None
+    capture_method: Optional[str]
+    extraction_strategy: Optional[str]
+    db_comment_count: Optional[int] = 0
+    created_at: datetime
+    updated_at: Optional[datetime]
+
+    model_config = {"from_attributes": True}
+
+
+# ── Facebook Comments ───────────────────────────────────────────────────────
+
+class FacebookCommentCreate(BaseModel):
+    platform_comment_id: Optional[str] = None
+    parent_comment_id: Optional[str] = None
+    platform_parent_id: Optional[str] = None
+    author_name: Optional[str] = None
+    author_profile_url: Optional[str] = None
+    comment_text: Optional[str] = None
+    published_at: Optional[str] = None
+    reaction_count: Optional[int] = None
+    is_reply: Optional[int] = 0
+
+
+class FacebookCommentOut(BaseModel):
+    comment_id: str
+    post_id: str
+    platform_comment_id: Optional[str]
+    parent_comment_id: Optional[str]
+    author_name: Optional[str]
+    author_profile_url: Optional[str]
+    comment_text: Optional[str]
+    published_at: Optional[str]
+    reaction_count: Optional[int]
+    is_reply: Optional[int]
+    reply_count: Optional[int] = 0
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FacebookCommentBulkCreate(BaseModel):
+    comments: list[FacebookCommentCreate]

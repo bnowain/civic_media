@@ -86,6 +86,21 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
 
         original_path = Path(media.file_path)
 
+        # Guard: if file_path already contains _540p, it's already transcoded —
+        # just update DB status and skip.
+        if "_540p" in original_path.stem:
+            logger.info(
+                "File already transcoded (%s) — updating DB status only",
+                original_path.name,
+            )
+            media.transcode_status = "transcoded"
+            db.commit()
+            _write_progress(meeting_id, "Transcode complete", 100,
+                            f"Already 540p: {original_path.name}")
+            if auto_process:
+                _auto_dispatch_pipeline(meeting_id, media_id)
+            return {"meeting_id": meeting_id, "status": "transcoded", "already_540p": True}
+
         # Build output path: same dir, add _540p suffix
         stem = original_path.stem
         out_path = original_path.parent / f"{stem}_540p.mp4"

@@ -388,6 +388,15 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
             return {"error": "MediaFile not found", "status": "error"}
 
         original_path = Path(media.file_path)
+
+        # Guard: already a _540p file — just mark as transcoded
+        if "_540p" in original_path.stem:
+            media.transcode_status = "transcoded"
+            db.commit()
+            complete_job(db, meeting_id)
+            logger.info("Already transcoded (%s) — skipping", original_path.name)
+            return {"meeting_id": meeting_id, "status": "transcoded", "already_540p": True}
+
         if not original_path.exists():
             fail_job(db, meeting_id, "Source file not found")
             return {"error": "Source file not found", "status": "error"}

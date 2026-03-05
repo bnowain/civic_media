@@ -58,7 +58,6 @@ TAXONOMY: dict[str, list[str]] = {
         "Hospital / Healthcare Workers",
         "Utility Rates",
         "Budget / Finance",
-        "Grants",
         "Ethics",
     ],
     "agency": [
@@ -97,7 +96,6 @@ TAXONOMY: dict[str, list[str]] = {
         "Ordinance",
         "Resolution",
         "Closed Session",
-        "Settlement",
         "Litigation",
         "Eminent Domain",
         "Recall Filed",

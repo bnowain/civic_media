@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.database import get_db
-from app.models import NewsArticle
+from app.models import ArticleComment, NewsArticle
 
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 
@@ -55,6 +55,7 @@ def _row_to_out(row: NewsArticle) -> dict:
         "author":                row.author,
         "published_at":          row.published_at,
         "article_text":          row.article_text,
+        "content_html":          row.content_html,
         "description":           row.description,
         "preview_image_url":     row.preview_image_url,
         "image_urls":            _parse_json(row.image_urls),
@@ -100,13 +101,45 @@ def ingest_article(payload: schemas.NewsArticleCreate, db: Session = Depends(get
     """
     url = payload.canonical_url.split('?')[0].rstrip('/')
 
-    existing = db.query(NewsArticle).filter(NewsArticle.canonical_url == url).first()
-    if existing:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=200, content=_row_to_out(existing))
-
     def _to_json(val) -> str | None:
         return json.dumps(val) if val else None
+
+    existing = db.query(NewsArticle).filter(NewsArticle.canonical_url == url).first()
+    if existing:
+        # Update any fields that were previously null but now have values
+        updatable = {
+            'article_text':           payload.article_text,
+            'content_html':           payload.content_html,
+            'description':            payload.description,
+            'headline':               payload.headline,
+            'author':                 payload.author,
+            'published_at':           payload.published_at,
+            'preview_image_url':      payload.preview_image_url,
+            'image_urls':             _to_json(payload.image_urls),
+            'embedded_links':         _to_json(payload.embedded_links),
+            'source_tags':            _to_json(payload.source_tags),
+            'section':                payload.section,
+            'article_type':           payload.article_type,
+            'source_modified_at':     payload.source_modified_at,
+            'word_count':             payload.word_count,
+            'filter_reason':          payload.filter_reason,
+            'fetch_status':           payload.fetch_status,
+            'external_document_urls': _to_json(payload.external_document_urls),
+        }
+        changed = False
+        for col, new_val in updatable.items():
+            if new_val is not None and getattr(existing, col) is None:
+                setattr(existing, col, new_val)
+                changed = True
+            # Always update content_html even if existing has a value (backfill override)
+            elif col == 'content_html' and new_val is not None:
+                setattr(existing, col, new_val)
+                changed = True
+        if changed:
+            db.commit()
+            db.refresh(existing)
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=200, content=_row_to_out(existing))
 
     row = NewsArticle(
         article_id             = str(uuid.uuid4()),
@@ -117,6 +150,7 @@ def ingest_article(payload: schemas.NewsArticleCreate, db: Session = Depends(get
         author                 = payload.author,
         published_at           = payload.published_at,
         article_text           = payload.article_text,
+        content_html           = payload.content_html,
         description            = payload.description,
         preview_image_url      = payload.preview_image_url,
         image_urls             = _to_json(payload.image_urls),
@@ -195,6 +229,21 @@ def list_articles(
         NewsArticle.created_at.desc(),
     )
     rows = query.offset(offset).limit(limit).all()
+
+    # Batch-fetch comment counts for all returned articles
+    if rows:
+        article_ids = [r.article_id for r in rows]
+        comment_counts = dict(
+            db.query(
+                ArticleComment.article_id,
+                func.count(ArticleComment.comment_id),
+            )
+            .filter(ArticleComment.article_id.in_(article_ids))
+            .group_by(ArticleComment.article_id)
+            .all()
+        )
+        return [{**_row_to_out(r), "comment_count": comment_counts.get(r.article_id, 0)} for r in rows]
+
     return [_row_to_out(r) for r in rows]
 
 
@@ -204,7 +253,10 @@ def get_article(article_id: str, db: Session = Depends(get_db)):
     row = db.query(NewsArticle).filter(NewsArticle.article_id == article_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Article not found")
-    return _row_to_out(row)
+    cc = db.query(func.count(ArticleComment.comment_id)).filter(
+        ArticleComment.article_id == article_id
+    ).scalar() or 0
+    return {**_row_to_out(row), "comment_count": cc}
 
 
 @router.delete("/{article_id}", status_code=204)

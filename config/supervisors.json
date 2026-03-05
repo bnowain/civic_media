@@ -1,0 +1,190 @@
+{
+  "jurisdiction": "Shasta County Board of Supervisors",
+  "time_window": { "start": "2013-01-01", "end": "2026-12-31" },
+  "district_supervisors": [
+    {
+      "district": 1,
+      "supervisor": "David Kehoe",
+      "start_date": "1999-01-05",
+      "end_date": "2019-01-08",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 1,
+      "supervisor": "Joe Chimenti",
+      "start_date": "2019-01-08",
+      "end_date": "2023-01-03",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 1,
+      "supervisor": "Kevin W. Crye",
+      "start_date": "2023-01-03",
+      "end_date": null,
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 2,
+      "supervisor": "Leonard F. Moty",
+      "start_date": "2009-01-06",
+      "end_date": "2022-03-01",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 2,
+      "supervisor": "Tim Garman",
+      "start_date": "2022-03-01",
+      "end_date": "2025-01-06",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 2,
+      "supervisor": "Allen Long",
+      "start_date": "2025-01-06",
+      "end_date": null,
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 3,
+      "supervisor": "Bill Schappell",
+      "start_date": "2013-01-08",
+      "end_date": "2017-01-10",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 3,
+      "supervisor": "Mary Rickert",
+      "start_date": "2017-01-10",
+      "end_date": "2025-01-06",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 3,
+      "supervisor": "Corkey Harmon",
+      "start_date": "2025-01-06",
+      "end_date": null,
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 4,
+      "supervisor": "Pam Giacomini",
+      "start_date": "2013-01-08",
+      "end_date": "2017-01-01",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 4,
+      "supervisor": "Steve Morgan",
+      "start_date": "2017-01-01",
+      "end_date": "2021-01-05",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 4,
+      "supervisor": "Patrick Jones",
+      "start_date": "2021-01-05",
+      "end_date": "2025-01-06",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 4,
+      "supervisor": "Matt Plummer",
+      "start_date": "2025-01-06",
+      "end_date": null,
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 5,
+      "supervisor": "Les Baugh",
+      "start_date": "2007-01-09",
+      "end_date": "2023-01-03",
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    },
+    {
+      "district": 5,
+      "supervisor": "Chris Kelstrom",
+      "start_date": "2023-01-03",
+      "end_date": null,
+      "source_url": "https://www.shastacounty.gov/media/27961"
+    }
+  ],
+  "leadership_roles": [
+    {
+      "chair": "Pam Giacomini",
+      "vice_chair": "David Kehoe",
+      "start_date": "2016-01-01",
+      "end_date": "2017-01-01"
+    },
+    {
+      "chair": "David Kehoe",
+      "vice_chair": "Les Baugh",
+      "start_date": "2017-01-01",
+      "end_date": "2018-01-01"
+    },
+    {
+      "chair": "Les Baugh",
+      "vice_chair": "Leonard Moty",
+      "start_date": "2018-01-01",
+      "end_date": "2019-01-01"
+    },
+    {
+      "chair": "Leonard Moty",
+      "vice_chair": "Mary Rickert",
+      "start_date": "2019-01-01",
+      "end_date": "2020-01-01"
+    },
+    {
+      "chair": "Mary Rickert",
+      "vice_chair": "Steve Morgan",
+      "start_date": "2020-01-01",
+      "end_date": "2021-02-02"
+    },
+    {
+      "chair": "Mary Rickert",
+      "vice_chair": "Les Baugh",
+      "start_date": "2021-02-02",
+      "end_date": "2022-01-04"
+    },
+    {
+      "chair": "Leonard Moty",
+      "vice_chair": "Mary Rickert",
+      "start_date": "2022-01-04",
+      "end_date": "2022-04-05",
+      "notes": "Moty recalled Feb 1 2022; board reorganized leadership April 2022"
+    },
+    {
+      "chair": "Les Baugh",
+      "vice_chair": "Patrick Jones",
+      "start_date": "2022-04-05",
+      "end_date": "2023-01-03"
+    },
+    {
+      "chair": "Patrick Jones",
+      "vice_chair": "Tim Garman",
+      "start_date": "2023-01-03",
+      "end_date": "2023-02-07"
+    },
+    {
+      "chair": "Mary Rickert",
+      "vice_chair": "Patrick Jones",
+      "start_date": "2023-02-07",
+      "end_date": "2024-01-09"
+    },
+    {
+      "chair": "Kevin Crye",
+      "vice_chair": "Chris Kelstrom",
+      "start_date": "2024-01-09",
+      "end_date": "2026-01-01"
+    },
+    {
+      "chair": "Chris Kelstrom",
+      "vice_chair": "Corkey Harmon",
+      "start_date": "2026-01-01",
+      "end_date": null
+    }
+  ],
+  "notes_for_agent": [
+    "end_date null = incumbent/ongoing as of 2026-03-03.",
+    "Leadership dates reflect election/selection dates shown in cited sources; if you need 'effective' dates from official meeting minutes PDFs, cross-validate against the meeting record for each election date."
+  ]
+}

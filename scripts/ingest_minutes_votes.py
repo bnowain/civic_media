@@ -25,17 +25,54 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+import json
+
 from app.database import SessionLocal
 from app import models
 from app.services.minutes_parser import ParseResult, parse_minutes
+
+
+# ── Error log setup ───────────────────────────────────────────────────────────
+# Unmatched vote-like paragraphs (parse failures) are written here for review
+# and future regex pattern development.
+
+_LOG_DIR  = Path(__file__).parent.parent / "logs"
+_ERR_LOG  = _LOG_DIR / "minutes_parse_errors.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
+)
+logger = logging.getLogger(__name__)
+
+
+def _log_unmatched(meeting_date: str, title: str, unmatched: list[str]) -> None:
+    """Append unmatched vote paragraphs to the error log for later review."""
+    if not unmatched:
+        return
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with _ERR_LOG.open("a", encoding="utf-8") as f:
+        f.write(
+            f"\n{'='*72}\n"
+            f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}  "
+            f"meeting={meeting_date}  {title[:55]}\n"
+            f"  {len(unmatched)} unmatched paragraph(s):\n"
+            f"{'='*72}\n"
+        )
+        for i, para in enumerate(unmatched, 1):
+            f.write(f"\n[{i}] {para[:500]}\n")
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -65,6 +102,38 @@ def _has_failed_parse(db: Session, meeting_id: str) -> bool:
     return count > 0
 
 
+def _build_person_lookup(db: Session) -> dict[str, str]:
+    """Build last-name → person_id mapping from roster + people table."""
+    roster_path = Path(__file__).parent.parent / "config" / "supervisors.json"
+    if not roster_path.exists():
+        return {}
+    try:
+        data = json.loads(roster_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    last_to_full: dict[str, str] = {}
+    for entry in data.get("district_supervisors", []):
+        full = entry.get("supervisor", "")
+        last = full.rsplit(" ", 1)[-1]
+        if last not in last_to_full:
+            last_to_full[last] = full
+    # Resolve to person_ids
+    people = {p.canonical_name: p.person_id for p in db.query(models.Person).all()}
+    return {last: people[full] for last, full in last_to_full.items() if full in people}
+
+
+_person_cache: dict[str, str] | None = None
+
+
+def _get_person_id(db: Session, last_name: str | None) -> str | None:
+    global _person_cache
+    if not last_name:
+        return None
+    if _person_cache is None:
+        _person_cache = _build_person_lookup(db)
+    return _person_cache.get(last_name)
+
+
 def _save_result(db: Session, result: ParseResult, doc: models.Document) -> int:
     saved = 0
     for v in result.votes:
@@ -73,7 +142,7 @@ def _save_result(db: Session, result: ParseResult, doc: models.Document) -> int:
             meeting_id=v.meeting_id,
             document_id=v.document_id,
             meeting_date=v.meeting_date,
-            governing_body=v.governing_body,
+            group_name=v.group_name,
             agenda_section=v.agenda_section,
             item_description=v.item_description,
             resolution_number=v.resolution_number,
@@ -81,14 +150,19 @@ def _save_result(db: Session, result: ParseResult, doc: models.Document) -> int:
             vote_tally=v.vote_tally,
             mover=v.mover,
             seconder=v.seconder,
+            mover_person_id=_get_person_id(db, v.mover),
+            seconder_person_id=_get_person_id(db, v.seconder),
         )
         db.add(row)
         for name in v.yes_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="yes"))
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="yes",
+                                     person_id=_get_person_id(db, name)))
         for name in v.no_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="no"))
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="no",
+                                     person_id=_get_person_id(db, name)))
         for name in v.absent_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="absent"))
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name, vote_value="absent",
+                                     person_id=_get_person_id(db, name)))
         saved += 1
 
     doc.minutes_parse_status = result.parse_status
@@ -137,9 +211,15 @@ def ingest_meeting(
             meeting_id=meeting.meeting_id,
             document_id=doc.document_id,
             meeting_date=meeting.meeting_date,
-            governing_body=meeting.governing_body,
+            group_name=meeting.group_name,
         )
         statuses.append(result.parse_status)
+        if result.unmatched_paragraphs:
+            _log_unmatched(
+                meeting.meeting_date or "unknown",
+                meeting.title or "",
+                result.unmatched_paragraphs,
+            )
         if dry_run:
             total += len(result.votes)
             if result.unmatched_paragraphs:
@@ -222,7 +302,7 @@ def main() -> None:
             if args.show_unmatched and not is_problem:
                 continue
 
-            marker = "⚠" if is_problem else " "
+            marker = "!" if is_problem else " "
             print(f"  {marker} {label}: {status} ({count} votes)")
             total_votes += count
             if "skip" in status:

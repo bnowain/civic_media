@@ -3,8 +3,10 @@ PDF text extraction service.
 
 Strategy (three-stage fallback):
   1. Native text extraction with pdfplumber (fast, for digital PDFs).
-  2. Tesseract OCR via pdf2image (for scanned printed text).
+  2. Tesseract OCR (for scanned printed text).
   3. EasyOCR with GPU (for handwriting, cursive, mixed content).
+
+PDF rasterization for stages 2 and 3 uses PyMuPDF (fitz) — no Poppler required.
 
 No summarisation. No indexing. Raw text only.
 """
@@ -80,15 +82,32 @@ def _native_extract(pdf_path: str) -> str:
         return ""
 
 
+# ── PDF rasterizer (shared by Tesseract and EasyOCR) ─────────────────────────
+
+def _pdf_to_images(pdf_path: str, dpi: int = 300) -> list:
+    """Rasterize PDF pages to PIL Image objects using PyMuPDF (no Poppler needed)."""
+    import fitz  # PyMuPDF
+    from PIL import Image
+
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    doc = fitz.open(pdf_path)
+    images = []
+    for page in doc:
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+    doc.close()
+    return images
+
+
 # ── Tesseract OCR fallback ────────────────────────────────────────────────────
 
 def _ocr_extract(pdf_path: str) -> str:
     try:
-        from pdf2image import convert_from_path
         import pytesseract
 
         logger.info("Running Tesseract OCR on %s ...", pdf_path)
-        pages = convert_from_path(pdf_path, dpi=300)
+        pages = _pdf_to_images(pdf_path, dpi=300)
         texts = []
         for i, page_img in enumerate(pages):
             page_text = pytesseract.image_to_string(page_img)
@@ -101,8 +120,7 @@ def _ocr_extract(pdf_path: str) -> str:
 
     except ImportError as exc:
         logger.error(
-            "Tesseract dependencies missing (%s). "
-            "Install: pip install pdf2image pytesseract",
+            "Tesseract dependencies missing (%s). Install: pip install pytesseract",
             exc,
         )
         return ""
@@ -138,7 +156,6 @@ def _get_easyocr_reader():
 
 def _easyocr_extract(pdf_path: str) -> str:
     try:
-        from pdf2image import convert_from_path
         import numpy as np
 
         reader = _get_easyocr_reader()
@@ -147,7 +164,7 @@ def _easyocr_extract(pdf_path: str) -> str:
             return ""
 
         logger.info("Running EasyOCR on %s ...", pdf_path)
-        pages = convert_from_path(pdf_path, dpi=300)
+        pages = _pdf_to_images(pdf_path, dpi=300)
         texts = []
 
         for i, page_img in enumerate(pages):

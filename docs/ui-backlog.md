@@ -32,7 +32,7 @@ without the user explicitly confirming it's working.
 
 ## Backfill Page (backfill.html)
 
-<!-- Add items here -->
+- [ ] **Dual-worker progress display** — When two workers are running (opposite-end strategy), the backfill page flips back and forth showing status/progress for two different tasks on a single line. Should show two separate progress bars with independent status when both workers are active (W1: oldest-first, W2: newest-first). Single bar when only one worker is running.
 
 ---
 

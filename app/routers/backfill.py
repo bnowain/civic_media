@@ -19,7 +19,8 @@ GET  /api/backfill/worker-idle          True if Celery queue + unacked are both 
 GET  /api/backfill/events               SSE stream: real-time progress updates
 POST /api/backfill/next-download        Queue one primegov_download_task
 POST /api/backfill/next-transcode       Queue one transcode_video_task
-POST /api/backfill/next-process         Queue one process_video_task
+POST /api/backfill/next-process         Queue one process_video_task (oldest first)
+POST /api/backfill/next-process-newest  Queue one process_video_task (newest first, for dual-worker)
 POST /api/backfill/next-diarize         Queue one process_video_task for transcribed-but-not-diarized meetings
 POST /api/backfill/process-now/{id}     Queue process_video_task for a specific meeting
 POST /api/backfill/full/{id}            Queue full_ingest_task for a specific meeting
@@ -107,19 +108,35 @@ def _running_job(db: Session):
 
 
 def _is_active(db: Session, meeting_id: str) -> bool:
-    """True if this meeting has a running (non-stale) processing job."""
+    """True if this meeting has a queued or running (non-stale) processing job."""
     from app import models
     threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
     job = (
         db.query(models.ProcessingJob)
         .filter(
             models.ProcessingJob.meeting_id == meeting_id,
-            models.ProcessingJob.status == "running",
+            models.ProcessingJob.status.in_(["queued", "running"]),
             models.ProcessingJob.updated_at >= threshold,
         )
         .first()
     )
     return job is not None
+
+
+def _active_meeting_ids(db: Session) -> set[str]:
+    """Return set of meeting_ids with a queued or running (non-stale) processing job."""
+    from app import models
+    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
+    rows = (
+        db.query(models.ProcessingJob.meeting_id)
+        .filter(
+            models.ProcessingJob.status.in_(["queued", "running"]),
+            models.ProcessingJob.updated_at >= threshold,
+        )
+        .distinct()
+        .all()
+    )
+    return {r.meeting_id for r in rows}
 
 
 # ── Shared reset logic ────────────────────────────────────────────────────────
@@ -662,12 +679,14 @@ def backfill_next_download(
         candidates_query = candidates_query.filter(models.Meeting.group_name == group_name)
     candidates = candidates_query.order_by(models.Meeting.meeting_date).all()
 
+    active_ids = _active_meeting_ids(db)
+
     for meeting in candidates:
         if meeting.meeting_id in existing_media_ids:
             continue
         if meeting.meeting_id in skipped:
             continue
-        if _is_active(db, meeting.meeting_id):
+        if meeting.meeting_id in active_ids:
             continue
 
         primegov_download_task.delay(
@@ -790,8 +809,12 @@ def backfill_next_process(
     else:
         media_by_meeting = {}
 
+    active_ids = _active_meeting_ids(db)
+
     for meeting in candidates:
         if meeting.meeting_id in skipped:
+            continue
+        if meeting.meeting_id in active_ids:
             continue
         media = media_by_meeting.get(meeting.meeting_id)
         if not media:
@@ -799,11 +822,91 @@ def backfill_next_process(
         if not Path(media.file_path).exists():
             logger.warning("next-process: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
             continue
-        if _is_active(db, meeting.meeting_id):
-            continue
 
         process_video_task.delay(meeting.meeting_id, media.media_id)
         logger.info("next-process: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
+        return {
+            "queued": True,
+            "meeting_id": meeting.meeting_id,
+            "media_id": media.media_id,
+            "meeting_date": meeting.meeting_date,
+            "title": meeting.title,
+            "auto_reset": reset_summary,
+        }
+
+    return {"queued": False, "nothing_to_do": True, "auto_reset": reset_summary}
+
+
+# ── Next Process Newest (dual-worker opposite-end) ───────────────────────────
+
+@router.post("/next-process-newest")
+def backfill_next_process_newest(
+    group_name: str | None = None,
+    category: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Same as next-process but selects the NEWEST unprocessed meeting first.
+    Used by Worker 2 in the opposite-end dual-worker strategy: Worker 1
+    processes oldest-first, Worker 2 processes newest-first. They converge
+    toward the middle without ever colliding.
+    """
+    from app import models
+    from app.tasks import process_video_task
+
+    reset_summary = _do_reset_stuck(db)
+    skipped = _get_skipped()
+
+    meetings_with_segments_ids = {
+        r.meeting_id for r in
+        db.query(models.TranscriptSegment.meeting_id).distinct().all()
+    }
+
+    candidates_query = db.query(models.Meeting).filter(
+        models.Meeting.processed_at.is_(None),
+        ~models.Meeting.meeting_id.in_(meetings_with_segments_ids),
+    )
+    if category:
+        candidates_query = candidates_query.filter(models.Meeting.category == category)
+    if group_name:
+        candidates_query = candidates_query.filter(models.Meeting.group_name == group_name)
+    candidates = candidates_query.order_by(models.Meeting.meeting_date.desc()).all()
+
+    if candidates:
+        candidate_ids = [m.meeting_id for m in candidates]
+        media_rows = (
+            db.query(models.MediaFile)
+            .filter(
+                models.MediaFile.meeting_id.in_(candidate_ids),
+                models.MediaFile.file_type.in_(["video", "audio"]),
+                ~models.MediaFile.file_path.like("%_extracted.wav"),
+                models.MediaFile.transcode_status.in_(["transcoded", None]),
+            )
+            .all()
+        )
+        media_by_meeting: dict[str, models.MediaFile] = {}
+        for row in media_rows:
+            if row.meeting_id not in media_by_meeting:
+                media_by_meeting[row.meeting_id] = row
+    else:
+        media_by_meeting = {}
+
+    active_ids = _active_meeting_ids(db)
+
+    for meeting in candidates:
+        if meeting.meeting_id in skipped:
+            continue
+        if meeting.meeting_id in active_ids:
+            continue
+        media = media_by_meeting.get(meeting.meeting_id)
+        if not media:
+            continue
+        if not Path(media.file_path).exists():
+            logger.warning("next-process-newest: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
+            continue
+
+        process_video_task.delay(meeting.meeting_id, media.media_id)
+        logger.info("next-process-newest: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
         return {
             "queued": True,
             "meeting_id": meeting.meeting_id,
@@ -854,10 +957,12 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
         .all()
     )
 
+    active_ids = _active_meeting_ids(db)
+
     for meeting in candidates:
         if meeting.meeting_id in skipped:
             continue
-        if _is_active(db, meeting.meeting_id):
+        if meeting.meeting_id in active_ids:
             continue
 
         # Find the extracted WAV for this meeting
@@ -1057,3 +1162,4 @@ def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
     db.commit()
     logger.info("clear-errors: deleted %d job(s) for meeting %s", count, meeting_id)
     return {"meeting_id": meeting_id, "cleared": count}
+

@@ -5,7 +5,8 @@ Tables: meetings, governing_bodies, media_files, documents,
 transcript_segments, people, voiceprints, segment_assignments,
 tv_newscasts, tv_news_segments, tv_news_transcription_chunks,
 tags, tag_assignments, tag_denials, people_mentions, people_mention_denials,
-clips, news_articles.
+clips, news_articles, article_comments, facebook_pages, facebook_posts,
+facebook_comments.
 """
 
 from __future__ import annotations
@@ -418,7 +419,9 @@ class MeetingVote(Base):
     outcome           = Column(String, nullable=False)
     vote_tally        = Column(String, nullable=True)    # "4-1", "3-2"
     mover             = Column(String, nullable=True)
+    mover_person_id   = Column(String, ForeignKey("people.person_id"), nullable=True)
     seconder          = Column(String, nullable=True)    # null if failed-no-second
+    seconder_person_id = Column(String, ForeignKey("people.person_id"), nullable=True)
     source            = Column(String, nullable=False, default="minutes_parsed")
     created_at        = Column(DateTime, default=datetime.utcnow)
 
@@ -438,9 +441,11 @@ class VoteMember(Base):
     vote_id     = Column(String, ForeignKey("meeting_votes.vote_id"),
                          nullable=False, index=True)
     member_name = Column(String, nullable=False)
+    person_id   = Column(String, ForeignKey("people.person_id"), nullable=True)
     vote_value  = Column(String, nullable=False)  # "yes" | "no" | "abstain" | "absent"
 
-    vote = relationship("MeetingVote", back_populates="members")
+    vote   = relationship("MeetingVote", back_populates="members")
+    person = relationship("Person")
 
 
 # ── Reference Documents (laws, policies, guidelines) ─────────────────────────
@@ -541,7 +546,8 @@ class NewsArticle(Base):
     headline          = Column(Text,     nullable=True)
     author            = Column(String,   nullable=True)
     published_at      = Column(String,   nullable=True)    # ISO datetime string
-    article_text      = Column(Text,     nullable=True)    # full body
+    article_text      = Column(Text,     nullable=True)    # full body (plain text)
+    content_html      = Column(Text,     nullable=True)    # source HTML preserving structure
     description       = Column(Text,     nullable=True)    # lead / summary
     preview_image_url = Column(Text,     nullable=True)
     image_urls        = Column(Text,     nullable=True)    # JSON list of inline img URLs
@@ -559,3 +565,120 @@ class NewsArticle(Base):
 
     created_at  = Column(DateTime, default=datetime.utcnow)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    comments = relationship("ArticleComment", back_populates="article",
+                             cascade="all, delete-orphan")
+
+
+# ── Article Comments ──────────────────────────────────────────────────────────
+
+class ArticleComment(Base):
+    """
+    Comments on news articles, ingested from source APIs (WP REST, etc.).
+
+    Threading: parent_comment_id is a self-FK for reply chains.
+    Dedup: UNIQUE(article_id, platform_comment_id) prevents double-ingest.
+    """
+    __tablename__ = "article_comments"
+    __table_args__ = (
+        UniqueConstraint("article_id", "platform_comment_id",
+                         name="uq_article_comment_platform"),
+        Index('ix_article_comments_article_id', 'article_id'),
+        Index('ix_article_comments_parent', 'parent_comment_id'),
+    )
+
+    comment_id          = Column(String,   primary_key=True, default=_gen_id)
+    article_id          = Column(String,   ForeignKey("news_articles.article_id",
+                                                       ondelete="CASCADE"), nullable=False)
+    platform_comment_id = Column(String,   nullable=True)     # source platform ID (WP comment id)
+    parent_comment_id   = Column(String,   ForeignKey("article_comments.comment_id"),
+                                 nullable=True)                # self-FK for threading
+    author_name         = Column(String,   nullable=True)
+    author_avatar_url   = Column(Text,     nullable=True)
+    author_url          = Column(Text,     nullable=True)
+    comment_text        = Column(Text,     nullable=True)      # plain text
+    comment_html        = Column(Text,     nullable=True)      # original HTML
+    published_at        = Column(String,   nullable=True)      # ISO datetime
+    comment_status      = Column(String,   nullable=True, default='approved')  # approved | pending
+    reaction_count      = Column(Integer,  nullable=True)      # likes/reactions (if platform supports)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+    article = relationship("NewsArticle", back_populates="comments")
+
+
+# ── Facebook Pages, Posts, Comments ──────────────────────────────────────────
+
+class FacebookPage(Base):
+    __tablename__ = "facebook_pages"
+
+    page_id    = Column(String, primary_key=True, default=_gen_id)
+    page_name  = Column(String, unique=True, nullable=False)
+    page_url   = Column(Text, nullable=True)
+    page_type  = Column(String, nullable=True)   # 'page', 'group', 'profile'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    posts = relationship("FacebookPost", back_populates="page",
+                         cascade="all, delete-orphan")
+
+
+class FacebookPost(Base):
+    __tablename__ = "facebook_posts"
+    __table_args__ = (
+        Index('ix_fb_posts_page_id', 'page_id'),
+        Index('ix_fb_posts_platform_id', 'platform_post_id'),
+        Index('ix_fb_posts_published', 'published_at'),
+    )
+
+    post_id             = Column(String, primary_key=True, default=_gen_id)
+    page_id             = Column(String, ForeignKey("facebook_pages.page_id"), nullable=True)
+    platform_post_id    = Column(String, nullable=True)
+    post_url            = Column(Text, unique=True, nullable=False)
+    author_name         = Column(String, nullable=True)
+    author_profile_url  = Column(Text, nullable=True)
+    post_text           = Column(Text, nullable=True)
+    published_at        = Column(String, nullable=True)
+    content_type        = Column(String, nullable=True, default='post')
+    shared_from_url     = Column(Text, nullable=True)
+    shared_from_author  = Column(String, nullable=True)
+    reaction_count      = Column(Integer, nullable=True)
+    comment_count       = Column(Integer, nullable=True)
+    share_count         = Column(Integer, nullable=True)
+    view_count          = Column(Integer, nullable=True)
+    engagement_json     = Column(Text, nullable=True)
+    media_urls          = Column(Text, nullable=True)        # JSON array
+    external_links      = Column(Text, nullable=True)        # JSON array
+    capture_method      = Column(String, default='signal-desk')
+    extraction_strategy = Column(String, nullable=True)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+    updated_at          = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    page     = relationship("FacebookPage", back_populates="posts")
+    comments = relationship("FacebookComment", back_populates="post",
+                            cascade="all, delete-orphan")
+
+
+class FacebookComment(Base):
+    __tablename__ = "facebook_comments"
+    __table_args__ = (
+        UniqueConstraint("post_id", "platform_comment_id",
+                         name="uq_fb_comment_platform"),
+        Index('ix_fb_comments_post_id', 'post_id'),
+        Index('ix_fb_comments_parent', 'parent_comment_id'),
+    )
+
+    comment_id          = Column(String, primary_key=True, default=_gen_id)
+    post_id             = Column(String, ForeignKey("facebook_posts.post_id",
+                                                     ondelete="CASCADE"), nullable=False)
+    platform_comment_id = Column(String, nullable=True)
+    parent_comment_id   = Column(String, ForeignKey("facebook_comments.comment_id"),
+                                 nullable=True)
+    author_name         = Column(String, nullable=True)
+    author_profile_url  = Column(Text, nullable=True)
+    comment_text        = Column(Text, nullable=True)
+    published_at        = Column(String, nullable=True)
+    reaction_count      = Column(Integer, nullable=True)
+    is_reply            = Column(Integer, nullable=True, default=0)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+    post = relationship("FacebookPost", back_populates="comments")

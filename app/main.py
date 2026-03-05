@@ -27,9 +27,9 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
-    articles, assignments, backfill, clips, documents, groups, ingest, library,
-    media, meetings, mentions, news, people, primegov, segments, system, tags,
-    tagging, transcribe, venues, votes,
+    articles, assignments, backfill, clips, comments, documents, facebook,
+    groups, ingest, library, media, meetings, mentions, news, people, primegov,
+    segments, system, tags, tagging, transcribe, venues, votes,
 )
 
 # Create all tables (idempotent)
@@ -190,6 +190,8 @@ async def log_request_timing(request: Request, call_next):
 
 # ── API routers ──────────────────────────────────────────────────────────────
 app.include_router(articles.router)
+app.include_router(comments.router)
+app.include_router(facebook.router)
 app.include_router(meetings.router)
 app.include_router(media.router)
 app.include_router(documents.router)
@@ -256,6 +258,11 @@ def articles_page():
 @app.get("/articles/{article_id}", include_in_schema=False)
 def article_detail_page(article_id: str):
     return FileResponse(str(_static_dir / "articles.html"))
+
+
+@app.get("/facebook", include_in_schema=False)
+def facebook_page():
+    return FileResponse(str(_static_dir / "facebook.html"))
 
 
 # ── Favicon ──────────────────────────────────────────────────────────────────
