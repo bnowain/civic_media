@@ -156,8 +156,10 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
             "Clear the error history with POST /api/backfill/clear-errors/{meeting_id} "
             "before retrying."
         )
-        logger.error("[%s] %s", meeting_id, msg)
-        raise RuntimeError(msg)
+        logger.warning("[%s] %s", meeting_id, msg)
+        # Return gracefully instead of raising — never block the queue.
+        # The backfill UI / next-* endpoints will skip to the next meeting.
+        return {"meeting_id": meeting_id, "status": "auto_skipped", "reason": msg}
 
     update_progress(db, meeting_id, "Starting...", 0)
 

@@ -40,6 +40,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -887,12 +888,26 @@ def backfill_next_process(
     else:
         media_by_meeting = {}
 
+    # Meetings with 3+ process errors — auto-skip without dispatching
+    error_counts = dict(
+        db.query(models.ProcessingJob.meeting_id, func.count(models.ProcessingJob.job_id))
+        .filter(
+            models.ProcessingJob.stage == "process",
+            models.ProcessingJob.status == "error",
+        )
+        .group_by(models.ProcessingJob.meeting_id)
+        .all()
+    )
+    auto_skip_ids = {mid for mid, cnt in error_counts.items() if cnt >= 3}
+
     active_ids = _active_meeting_ids(db)
 
     for meeting in candidates:
         if meeting.meeting_id in skipped:
             continue
         if meeting.meeting_id in active_ids:
+            continue
+        if meeting.meeting_id in auto_skip_ids:
             continue
         media = media_by_meeting.get(meeting.meeting_id)
         if not media:
@@ -969,12 +984,26 @@ def backfill_next_process_newest(
     else:
         media_by_meeting = {}
 
+    # Meetings with 3+ process errors — auto-skip without dispatching
+    error_counts = dict(
+        db.query(models.ProcessingJob.meeting_id, func.count(models.ProcessingJob.job_id))
+        .filter(
+            models.ProcessingJob.stage == "process",
+            models.ProcessingJob.status == "error",
+        )
+        .group_by(models.ProcessingJob.meeting_id)
+        .all()
+    )
+    auto_skip_ids = {mid for mid, cnt in error_counts.items() if cnt >= 3}
+
     active_ids = _active_meeting_ids(db)
 
     for meeting in candidates:
         if meeting.meeting_id in skipped:
             continue
         if meeting.meeting_id in active_ids:
+            continue
+        if meeting.meeting_id in auto_skip_ids:
             continue
         media = media_by_meeting.get(meeting.meeting_id)
         if not media:

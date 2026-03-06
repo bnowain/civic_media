@@ -60,7 +60,12 @@ def process_video_task(self, meeting_id: str, media_id: str) -> dict:
     db = SessionLocal()
     try:
         create_job(db, meeting_id, "process", celery_task_id=self.request.id)
-        run_video_pipeline(db, meeting_id, media_id)
+        result = run_video_pipeline(db, meeting_id, media_id)
+
+        # Auto-skipped meetings return a dict instead of None — don't mark complete
+        if isinstance(result, dict) and result.get("status") == "auto_skipped":
+            fail_job(db, meeting_id, result.get("reason", "auto-skipped"))
+            return result
 
         from app.models import TranscriptSegment
         count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
@@ -1016,7 +1021,14 @@ def full_ingest_task(meeting_id: str) -> dict:
     db = SessionLocal()
     try:
         create_job(db, meeting_id, "process")
-        run_video_pipeline(db, meeting_id, media_id)
+        result = run_video_pipeline(db, meeting_id, media_id)
+
+        # Auto-skipped meetings return a dict — don't mark complete
+        if isinstance(result, dict) and result.get("status") == "auto_skipped":
+            fail_job(db, meeting_id, result.get("reason", "auto-skipped"))
+            logger.warning("full_ingest_task: auto-skipped %s — too many failures", meeting_id)
+            return {"meeting_id": meeting_id, "status": "auto_skipped", "stage": "process"}
+
         from app.models import TranscriptSegment
         count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
         complete_job(db, meeting_id)
