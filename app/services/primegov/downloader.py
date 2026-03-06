@@ -160,6 +160,13 @@ def download_video(db: Session, meeting_id: str) -> dict:
     if not meeting.video_url:
         return {"error": "No video URL available", "status": "error"}
 
+    # Swagit /events/ pages are upcoming meetings with no video yet.
+    # Only /videos/ pages have actual recorded video with m3u8 streams.
+    if "/events/" in meeting.video_url:
+        logger.info("[%s] Skipping /events/ URL (no video posted yet): %s",
+                     meeting_id, meeting.video_url)
+        return {"status": "skipped", "detail": "Swagit /events/ URL — video not posted yet"}
+
     # Check if video already downloaded
     existing_media = (
         db.query(MediaFile)
@@ -201,8 +208,11 @@ def download_video(db: Session, meeting_id: str) -> dict:
     # rate headers) are concatenated with -c copy: the resulting MP4 plays in
     # most players but causes ffmpeg's audio decoder to fail mid-extraction,
     # producing a truncated WAV and a pipeline crash on the process step.
+    #
+    # Uses -progress pipe:1 so we get periodic ticks for stuck detection.
     cmd = [
         "ffmpeg", "-y",
+        "-progress", "pipe:1", "-nostats",
         "-i", m3u8_url,
         "-c:v", "copy",         # Video: stream copy (no re-encode, fast)
         "-c:a", "aac",          # Audio: re-encode to clean AAC-LC
@@ -211,14 +221,38 @@ def download_video(db: Session, meeting_id: str) -> dict:
     ]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3600,  # 1 hour max for long meetings
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+
+        # Read ffmpeg progress lines and emit ticks so the self-healer
+        # knows we're still alive.  HLS downloads don't have a known
+        # duration, so we just keep the progress at 20-80% range.
+        last_tick = 0
+        for line in proc.stdout:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded.startswith("out_time_us="):
+                val = decoded.split("=", 1)[1].strip()
+                if val.isdigit() and int(val) > 0:
+                    # Map elapsed time to 20-80% range (we don't know total duration)
+                    elapsed_sec = int(val) / 1_000_000
+                    tick_pct = min(80, 20 + int(elapsed_sec / 60))  # +1% per minute
+                    if tick_pct > last_tick:
+                        last_tick = tick_pct
+                        _write_progress(
+                            meeting_id, "Downloading video...", tick_pct,
+                            f"Downloading... {int(elapsed_sec)}s elapsed",
+                        )
+
+        proc.wait(timeout=3600)  # 1 hour max
+
         if proc.returncode != 0:
-            logger.error("ffmpeg failed: %s", proc.stderr[-500:] if proc.stderr else "")
+            stderr_tail = ""
+            try:
+                stderr_tail = proc.stderr.read().decode("utf-8", errors="ignore")[-500:]
+            except Exception:
+                pass
+            logger.error("ffmpeg failed: %s", stderr_tail)
             if _within_grace_period(meeting.meeting_date):
                 _write_progress(meeting_id, "Not available yet", 0,
                                 "Stream download failed — recording may not be ready yet")
@@ -226,6 +260,11 @@ def download_video(db: Session, meeting_id: str) -> dict:
             _write_progress(meeting_id, "Error", 0, "ffmpeg download failed", error=True)
             return {"error": "ffmpeg failed", "status": "error"}
     except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:
+            pass
         _write_progress(meeting_id, "Error", 0, "Download timed out", error=True)
         return {"error": "Download timed out", "status": "error"}
 
@@ -344,12 +383,10 @@ def download_document(
         output_path.stat().st_size / 1024,
     )
 
-    # Run OCR — try Celery first, fall back to direct extraction
+    # Run OCR — try direct Redis dispatch, fall back to direct extraction
     try:
-        from app.tasks import process_pdf_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_pdf_task.delay(doc.document_id)
+        from app.services.task_dispatch import send_task
+        send_task("tasks.process_pdf", args=[doc.document_id])
     except Exception:
         logger.debug("Celery unavailable, running OCR directly")
         try:

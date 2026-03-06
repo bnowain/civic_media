@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-backfill_watchdog.py — Dual-worker backfill coordinator.
+backfill_watchdog.py — Worker coordinator with queue-based routing.
 
-Manages two Celery workers processing from opposite ends of the queue:
-  Worker 1 (oldest-first): always running, fed via /next-process
-  Worker 2 (newest-first): auto-started when pending > 9,
-           auto-stopped when workers converge within 3 meetings.
+Manages three Celery workers:
+  Worker 1 (GPU, oldest-first): always running, consumes from "celery" queue
+  Worker 2 (GPU, newest-first): auto-started when pending > 9, consumes from "celery" queue
+  Light worker: auto-started on demand, consumes from "light" queue
+    (ingest, download, transcode, export, retag, cleanup)
 
-Transcode jobs (CPU-only) are fed first via /next-transcode, clearing
-the path for processing. Once all pending transcodes are done, the
-watchdog falls back to feeding process jobs only.
+GPU workers only consume from "celery" queue (-Q celery).
+Light worker only consumes from "light" queue (-Q light).
+This prevents ingest/download/transcode from waiting behind multi-hour
+transcription jobs, and prevents GPU workers from being blocked by I/O tasks.
 
-Both workers are started as subprocesses using the venv celery.exe.
-Ctrl+C stops everything (both workers + watchdog).
+PID files are written to .worker_pids/ for external visibility.
+
+Modes:
+  --orchestrate-only: Skip worker lifecycle management (start/stop/restart).
+    Only do task feeding and stuck detection via the API. Use this from WSL
+    when workers are already running on the Windows side.
 
 Usage:
     python scripts/backfill_watchdog.py
     python scripts/backfill_watchdog.py --interval 45
-    python scripts/backfill_watchdog.py --single   # force single-worker mode
+    python scripts/backfill_watchdog.py --single           # force single GPU worker
+    python scripts/backfill_watchdog.py --orchestrate-only  # WSL: feed tasks only
 """
 
 import argparse
 import json
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -31,9 +39,14 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-LOG_DIR = Path(__file__).parent.parent / "logs"
+IS_WINDOWS = sys.platform == "win32"
+
+BASE_DIR = Path(__file__).parent.parent
+LOG_DIR = BASE_DIR / "logs"
+PID_DIR = BASE_DIR / ".worker_pids"
 LOG_FILE = LOG_DIR / "backfill_watchdog.log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+PID_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,8 +61,37 @@ logger = logging.getLogger(__name__)
 API_BASE = "http://localhost:8000"
 GROUP = "Board of Supervisors"
 
-CELERY_EXE = str(Path(__file__).parent.parent / "venv" / "Scripts" / "celery.exe")
-PROJECT_DIR = str(Path(__file__).parent.parent)
+# Celery executable: Windows venv uses Scripts/celery.exe,
+# WSL/Linux can call celery.exe via Windows interop or use a native celery.
+if IS_WINDOWS:
+    CELERY_EXE = str(BASE_DIR / "venv" / "Scripts" / "celery.exe")
+else:
+    # WSL: celery.exe works via Windows interop layer
+    CELERY_EXE = str(BASE_DIR / "venv" / "Scripts" / "celery.exe")
+PROJECT_DIR = str(BASE_DIR)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is alive (cross-platform)."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        # POSIX: signal 0 checks existence without killing
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+        except Exception:
+            return False
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -95,12 +137,12 @@ def api_get(endpoint: str) -> dict:
         return {"error": str(e)}
 
 
-def get_queue_len() -> int:
-    """Check how many process_video tasks are in the Redis queue."""
+def get_queue_len(queue: str = "celery") -> int:
+    """Check how many tasks are in a Redis queue."""
     try:
         import redis
         r = redis.Redis(host="127.0.0.1", port=6379, db=0)
-        return r.llen("celery")
+        return r.llen(queue)
     except Exception:
         return -1
 
@@ -113,38 +155,86 @@ def get_status() -> dict:
     return status
 
 
+def check_and_reset_stuck() -> int:
+    """Check for stuck jobs and reset them via API. Returns count reset."""
+    stuck_info = api_get("stuck")
+    count = stuck_info.get("count", 0)
+    if count > 0:
+        result = api_post("reset-stuck")
+        reset_count = result.get("count", 0)
+        if reset_count > 0:
+            logger.warning("Watchdog self-heal: reset %d stuck job(s)", reset_count)
+        return reset_count
+    return 0
+
+
 # ── Worker lifecycle ─────────────────────────────────────────────────────────
 
 class WorkerHandle:
     """Manages a single Celery worker subprocess."""
 
-    def __init__(self, name: str, node_name: str):
+    def __init__(self, name: str, node_name: str, queue: str = "celery"):
         self.name = name
         self.node_name = node_name
+        self.queue = queue
         self.proc = None
         self.start_time = None
         self.ready = False
+        self.pid_file = PID_DIR / f"{node_name}.pid"
 
     def start(self):
         if self.alive():
-            logger.info("%s already running (PID %d)", self.name, self.proc.pid)
+            pid = self.proc.pid if self.proc else self._find_existing_pid() or "?"
+            logger.info("%s already running (PID %s)", self.name, pid)
+            return
+        # Guard: check if a celery process with our node name already exists
+        # (could be a process started by a previous watchdog instance)
+        existing_pid = self._find_existing_pid()
+        if existing_pid:
+            logger.info("%s already running externally (PID %d) — adopting",
+                        self.name, existing_pid)
+            self.start_time = time.time() - WORKER_STARTUP_SECS  # assume ready
+            self.ready = True
+            try:
+                self.pid_file.write_text(str(existing_pid))
+            except Exception:
+                pass
             return
         log_path = str(LOG_DIR / f"celery_{self.node_name}.log")
         cmd = [
             CELERY_EXE, "-A", "app.worker", "worker",
             "--loglevel=info", "--concurrency=1", "--pool=solo",
+            "-Q", self.queue,
             "-n", f"{self.node_name}@%h",
             "--logfile", log_path,
+            "--without-mingle", "--without-gossip",
         ]
-        logger.info("Starting %s: %s", self.name, " ".join(cmd[-6:]))
+        logger.info("Starting %s: queue=%s node=%s", self.name, self.queue, self.node_name)
         self.proc = subprocess.Popen(
             cmd, cwd=PROJECT_DIR,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.start_time = time.time()
         self.ready = False
+        # Write PID file
+        try:
+            self.pid_file.write_text(str(self.proc.pid))
+        except Exception:
+            pass
         logger.info("%s started (PID %d) — ready in ~%ds",
                     self.name, self.proc.pid, WORKER_STARTUP_SECS)
+
+    def _find_existing_pid(self) -> int | None:
+        """Check PID file for an existing live process (cross-platform)."""
+        if not self.pid_file.exists():
+            return None
+        try:
+            pid = int(self.pid_file.read_text().strip())
+            if _pid_alive(pid):
+                return pid
+        except (ValueError, OSError):
+            pass
+        return None
 
     def stop(self, reason: str = ""):
         if not self.proc:
@@ -152,6 +242,7 @@ class WorkerHandle:
         if self.proc.poll() is not None:
             self.proc = None
             self.ready = False
+            self._remove_pid_file()
             return
         logger.info("Stopping %s (PID %d) — %s", self.name, self.proc.pid, reason)
         try:
@@ -164,9 +255,16 @@ class WorkerHandle:
         self.proc = None
         self.ready = False
         self.start_time = None
+        self._remove_pid_file()
 
     def alive(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        # Check subprocess handle first
+        if self.proc is not None and self.proc.poll() is None:
+            return True
+        # Fallback: check PID file (for adopted workers)
+        if self._find_existing_pid() is not None:
+            return True
+        return False
 
     def check_ready(self):
         """Mark ready after startup delay."""
@@ -176,6 +274,12 @@ class WorkerHandle:
             self.ready = True
             logger.info("%s is ready (%.0fs elapsed)", self.name,
                         time.time() - self.start_time)
+
+    def _remove_pid_file(self):
+        try:
+            self.pid_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     @property
     def status(self) -> str:
@@ -189,28 +293,36 @@ class WorkerHandle:
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Dual-worker backfill coordinator")
+    parser = argparse.ArgumentParser(description="Worker coordinator with queue routing")
     parser.add_argument("--interval", type=int, default=60,
                         help="Poll interval in seconds (default: 60)")
     parser.add_argument("--single", action="store_true",
-                        help="Force single-worker mode (no Worker 2)")
+                        help="Force single GPU worker (no Worker 2)")
+    parser.add_argument("--orchestrate-only", action="store_true",
+                        help="Skip worker lifecycle management — only feed tasks "
+                             "and detect stuck jobs via API. Use from WSL when "
+                             "workers are already running on the Windows side.")
     args = parser.parse_args()
 
+    orchestrate_only = args.orchestrate_only
     dual_mode = not args.single
     total_oldest = 0
     total_newest = 0
     total_transcodes = 0
 
-    worker1 = WorkerHandle("Worker 1", "worker1")
-    worker2 = WorkerHandle("Worker 2", "worker2")
+    worker1 = WorkerHandle("Worker 1 (GPU)", "worker1", queue="celery")
+    worker2 = WorkerHandle("Worker 2 (GPU)", "worker2", queue="celery")
+    light   = WorkerHandle("Light worker",   "light",   queue="light")
 
     # Track what each worker last queued
     oldest_date = None
     newest_date = None
 
     def cleanup(*_):
-        worker2.stop("watchdog exit")
-        worker1.stop("watchdog exit")
+        if not orchestrate_only:
+            worker2.stop("watchdog exit")
+            worker1.stop("watchdog exit")
+            light.stop("watchdog exit")
         logger.info("Watchdog stopped. Queued: %d oldest, %d newest, %d transcodes",
                     total_oldest, total_newest, total_transcodes)
         sys.exit(0)
@@ -219,33 +331,56 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
 
     logger.info("=" * 60)
-    logger.info("Backfill watchdog started — interval=%ds, dual=%s",
-                args.interval, dual_mode)
-    if dual_mode:
-        logger.info("Worker 2 activates when pending > %d, stops at pending <= %d",
-                    ACTIVATE_THRESHOLD, CONVERGE_GAP)
+    mode_label = "orchestrate-only" if orchestrate_only else f"dual={dual_mode}"
+    logger.info("Backfill watchdog started — interval=%ds, %s",
+                args.interval, mode_label)
+    if orchestrate_only:
+        logger.info("Orchestrate-only mode: feeding tasks and detecting stuck jobs "
+                     "(workers managed externally)")
+    else:
+        logger.info("Queue routing: GPU workers → 'celery', Light worker → 'light'")
+        if dual_mode:
+            logger.info("Worker 2 activates when pending > %d, stops at pending <= %d",
+                        ACTIVATE_THRESHOLD, CONVERGE_GAP)
     logger.info(gpu_stats())
 
-    # Always start Worker 1
-    worker1.start()
+    # Start workers (skip in orchestrate-only mode)
+    if not orchestrate_only:
+        worker1.start()
+        light.start()
 
     while True:
         try:
-            worker1.check_ready()
-            worker2.check_ready()
+            if not orchestrate_only:
+                worker1.check_ready()
+                worker2.check_ready()
+                light.check_ready()
 
-            queue_len = get_queue_len()
+            queue_len = get_queue_len("celery")
+            light_queue_len = get_queue_len("light")
             status = get_status()
             pending = status.get("process_pending", -1)
             transcode_pending = status.get("transcode_pending", 0)
 
-            # ── Worker 1 health check ────────────────────────────────────
-            if not worker1.alive():
-                logger.warning("Worker 1 died — restarting")
-                worker1.start()
+            # ── Worker health checks (skip in orchestrate-only) ───────────
+            if not orchestrate_only:
+                if not worker1.alive():
+                    logger.warning("Worker 1 died — restarting")
+                    worker1.start()
 
-            # ── Worker 2 lifecycle ───────────────────────────────────────
-            if dual_mode:
+                if not light.alive():
+                    if light_queue_len > 0:
+                        logger.warning("Light worker died with %d tasks queued — restarting",
+                                       light_queue_len)
+                        light.start()
+
+            # ── Self-heal: reset stuck jobs ────────────────────────────────
+            stuck_count = status.get("stuck", 0)
+            if stuck_count > 0:
+                check_and_reset_stuck()
+
+            # ── Worker 2 lifecycle (skip in orchestrate-only) ─────────────
+            if not orchestrate_only and dual_mode:
                 if not worker2.alive() and pending > ACTIVATE_THRESHOLD:
                     start_msg = f"pending={pending} > {ACTIVATE_THRESHOLD}"
                     logger.info("Activating Worker 2 — %s", start_msg)
@@ -254,18 +389,36 @@ def main():
                 if worker2.alive() and pending >= 0 and pending <= CONVERGE_GAP:
                     worker2.stop(f"converged: pending={pending} <= {CONVERGE_GAP}")
 
-            logger.info("Queue: %s | Process: %s | Transcode: %s | W1: %s | W2: %s | "
-                        "Oldest: %s | Newest: %s | %s",
-                        queue_len if queue_len >= 0 else "?",
-                        pending if pending >= 0 else "?",
-                        transcode_pending,
-                        worker1.status, worker2.status,
-                        oldest_date or "—", newest_date or "—",
-                        gpu_stats())
+            if orchestrate_only:
+                logger.info("Queue: %s | Light: %s | Process: %s | Transcode: %s | "
+                            "Stuck: %s | Oldest: %s | Newest: %s | %s",
+                            queue_len if queue_len >= 0 else "?",
+                            light_queue_len if light_queue_len >= 0 else "?",
+                            pending if pending >= 0 else "?",
+                            transcode_pending,
+                            stuck_count,
+                            oldest_date or "—", newest_date or "—",
+                            gpu_stats())
+            else:
+                logger.info("Queue: %s | Light: %s | Process: %s | Transcode: %s | "
+                            "W1: %s | W2: %s | L: %s | "
+                            "Oldest: %s | Newest: %s | %s",
+                            queue_len if queue_len >= 0 else "?",
+                            light_queue_len if light_queue_len >= 0 else "?",
+                            pending if pending >= 0 else "?",
+                            transcode_pending,
+                            worker1.status, worker2.status, light.status,
+                            oldest_date or "—", newest_date or "—",
+                            gpu_stats())
 
-            # ── Feed transcodes first (CPU-only, clears the path for processing) ──
+            # ── In orchestrate-only mode, treat workers as always ready ───
+            w1_ready = worker1.ready if not orchestrate_only else True
+            w2_ready = worker2.ready if not orchestrate_only else False
+            w2_alive = worker2.alive() if not orchestrate_only else False
+
+            # ── Feed transcodes first (now goes to light queue) ───────────
             if transcode_pending > 0 and queue_len >= 0 and queue_len < 1:
-                if worker1.ready:
+                if w1_ready:
                     result = api_post("next-transcode")
                     if result.get("queued"):
                         total_transcodes += 1
@@ -274,8 +427,7 @@ def main():
                                     result.get("title", "?")[:50],
                                     result.get("meeting_id", "?")[:8],
                                     total_transcodes)
-                        # Re-check queue before feeding process jobs
-                        queue_len = get_queue_len()
+                        queue_len = get_queue_len("celery")
                     elif result.get("skipped"):
                         logger.info("Transcode skipped: %s (%s)",
                                     result.get("meeting_id", "?")[:8],
@@ -285,8 +437,8 @@ def main():
                     elif result.get("error"):
                         logger.error("Transcode error: %s", result["error"])
 
-            # ── Feed Worker 1 (oldest-first) ─────────────────────────────
-            if worker1.ready and queue_len >= 0 and queue_len < 1:
+            # ── Feed Worker 1 (oldest-first) ──────────────────────────────
+            if w1_ready and queue_len >= 0 and queue_len < 1:
                 result = api_post("next-process")
                 if result.get("queued"):
                     total_oldest += 1
@@ -296,7 +448,7 @@ def main():
                                 result["title"][:50],
                                 result["meeting_id"][:8], total_oldest)
                 elif result.get("nothing_to_do"):
-                    if not worker2.alive() and transcode_pending == 0:
+                    if not w2_alive and transcode_pending == 0:
                         logger.info("All done — backfill complete!")
                         cleanup()
                     elif transcode_pending > 0:
@@ -307,8 +459,8 @@ def main():
                 elif result.get("error"):
                     logger.error("W1 error: %s", result["error"])
 
-            # ── Feed Worker 2 (newest-first) ─────────────────────────────
-            if worker2.ready and queue_len >= 0 and queue_len < 1:
+            # ── Feed Worker 2 (newest-first) ──────────────────────────────
+            if w2_ready and queue_len >= 0 and queue_len < 1:
                 result = api_post("next-process-newest")
                 if result.get("queued"):
                     total_newest += 1
@@ -318,7 +470,8 @@ def main():
                                 result["title"][:50],
                                 result["meeting_id"][:8], total_newest)
                 elif result.get("nothing_to_do"):
-                    worker2.stop("nothing left for newest-first")
+                    if not orchestrate_only:
+                        worker2.stop("nothing left for newest-first")
                 elif result.get("error"):
                     logger.error("W2 error: %s", result["error"])
 

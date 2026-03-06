@@ -233,6 +233,8 @@ class PipelineStatus(BaseModel):
     detail: Optional[str]         # Extra info e.g. "1200/1800 segments"
     error: bool = False
     transcode_status: Optional[str] = None  # null | "pending" | "transcoding" | "transcoded"
+    vote_count: int = 0
+    minutes_parse_status: Optional[str] = None  # "ok" | "empty" | "partial" | "unrecognized"
 
 
 # ── TV News ──────────────────────────────────────────────────────────────────

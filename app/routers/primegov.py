@@ -50,17 +50,15 @@ def discover_meetings(
     Set background=false to run synchronously (useful for testing).
     """
     if background:
-        from app.tasks import primegov_discover_task
-        from app.services.worker_manager import ensure_worker
+        from app.services.task_dispatch import send_task
 
-        ensure_worker()
-        task = primegov_discover_task.delay(
-            committee_ids=committee_ids or [3],
-            years=years,
-            mode=mode,
-        )
+        task_id = send_task("tasks.primegov_discover", kwargs={
+            "committee_ids": committee_ids or [3],
+            "years": years,
+            "mode": mode,
+        })
         return {
-            "task_id": task.id,
+            "task_id": task_id,
             "status": "queued",
             "message": f"Discovery started in background (mode={mode})",
         }
@@ -127,19 +125,16 @@ def download_meeting_assets(
         if not meeting.video_url:
             video_note = "No video URL available for this meeting"
         else:
-            from app.tasks import primegov_download_task
-            from app.services.worker_manager import ensure_worker
+            from app.services.task_dispatch import send_task
 
-            ensure_worker()
-            task = primegov_download_task.delay(
-                meeting_id=meeting_id,
-                download_video=True,
-                download_agenda=False,
-                download_minutes=False,
-                download_packet=False,
-                auto_process=auto_process,
-            )
-            video_task_id = task.id
+            video_task_id = send_task("tasks.primegov_download", kwargs={
+                "meeting_id": meeting_id,
+                "download_video": True,
+                "download_agenda": False,
+                "download_minutes": False,
+                "download_packet": False,
+                "auto_process": auto_process,
+            })
 
     return {
         "meeting_id": meeting_id,
@@ -170,10 +165,8 @@ def download_all_undownloaded(
 
     # Filter to those without existing media files
     queued = 0
-    from app.tasks import primegov_download_task
-    from app.services.worker_manager import ensure_worker
+    from app.services.task_dispatch import send_task
 
-    ensure_worker()
     for meeting in downloadable:
         has_media = (
             db.query(MediaFile)
@@ -182,14 +175,14 @@ def download_all_undownloaded(
             .first()
         )
         if not has_media:
-            primegov_download_task.delay(
-                meeting_id=meeting.meeting_id,
-                download_video=True,
-                download_agenda=True,
-                download_minutes=True,
-                download_packet=True,
-                auto_process=auto_process,
-            )
+            send_task("tasks.primegov_download", kwargs={
+                "meeting_id": meeting.meeting_id,
+                "download_video": True,
+                "download_agenda": True,
+                "download_minutes": True,
+                "download_packet": True,
+                "auto_process": auto_process,
+            })
             queued += 1
 
     return {

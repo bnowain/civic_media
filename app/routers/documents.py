@@ -69,12 +69,10 @@ async def upload_document(
     db.refresh(doc)
 
     try:
-        from app.tasks import process_pdf_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_pdf_task.delay(doc.document_id)
+        from app.services.task_dispatch import send_task
+        send_task("tasks.process_pdf", args=[doc.document_id])
     except Exception:
-        # Celery/worker not available — run OCR directly
+        # Redis not available — run OCR directly
         try:
             from app.services.pdf_ingestor import extract_text
             text = extract_text(str(dest_path))

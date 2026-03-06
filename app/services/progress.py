@@ -115,31 +115,47 @@ def create_job(
 ):
     """
     Insert a new ProcessingJob row with status='queued', or return an existing
-    queued job for the same meeting_id (idempotent for multi-worker dedup).
+    queued/running job for the same meeting_id (idempotent, prevents orphans).
 
-    When the backfill endpoint creates a job before delay(), and the task itself
-    calls create_job again, this finds the existing queued row and updates its
-    stage/celery_task_id instead of creating a duplicate.
+    Three cases:
+    1. Existing "queued" job → reuse it (update stage/task_id).
+    2. Existing "running" job → absorb it (task retry or re-queue scenario;
+       the old attempt is dead, this is the new one taking over).
+    3. No active job → create a new one.
+
+    This prevents the #1 cause of stuck jobs: a task retry creating a new
+    "queued" job while the old "running" job is never cleaned up.
     """
     from app.models import ProcessingJob
 
-    # Reuse existing queued job for this meeting (dedup guard)
+    now = datetime.utcnow()
+
+    # Find ANY active (queued or running) job for this meeting
     existing = (
         db.query(ProcessingJob)
         .filter(
             ProcessingJob.meeting_id == meeting_id,
-            ProcessingJob.status == "queued",
+            ProcessingJob.status.in_(["queued", "running"]),
         )
+        .order_by(ProcessingJob.queued_at.desc())
         .first()
     )
     if existing:
+        if existing.status == "running":
+            logger.info(
+                "create_job: absorbing orphaned running job %s for %s "
+                "(was stage=%s, now stage=%s)",
+                existing.job_id, meeting_id, existing.stage, stage,
+            )
         existing.stage = stage
+        existing.status = "queued"
         if celery_task_id:
             existing.celery_task_id = celery_task_id
-        existing.updated_at = datetime.utcnow()
+        existing.updated_at = now
+        existing.error_msg = None
         db.commit()
         db.refresh(existing)
-        logger.debug("create_job: reused existing queued job %s for %s/%s",
+        logger.debug("create_job: reused existing job %s for %s/%s",
                       existing.job_id, meeting_id, stage)
         return existing
 
@@ -149,8 +165,8 @@ def create_job(
         status="queued",
         celery_task_id=celery_task_id,
         pct=0,
-        queued_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        queued_at=now,
+        updated_at=now,
     )
     db.add(job)
     db.commit()
@@ -220,21 +236,44 @@ def complete_job(db: Session, meeting_id: str) -> None:
 
 
 def fail_job(db: Session, meeting_id: str, error_msg: str) -> None:
-    """Mark the active job as failed (status='error', error_msg set)."""
-    job = _active_job(db, meeting_id)
-    if job is not None:
+    """Mark the active job as failed (status='error', error_msg set).
+
+    Resilient to dirty session state: if the session has been rolled back
+    or is otherwise broken, falls back to a fresh session to ensure the
+    job is marked as error. A stuck "running" job is the worst outcome —
+    we must prevent it even if the original session is dead.
+    """
+    def _do_fail(session: Session) -> bool:
+        job = _active_job(session, meeting_id)
+        if job is None:
+            return False
         try:
             job.status = "error"
             job.error_msg = str(error_msg)[:1000]
             job.completed_at = datetime.utcnow()
             job.updated_at = datetime.utcnow()
-            db.commit()
+            session.commit()
+            return True
         except Exception as exc:
             logger.warning("fail_job DB write failed for %s: %s", meeting_id, exc)
             try:
-                db.rollback()
+                session.rollback()
             except Exception:
                 pass
+            return False
+
+    # Try with the caller's session first
+    if not _do_fail(db):
+        # Fallback: fresh session (handles post-rollback dirty state)
+        try:
+            from app.database import SessionLocal
+            fresh = SessionLocal()
+            try:
+                _do_fail(fresh)
+            finally:
+                fresh.close()
+        except Exception as exc:
+            logger.warning("fail_job fallback session failed for %s: %s", meeting_id, exc)
 
     _write_json(meeting_id, "Error", 0, str(error_msg)[:500], error=True)
     _publish("error", meeting_id, error_msg=str(error_msg)[:500])

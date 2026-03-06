@@ -276,6 +276,7 @@ html, body {
 }
 
 .meeting-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -334,6 +335,23 @@ html, body {
 .badge-processing { background: var(--accent-blue-dim); color: var(--accent-blue); }
 .badge-download  { background: var(--accent-amber-dim); color: var(--accent-amber); }
 .badge-complete  { background: var(--accent-green-dim); color: var(--accent-green); }
+
+/* Vote ingest badges */
+.vote-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  position: absolute;
+  top: 26px;
+  right: 8px;
+}
+.vote-badge-ok     { background: var(--accent-green-dim); color: var(--accent-green); }
+.vote-badge-empty  { background: var(--bg-overlay); color: var(--text-muted); }
+.vote-badge-flagged { background: rgba(239, 68, 68, 0.1); color: var(--accent-red); }
 
 .loading-state, .empty-state {
   text-align: center;

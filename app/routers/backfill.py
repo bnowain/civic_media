@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,7 +49,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backfill", tags=["backfill"])
 
-_STUCK_SECONDS = 600       # 10 min: job updated_at age to be considered stuck
+_STUCK_SECONDS = 7200      # 2 hr: default for GPU-heavy "process" stage
+                           # Long meetings (10 hr) can diarize for 60-90 min
+                           # with no progress callback from pyannote.
+
+# Per-stage stuck thresholds (seconds without a progress update).
+# Download/transcode emit progress ticks during ffmpeg — if no tick arrives
+# within these windows, the task is dead.
+_STUCK_SECONDS_BY_STAGE = {
+    "download":  600,      # 10 min — ffmpeg download ticks every ~30s
+    "transcode": 900,      # 15 min — ffmpeg transcode ticks every ~10s
+    "process":   7200,     # 2 hr  — pyannote diarization has no progress callback
+}
+
+# Self-healing loop interval (seconds). A background thread runs _do_reset_stuck
+# this often, so stuck jobs are recovered even if no next-* endpoints are called.
+_SELF_HEAL_INTERVAL = 300  # 5 minutes
+
 _SKIP_KEY = "backfill:skipped"
 
 
@@ -108,75 +125,146 @@ def _running_job(db: Session):
 
 
 def _is_active(db: Session, meeting_id: str) -> bool:
-    """True if this meeting has a queued or running (non-stale) processing job."""
+    """True if this meeting has a queued or running (non-stale) processing job.
+
+    Uses per-stage timeouts: a download job that's silent for 10 min is stale,
+    but a process job gets 2 hours before being considered stale.
+    """
     from app import models
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    job = (
+    now = datetime.utcnow()
+    jobs = (
         db.query(models.ProcessingJob)
         .filter(
             models.ProcessingJob.meeting_id == meeting_id,
             models.ProcessingJob.status.in_(["queued", "running"]),
-            models.ProcessingJob.updated_at >= threshold,
         )
-        .first()
+        .all()
     )
-    return job is not None
+    for job in jobs:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age < timeout:
+            return True
+    return False
 
 
 def _active_meeting_ids(db: Session) -> set[str]:
-    """Return set of meeting_ids with a queued or running (non-stale) processing job."""
+    """Return set of meeting_ids with a queued or running (non-stale) processing job.
+
+    Uses per-stage timeouts for staleness check.
+    """
     from app import models
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    rows = (
-        db.query(models.ProcessingJob.meeting_id)
-        .filter(
-            models.ProcessingJob.status.in_(["queued", "running"]),
-            models.ProcessingJob.updated_at >= threshold,
-        )
-        .distinct()
+    now = datetime.utcnow()
+    jobs = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status.in_(["queued", "running"]))
         .all()
     )
-    return {r.meeting_id for r in rows}
+    active = set()
+    for job in jobs:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age < timeout:
+            active.add(job.meeting_id)
+    return active
+
+
+def _count_stuck(db: Session) -> int:
+    """Count running/queued jobs that exceed their per-stage stuck threshold."""
+    from app import models
+    now = datetime.utcnow()
+    active_jobs = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status.in_(["running", "queued"]))
+        .all()
+    )
+    count = 0
+    for job in active_jobs:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age >= timeout:
+            count += 1
+    return count
 
 
 # ── Shared reset logic ────────────────────────────────────────────────────────
 
 def _do_reset_stuck(db: Session) -> dict:
     """
-    Reset all stale processing_jobs (running but updated_at too old) and
-    reset any MediaFiles stuck at transcode_status='transcoding' → 'pending'.
-    Called automatically by every next-* endpoint.
+    Three-phase cleanup, runs automatically every 5 min and on every next-* call:
+
+    1. Reset stale jobs — per-stage timeout (download=10m, transcode=15m, process=2h)
+    2. Kill duplicate active jobs — only one queued/running job per meeting allowed
+    3. Reset stuck transcodes — MediaFile.transcode_status='transcoding' → 'pending'
+
+    Uses per-stage thresholds: download/transcode have shorter leashes than
+    GPU-heavy process tasks because they emit frequent progress ticks.
     """
     from app import models
 
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
+    now = datetime.utcnow()
 
-    # Reset stale running OR queued jobs in DB
-    # "queued" jobs that never transitioned are orphaned worker-crash artifacts
-    stale_jobs = (
+    active_jobs = (
         db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status.in_(["running", "queued"]),
-            models.ProcessingJob.updated_at < threshold,
-        )
+        .filter(models.ProcessingJob.status.in_(["running", "queued"]))
+        .order_by(models.ProcessingJob.updated_at.desc())
         .all()
     )
+
+    # Phase 1: Reset stale jobs (per-stage timeout)
     reset_ids = []
-    for job in stale_jobs:
+    for job in active_jobs:
+        stage_timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age < stage_timeout:
+            continue
         job.status = "error"
-        job.error_msg = "Reset by auto-reset-stuck (no progress update in 10+ min)"
+        job.error_msg = (
+            f"Self-healed: no progress for {int(age)}s "
+            f"(limit {stage_timeout}s for stage '{job.stage}')"
+        )
+        job.completed_at = now
+        job.updated_at = now
         reset_ids.append(job.meeting_id)
-        # Also clear progress.json for backward compat
         try:
             pf = MEDIA_DIR / job.meeting_id / "progress.json"
             if pf.exists():
-                pf.write_text(json.dumps({"stage": "", "pct": 0}))
+                pf.write_text(json.dumps({
+                    "stage": "Error",
+                    "pct": 0,
+                    "detail": job.error_msg,
+                    "error": True,
+                    "updated_at": now.isoformat(),
+                }), encoding="utf-8")
         except Exception:
             pass
-    if stale_jobs:
+    if reset_ids:
         db.commit()
 
-    # Reset stuck transcodes
+    # Phase 2: Kill duplicate active jobs (only newest per meeting survives)
+    # Re-query after phase 1 to get the surviving active jobs
+    surviving = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status.in_(["running", "queued"]))
+        .order_by(models.ProcessingJob.updated_at.desc())
+        .all()
+    )
+    seen_meetings: set[str] = set()
+    dupes_killed = 0
+    for job in surviving:
+        if job.meeting_id in seen_meetings:
+            job.status = "error"
+            job.error_msg = "Duplicate active job — killed by self-healer"
+            job.completed_at = now
+            job.updated_at = now
+            dupes_killed += 1
+        else:
+            seen_meetings.add(job.meeting_id)
+    if dupes_killed:
+        db.commit()
+        logger.info("reset-stuck: killed %d duplicate active job(s)", dupes_killed)
+
+    # Reset stuck transcodes (MediaFile rows stuck at 'transcoding')
     stuck_transcodes = (
         db.query(models.MediaFile)
         .filter(models.MediaFile.transcode_status == "transcoding")
@@ -253,16 +341,8 @@ def backfill_status(db: Session = Depends(get_db)):
         ).count()
     )
 
-    # Stuck count: running jobs with no update in >10 min (DB query, not filesystem)
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    stuck_count = (
-        db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status == "running",
-            models.ProcessingJob.updated_at < threshold,
-        )
-        .count()
-    )
+    # Stuck count: running/queued jobs that exceed their per-stage timeout
+    stuck_count = _count_stuck(db)
 
     return {
         "download_pending": download_pending,
@@ -291,20 +371,20 @@ def backfill_queue(
 
     skipped = _get_skipped()
 
-    # ── Single DB query for all running jobs ───────────────────────────────
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    running_jobs = (
+    # ── Single DB query for all running jobs (per-stage stuck filtering) ────
+    now = datetime.utcnow()
+    all_running = (
         db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status == "running",
-            models.ProcessingJob.updated_at >= threshold,
-        )
+        .filter(models.ProcessingJob.status == "running")
         .all()
     )
-    # Map: meeting_id → job (for quick lookup)
-    active_by_meeting: dict[str, models.ProcessingJob] = {
-        j.meeting_id: j for j in running_jobs
-    }
+    # Map: meeting_id → job (only non-stuck jobs)
+    active_by_meeting: dict[str, models.ProcessingJob] = {}
+    for j in all_running:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(j.stage, _STUCK_SECONDS)
+        age = (now - j.updated_at).total_seconds() if j.updated_at else float("inf")
+        if age < timeout:
+            active_by_meeting[j.meeting_id] = j
 
     # ── DB queries ─────────────────────────────────────────────────────────
     meetings_with_segments_ids = {
@@ -599,25 +679,23 @@ def _build_init_state(db: Session) -> dict:
             models.Meeting.meeting_id.in_(meetings_with_segments_ids),
         ).count()
     )
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    stuck = (
-        db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status == "running",
-            models.ProcessingJob.updated_at < threshold,
-        ).count()
-    )
+    stuck = _count_stuck(db)
 
-    # Active job
-    job = (
+    # Active job: most recently updated running job that isn't stuck
+    now = datetime.utcnow()
+    running_jobs = (
         db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status == "running",
-            models.ProcessingJob.updated_at >= threshold,
-        )
+        .filter(models.ProcessingJob.status == "running")
         .order_by(models.ProcessingJob.updated_at.desc())
-        .first()
+        .all()
     )
+    job = None
+    for candidate in running_jobs:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(candidate.stage, _STUCK_SECONDS)
+        age = (now - candidate.updated_at).total_seconds() if candidate.updated_at else float("inf")
+        if age < timeout:
+            job = candidate
+            break
     active = None
     if job:
         meeting = db.query(models.Meeting).filter_by(meeting_id=job.meeting_id).first()
@@ -657,7 +735,7 @@ def backfill_next_download(
     let the UI scope "Download All" to a specific show or content type.
     """
     from app import models
-    from app.tasks import primegov_download_task
+    from app.services.task_dispatch import send_task
 
     reset_summary = _do_reset_stuck(db)
     skipped = _get_skipped()
@@ -689,14 +767,14 @@ def backfill_next_download(
         if meeting.meeting_id in active_ids:
             continue
 
-        primegov_download_task.delay(
-            meeting.meeting_id,
-            download_video=True,
-            download_agenda=False,
-            download_minutes=False,
-            download_packet=False,
-            auto_process=False,
-        )
+        send_task("tasks.primegov_download", kwargs={
+            "meeting_id": meeting.meeting_id,
+            "download_video": True,
+            "download_agenda": False,
+            "download_minutes": False,
+            "download_packet": False,
+            "auto_process": False,
+        })
         logger.info("next-download: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
         return {
             "queued": True,
@@ -718,7 +796,7 @@ def backfill_next_transcode(db: Session = Depends(get_db)):
     oldest MediaFile with transcode_status='pending'.
     """
     from app import models
-    from app.tasks import transcode_video_task
+    from app.services.task_dispatch import send_task
 
     reset_summary = _do_reset_stuck(db)
 
@@ -740,7 +818,7 @@ def backfill_next_transcode(db: Session = Depends(get_db)):
             "meeting_id": media.meeting_id, "auto_reset": reset_summary,
         }
 
-    transcode_video_task.delay(media.meeting_id, media.media_id)
+    send_task("tasks.transcode_video", args=[media.meeting_id, media.media_id])
     logger.info("next-transcode: queued %s / %s", media.meeting_id, media.media_id)
     return {
         "queued": True,
@@ -770,7 +848,7 @@ def backfill_next_process(
     to a specific show or content type.
     """
     from app import models
-    from app.tasks import process_video_task
+    from app.services.task_dispatch import send_task
 
     reset_summary = _do_reset_stuck(db)
     skipped = _get_skipped()
@@ -823,7 +901,7 @@ def backfill_next_process(
             logger.warning("next-process: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
             continue
 
-        process_video_task.delay(meeting.meeting_id, media.media_id)
+        send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
         logger.info("next-process: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
         return {
             "queued": True,
@@ -852,7 +930,7 @@ def backfill_next_process_newest(
     toward the middle without ever colliding.
     """
     from app import models
-    from app.tasks import process_video_task
+    from app.services.task_dispatch import send_task
 
     reset_summary = _do_reset_stuck(db)
     skipped = _get_skipped()
@@ -905,7 +983,7 @@ def backfill_next_process_newest(
             logger.warning("next-process-newest: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
             continue
 
-        process_video_task.delay(meeting.meeting_id, media.media_id)
+        send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
         logger.info("next-process-newest: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
         return {
             "queued": True,
@@ -938,7 +1016,7 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
       duration (truncated WAV guard).
     """
     from app import models
-    from app.tasks import process_video_task
+    from app.services.task_dispatch import send_task
     from app.services.audio_extractor import get_wav_duration, _probe_duration
 
     reset_summary = _do_reset_stuck(db)
@@ -1008,7 +1086,7 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
             logger.warning("next-diarize: skipping %s — no source media record", meeting.meeting_id)
             continue
 
-        process_video_task.delay(meeting.meeting_id, source_media.media_id)
+        send_task("tasks.process_video", args=[meeting.meeting_id, source_media.media_id])
         logger.info("next-diarize: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
         return {
             "queued": True,
@@ -1028,7 +1106,7 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
 def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
     """Queue process_video_task for a specific meeting immediately."""
     from app import models
-    from app.tasks import process_video_task
+    from app.services.task_dispatch import send_task
     from fastapi import HTTPException
 
     media = (
@@ -1046,7 +1124,7 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
     if not Path(media.file_path).exists():
         raise HTTPException(status_code=409, detail="Media file not found on disk")
 
-    process_video_task.delay(meeting_id, media.media_id)
+    send_task("tasks.process_video", args=[meeting_id, media.media_id])
     logger.info("process-now: queued %s / %s", meeting_id, media.media_id)
     return {"queued": True, "meeting_id": meeting_id, "media_id": media.media_id}
 
@@ -1057,14 +1135,14 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
 def backfill_full(meeting_id: str, db: Session = Depends(get_db)):
     """Queue full_ingest_task (download → transcode → process) for a specific meeting."""
     from app import models
-    from app.tasks import full_ingest_task
+    from app.services.task_dispatch import send_task
     from fastapi import HTTPException
 
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    full_ingest_task.delay(meeting_id)
+    send_task("tasks.full_ingest", args=[meeting_id])
     logger.info("full: queued full_ingest_task for %s", meeting_id)
     return {
         "queued": True,
@@ -1094,23 +1172,22 @@ def backfill_unskip(meeting_id: str):
 
 @router.get("/stuck")
 def backfill_stuck(db: Session = Depends(get_db)):
-    """List meetings with stale running jobs (DB query — no filesystem scan)."""
+    """List meetings with stale running/queued jobs, using per-stage timeouts."""
     from app import models
 
-    threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
-    stale_jobs = (
+    now = datetime.utcnow()
+    active_jobs = (
         db.query(models.ProcessingJob)
-        .filter(
-            models.ProcessingJob.status == "running",
-            models.ProcessingJob.updated_at < threshold,
-        )
+        .filter(models.ProcessingJob.status.in_(["running", "queued"]))
         .all()
     )
 
-    now = datetime.utcnow()
     stuck = []
-    for job in stale_jobs:
-        age = (now - job.updated_at).total_seconds() if job.updated_at else 0
+    for job in active_jobs:
+        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age < timeout:
+            continue
         meeting = db.query(models.Meeting).filter_by(meeting_id=job.meeting_id).first()
         stuck.append({
             "meeting_id": job.meeting_id,
@@ -1118,6 +1195,7 @@ def backfill_stuck(db: Session = Depends(get_db)):
             "pct": job.pct or 0,
             "updated_at": job.updated_at.isoformat() if job.updated_at else None,
             "age_minutes": round(age / 60, 1),
+            "timeout_minutes": round(timeout / 60, 1),
             "title": meeting.title if meeting else None,
             "meeting_date": meeting.meeting_date if meeting else None,
         })
@@ -1162,4 +1240,50 @@ def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
     db.commit()
     logger.info("clear-errors: deleted %d job(s) for meeting %s", count, meeting_id)
     return {"meeting_id": meeting_id, "cleared": count}
+
+
+# ── Self-healing background thread ────────────────────────────────────────────
+
+_self_heal_started = False
+
+
+def _self_heal_loop():
+    """Periodically reset stuck jobs so recovery doesn't depend on next-* calls.
+
+    Runs in a daemon thread — dies with the process. Uses its own DB session
+    (never shares with request handlers). Errors are swallowed and logged.
+    """
+    import time
+    while True:
+        time.sleep(_SELF_HEAL_INTERVAL)
+        try:
+            db = SessionLocal()
+            try:
+                result = _do_reset_stuck(db)
+                reset_ids = result.get("reset_ids", [])
+                tc_resets = result.get("transcode_resets", 0)
+                if reset_ids or tc_resets:
+                    logger.info(
+                        "Self-heal: reset %d stuck job(s), %d transcode(s): %s",
+                        len(reset_ids), tc_resets, reset_ids,
+                    )
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("Self-heal loop error (non-fatal): %s", exc)
+
+
+def start_self_heal():
+    """Start the self-healing background thread (idempotent)."""
+    global _self_heal_started
+    if _self_heal_started:
+        return
+    _self_heal_started = True
+    t = threading.Thread(target=_self_heal_loop, name="backfill-self-heal", daemon=True)
+    t.start()
+    logger.info("Self-healing background thread started (interval=%ds)", _SELF_HEAL_INTERVAL)
+
+
+# Auto-start on module import (happens once when FastAPI loads the router)
+start_self_heal()
 

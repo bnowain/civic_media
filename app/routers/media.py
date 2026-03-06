@@ -195,36 +195,8 @@ async def upload_video(
     db.commit()
     db.refresh(media)
 
-    # Try Celery first (auto-restart if needed), fall back to background thread
-    try:
-        from app.tasks import process_video_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_video_task.delay(meeting_id, media.media_id)
-    except Exception:
-        import logging
-        import threading
-        logging.getLogger(__name__).info(
-            "Celery unavailable — running pipeline in background thread for %s", meeting_id
-        )
-        from app.services.pipeline import run_video_pipeline
-        from app.database import SessionLocal
-        _mid = meeting_id
-        _media_id = media.media_id
-
-        def _run():
-            session = SessionLocal()
-            try:
-                run_video_pipeline(session, _mid, _media_id)
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Background pipeline failed for %s", _mid
-                )
-            finally:
-                session.close()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+    from app.services.task_dispatch import send_task
+    send_task("tasks.process_video", args=[meeting_id, media.media_id])
     return media
 
 
@@ -310,36 +282,9 @@ def process_meeting(meeting_id: str, db: Session = Depends(get_db)):
     if segment_count > 0:
         raise HTTPException(400, "Meeting already has transcript segments. Use /rerun instead.")
 
-    # Try Celery first (auto-restart if needed), fall back to background thread
-    try:
-        from app.tasks import process_video_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_video_task.delay(meeting_id, media.media_id)
-        return {"meeting_id": meeting_id, "status": "queued"}
-    except Exception:
-        import logging
-        import threading
-        logging.getLogger(__name__).info(
-            "Celery unavailable — running pipeline in background thread for %s", meeting_id
-        )
-        from app.services.pipeline import run_video_pipeline
-        from app.database import SessionLocal
-
-        def _run():
-            session = SessionLocal()
-            try:
-                run_video_pipeline(session, meeting_id, media.media_id)
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Background pipeline failed for %s", meeting_id
-                )
-            finally:
-                session.close()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        return {"meeting_id": meeting_id, "status": "started"}
+    from app.services.task_dispatch import send_task
+    send_task("tasks.process_video", args=[meeting_id, media.media_id])
+    return {"meeting_id": meeting_id, "status": "queued"}
 
 
 # ── Rerun pipeline ────────────────────────────────────────────────────────────
@@ -419,36 +364,9 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
         if p.exists():
             p.unlink()
 
-    # Requeue pipeline — try Celery (auto-restart if needed), fall back to thread
-    try:
-        from app.tasks import process_video_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_video_task.delay(meeting_id, source_media.media_id)
-    except Exception:
-        import logging
-        import threading
-        logging.getLogger(__name__).info(
-            "Celery unavailable — running pipeline in background thread for %s", meeting_id
-        )
-        from app.services.pipeline import run_video_pipeline
-        from app.database import SessionLocal
-        _mid = meeting_id
-        _media_id = source_media.media_id
-
-        def _run():
-            session = SessionLocal()
-            try:
-                run_video_pipeline(session, _mid, _media_id)
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Background pipeline failed for %s", _mid
-                )
-            finally:
-                session.close()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+    # Requeue pipeline via direct Redis dispatch
+    from app.services.task_dispatch import send_task
+    send_task("tasks.process_video", args=[meeting_id, source_media.media_id])
 
     return {
         "meeting_id": meeting_id,
@@ -617,6 +535,19 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         stage  = stage or "Starting..."
         pct    = pct or 0
 
+    # Vote ingest status
+    vote_count = (
+        db.query(models.MeetingVote)
+        .filter_by(meeting_id=meeting_id)
+        .count()
+    )
+    minutes_doc = (
+        db.query(models.Document)
+        .filter_by(meeting_id=meeting_id, document_type="minutes")
+        .first()
+    )
+    minutes_parse_status = minutes_doc.minutes_parse_status if minutes_doc else None
+
     return schemas.PipelineStatus(
         meeting_id=meeting_id,
         segment_count=segment_count,
@@ -626,6 +557,8 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         progress_pct=pct,
         detail=detail,
         transcode_status=transcode_status,
+        vote_count=vote_count,
+        minutes_parse_status=minutes_parse_status,
     )
 
 

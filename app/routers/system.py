@@ -25,18 +25,28 @@ _PID_FILE = BASE_DIR / ".server.pids"
 
 
 def _pid_alive(pid: int) -> bool:
-    """Check whether a process with the given PID is still running (Windows)."""
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        SYNCHRONIZE = 0x00100000
-        handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
+    """Check whether a process with the given PID is still running (cross-platform)."""
+    import sys as _sys
+    if _sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
             return True
-        return False
-    except Exception:
-        return False
+        except (ProcessLookupError, PermissionError):
+            return False
+        except Exception:
+            return False
 
 
 @router.get("/status")

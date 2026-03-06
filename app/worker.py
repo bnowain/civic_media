@@ -46,6 +46,28 @@ celery_app.conf.update(
     # (Solo pool uses thread-based soft limits and process signals for hard.)
     task_time_limit=7200,        # 2 hours — hard kill
     task_soft_time_limit=6600,   # 110 minutes — raises SoftTimeLimitExceeded
+    # Cancel running tasks if the broker connection drops.
+    # Without this, a task keeps running but can never ack/report back,
+    # creating a zombie that blocks the worker indefinitely.
+    worker_cancel_long_running_tasks_on_connection_loss=True,
+    # Auto-reconnect to broker after connection loss (Celery 5.3+)
+    broker_connection_retry_on_startup=True,
+    # ── Queue routing ────────────────────────────────────────────────────
+    # Light tasks (I/O-bound, no GPU) go to the "light" queue.
+    # Heavy tasks (GPU-bound) stay on the default "celery" queue.
+    # GPU workers consume from "celery" only; the light worker consumes
+    # from "light" only.  This prevents ingest/download/transcode from
+    # waiting behind multi-hour transcription jobs.
+    task_routes={
+        "tasks.ingest_radio":       {"queue": "light"},
+        "tasks.primegov_discover":  {"queue": "light"},
+        "tasks.primegov_download":  {"queue": "light"},
+        "tasks.transcode_video":    {"queue": "light"},
+        "tasks.retag_content":      {"queue": "light"},
+        "tasks.export_clip":        {"queue": "light"},
+        "tasks.cleanup_clips":      {"queue": "light"},
+        "tasks.full_ingest":        {"queue": "light"},
+    },
 )
 
 
@@ -147,8 +169,8 @@ def _requeue_meeting(meeting_id: str, stage: str, reason: str) -> bool:
                 .first()
             )
             if source_media:
-                from app.tasks import process_video_task
-                process_video_task.delay(meeting_id, source_media.media_id)
+                from app.services.task_dispatch import send_task
+                send_task("tasks.process_video", args=[meeting_id, source_media.media_id])
                 logger.info("Self-heal [%s]: re-queued %s (%s)", reason, meeting_id, stage)
                 return True
         finally:
@@ -161,12 +183,14 @@ def _requeue_meeting(meeting_id: str, stage: str, reason: str) -> bool:
 @worker_ready.connect
 def recover_orphaned_tasks(sender=None, **kwargs):
     """
-    On worker startup, find processing_jobs with status='running' that are
-    stale (updated_at older than ORPHAN_RECOVERY_SECONDS), mark them as error,
-    and re-queue at most ONE for automatic recovery.
+    On worker startup, mark ALL active (running/queued) processing_jobs as error.
 
-    The backfill API (/api/backfill/reset-stuck + next-*) handles remaining
-    stuck meetings one at a time on user request.
+    Rationale: if the worker just started, NO task should be running or queued
+    in the DB — any such jobs are orphans from a previous crash. The backfill
+    system's next-* endpoints and self-healing loop will re-discover and re-queue
+    legitimate work automatically.
+
+    This is the nuclear option that guarantees zero stuck jobs survive a restart.
     """
     try:
         from app.database import SessionLocal
@@ -174,36 +198,28 @@ def recover_orphaned_tasks(sender=None, **kwargs):
 
         db = SessionLocal()
         try:
-            threshold = datetime.utcnow() - timedelta(seconds=ORPHAN_RECOVERY_SECONDS)
-            stale_jobs = (
+            orphans = (
                 db.query(ProcessingJob)
-                .filter(
-                    ProcessingJob.status == "running",
-                    ProcessingJob.updated_at < threshold,
-                )
+                .filter(ProcessingJob.status.in_(["running", "queued"]))
                 .all()
             )
 
-            if not stale_jobs:
+            if not orphans:
                 return
 
-            # Mark all stale jobs as error
-            for job in stale_jobs:
+            now = datetime.utcnow()
+            for job in orphans:
                 job.status = "error"
-                job.error_msg = "Worker restart — task was interrupted"
+                job.error_msg = "Worker restart — all in-flight jobs reset"
+                job.completed_at = now
+                job.updated_at = now
             db.commit()
 
             logger.info(
-                "Self-heal: reset %d stale job(s) on worker startup",
-                len(stale_jobs),
+                "Self-heal on startup: reset %d orphaned job(s) "
+                "(backfill system will re-queue as needed)",
+                len(orphans),
             )
-
-            # Re-queue at most ONE (the most recently started one)
-            stale_jobs.sort(key=lambda j: j.queued_at or datetime.min, reverse=True)
-            for job in stale_jobs:
-                if job.stage == "process" and _requeue_meeting(job.meeting_id, job.stage, "stale_job_recovery"):
-                    logger.info("Self-heal: re-queued %s (stage=%s)", job.meeting_id, job.stage)
-                    break
         finally:
             db.close()
 

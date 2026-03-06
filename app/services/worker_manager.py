@@ -4,7 +4,11 @@ Celery worker lifecycle management — health checks, restart, auto-recovery.
 Used by:
   - GET  /api/system/worker-health   (status pill polling)
   - POST /api/system/restart-worker  (manual restart)
-  - ensure_worker()                  (auto-recovery before .delay() calls)
+  - ensure_light_worker()            (auto-start light worker on demand)
+
+Note: Task dispatch now goes through app/services/task_dispatch.py (direct Redis
+push), NOT through Celery .delay(). ensure_worker() is retained for manual
+restart only.
 """
 
 import json
@@ -32,18 +36,28 @@ _BINDING_FLUSH_COOLDOWN = 60.0  # seconds
 
 
 def _pid_alive(pid: int) -> bool:
-    """Check whether a process with the given PID is still running (Windows)."""
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        SYNCHRONIZE = 0x00100000
-        handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
+    """Check whether a process with the given PID is still running (cross-platform)."""
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
             return True
-        return False
-    except Exception:
-        return False
+        except (ProcessLookupError, PermissionError):
+            return False
+        except Exception:
+            return False
 
 
 def _read_pids() -> dict:
@@ -64,12 +78,19 @@ def _write_pids(pids: dict) -> None:
         logger.warning("Could not write .server.pids: %s", exc)
 
 
-def _ping_worker(timeout: float = 2.0) -> bool:
-    """Ping Celery worker via control.inspect(). Returns True if any worker responds."""
+def _ping_worker(timeout: float = 3.0) -> bool:
+    """Check if a Celery worker is alive.
+
+    Fast path: checks for celery.exe in the process list (~50ms).
+    Avoids Celery's control.inspect().ping() which hangs indefinitely
+    on Windows when ghost worker bindings exist in Redis.
+    """
     try:
-        from app.worker import celery_app
-        result = celery_app.control.inspect(timeout=timeout).ping()
-        return bool(result)
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq celery.exe", "/NH"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return "celery.exe" in result.stdout
     except Exception:
         return False
 
@@ -86,16 +107,22 @@ def _check_redis() -> bool:
 
 
 def _count_active_tasks() -> int:
-    """Count currently active tasks in the worker."""
+    """Count currently active tasks via the processing_jobs DB table.
+
+    Avoids Celery inspect() which can hang on Windows with ghost bindings.
+    """
     try:
-        from app.worker import celery_app
-        result = celery_app.control.inspect(timeout=2).active()
-        if result:
-            return sum(len(tasks) for tasks in result.values())
-        return 0
+        from app.database import SessionLocal
+        from app import models
+        db = SessionLocal()
+        try:
+            return db.query(models.ProcessingJob).filter(
+                models.ProcessingJob.status == "running"
+            ).count()
+        finally:
+            db.close()
     except Exception:
         return 0
-
 
 def _flush_kombu_bindings() -> None:
     """Flush stale Kombu routing-key registrations left by killed workers.
@@ -365,32 +392,13 @@ def ensure_worker() -> None:
     """
     Call before any .delay(). If the worker is dead, restart it.
 
-    Fast path (~0ms): uses cached health check.
+    Fast path (~50ms): checks for celery.exe in process list.
     Slow path (~15s): only when worker needs restart.
-
-    Also periodically flushes stale Kombu ghost bindings from Redis
-    (at most once per minute) so that ghost node registrations left by
-    previously killed workers don't accumulate into DuplicateNodenameWarnings.
 
     Raises RuntimeError if the worker cannot be recovered.
     """
-    global _last_binding_flush
-
-    # Flush stale Kombu ghost bindings periodically — fast (~1ms Redis DELETE).
-    # Safe to run while the worker is alive; it re-registers on next heartbeat.
-    now = time.time()
-    if (now - _last_binding_flush) > _BINDING_FLUSH_COOLDOWN:
-        _flush_kombu_bindings()
-        _last_binding_flush = now
-
-    # Quick check using cache
-    health = check_worker_health(use_cache=True)
-    if health.get("worker_online"):
-        return
-
-    # Cache might be stale — do a fresh check
-    health = check_worker_health(use_cache=False)
-    if health.get("worker_online"):
+    # Fast: is celery.exe running?
+    if _ping_worker():
         return
 
     # Worker is dead — attempt restart
@@ -404,3 +412,58 @@ def ensure_worker() -> None:
         )
 
     logger.info("Auto-restart successful — proceeding with task dispatch")
+
+
+# ── Light worker auto-start ──────────────────────────────────────────────────
+
+_LIGHT_WORKER_CMD = BASE_DIR / 'start_light_worker.cmd'
+_LIGHT_PID_FILE = BASE_DIR / '.worker_pids' / 'light.pid'
+
+
+def _light_worker_alive() -> bool:
+    """Check if the light worker is running.
+
+    Fast check: reads the PID file written by the watchdog, then
+    verifies the process is still alive via OpenProcess.
+    """
+    # Check PID file (written by watchdog or start_light_worker.cmd)
+    if _LIGHT_PID_FILE.exists():
+        try:
+            pid = int(_LIGHT_PID_FILE.read_text().strip())
+            if _pid_alive(pid):
+                return True
+        except (ValueError, OSError):
+            pass
+
+    return False
+
+
+def ensure_light_worker() -> None:
+    """Start the light worker if it is not already running.
+
+    Called before dispatching tasks to the 'light' queue.
+    Non-blocking — launches the worker in the background and returns
+    immediately. The task is already in Redis; the worker will pick
+    it up once it finishes starting (~10s).
+    """
+    if _light_worker_alive():
+        return
+
+    if not _LIGHT_WORKER_CMD.exists():
+        logger.warning('Light worker script not found: %s', _LIGHT_WORKER_CMD)
+        return
+
+    logger.info('Light worker not running — starting %s', _LIGHT_WORKER_CMD)
+    try:
+        CREATE_NO_WINDOW = 0x08000000
+        proc = subprocess.Popen(
+            ['cmd', '/C', str(_LIGHT_WORKER_CMD)],
+            creationflags=CREATE_NO_WINDOW,
+            cwd=str(BASE_DIR),
+        )
+        # Write PID file so we can detect it next time
+        _LIGHT_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LIGHT_PID_FILE.write_text(str(proc.pid))
+        logger.info('Light worker launched (PID %d, will be ready in ~10s)', proc.pid)
+    except Exception as exc:
+        logger.error('Failed to start light worker: %s', exc)

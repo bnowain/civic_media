@@ -78,13 +78,11 @@ async def upload_newscast_video(
     newscast.status = "queued"
     db.commit()
 
-    # Dispatch Celery task
-    from app.tasks import process_newscast_task
-    from app.services.worker_manager import ensure_worker
-    ensure_worker()
-    task = process_newscast_task.delay(newscast_id, skip_commercial_strip)
+    # Dispatch task via direct Redis push
+    from app.services.task_dispatch import send_task
+    task_id = send_task("tasks.process_newscast", args=[newscast_id, skip_commercial_strip])
 
-    return {"newscast_id": newscast_id, "task_id": task.id, "status": "queued"}
+    return {"newscast_id": newscast_id, "task_id": task_id, "status": "queued"}
 
 
 @router.get("/{newscast_id}/status")

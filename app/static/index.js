@@ -690,6 +690,7 @@ function createMeetingCard(m) {
       <div class="meeting-progress" id="progress-${m.meeting_id}"></div>
     </div>
     <span class="meeting-card-badge badge-pending" id="badge-${m.meeting_id}">\u2014</span>
+    <span class="vote-badge" id="vote-badge-${m.meeting_id}" style="display:none"></span>
     <div class="meeting-card-actions">
       <button class="btn btn-ghost btn-sm edit-btn" data-meeting-id="${m.meeting_id}" title="Edit">&#x270E;</button>
       <button class="btn btn-amber btn-sm download-btn" data-meeting-id="${m.meeting_id}" title="Download from PrimeGov" style="display:none">&#x2B07;</button>
@@ -977,6 +978,30 @@ function applyStatusToBadge(badge, status, meetingId) {
   }
 }
 
+function applyVoteBadge(meetingId, status) {
+  const vb = document.getElementById(`vote-badge-${meetingId}`);
+  if (!vb) return;
+  const ps = status.minutes_parse_status;
+  const vc = status.vote_count || 0;
+  if (!ps) {
+    vb.style.display = "none";
+    return;
+  }
+  vb.style.display = "";
+  if (ps === "ok" && vc > 0) {
+    vb.textContent = `${vc} vote${vc > 1 ? "s" : ""}`;
+    vb.className = "vote-badge vote-badge-ok";
+  } else if (ps === "empty") {
+    vb.textContent = "no votes";
+    vb.className = "vote-badge vote-badge-empty";
+  } else if (ps === "partial" || ps === "unrecognized") {
+    vb.textContent = "votes: review";
+    vb.className = "vote-badge vote-badge-flagged";
+  } else {
+    vb.style.display = "none";
+  }
+}
+
 async function checkUnprocessed(meetingId, badge, transcodeStatus) {
   try {
     const r = await fetch(`/api/media/${meetingId}`);
@@ -1065,6 +1090,7 @@ async function updateMeetingCardStatus(meetingId) {
   }
 
   applyStatusToBadge(badge, status, meetingId);
+  applyVoteBadge(meetingId, status);
 
   if (progressEl) {
     const hasActiveStage = status.stage && status.stage !== "Waiting for upload";
@@ -1103,6 +1129,7 @@ function startPolling(meetingId) {
     }
 
     applyStatusToBadge(badge, status, meetingId);
+    applyVoteBadge(meetingId, status);
     if (progressEl) renderProgressBar(progressEl, status);
 
     // Detect download completion: media now exists, needs transcode

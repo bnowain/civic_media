@@ -47,8 +47,6 @@ def process_tags(payload: TaggingPayload, db: Session = Depends(get_db)):
 @router.post("/retag/{content_type}/{content_id}")
 def retag_content(content_type: str, content_id: str, db: Session = Depends(get_db)):
     """Manually trigger a retag via Atlas for a specific content item."""
-    from app.tasks import retag_content_task
-    from app.services.worker_manager import ensure_worker
-    ensure_worker()
-    task = retag_content_task.delay(content_type, content_id)
-    return {"task_id": task.id, "status": "queued"}
+    from app.services.task_dispatch import send_task
+    task_id = send_task("tasks.retag_content", args=[content_type, content_id])
+    return {"task_id": task_id, "status": "queued"}

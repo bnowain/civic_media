@@ -49,12 +49,10 @@ def _write_progress(meeting_id: str, stage: str, pct: int, detail: str = "", err
 
 
 def _auto_dispatch_pipeline(meeting_id: str, media_id: str) -> None:
-    """Dispatch the processing pipeline via Celery after a successful transcode."""
+    """Dispatch the processing pipeline via direct Redis push after a successful transcode."""
     try:
-        from app.tasks import process_video_task
-        from app.services.worker_manager import ensure_worker
-        ensure_worker()
-        process_video_task.delay(meeting_id, media_id)
+        from app.services.task_dispatch import send_task
+        send_task("tasks.process_video", args=[meeting_id, media_id])
         logger.info("Auto-dispatched processing pipeline for %s", meeting_id)
     except Exception as exc:
         logger.warning(

@@ -157,16 +157,16 @@ def confirm_assignment(
     #    the tasks still go to Redis and will be picked up when a worker is free.
     try:
         from app.config import MULTI_CLIP_MIN_SEGMENT
-        from app.tasks import extract_multi_voiceprints_task, rerun_voiceprints_task
+        from app.services.task_dispatch import send_task
 
         if segment.embedding and seg_duration >= MULTI_CLIP_MIN_SEGMENT:
-            extract_multi_voiceprints_task.delay(segment_id, payload.person_id)
+            send_task("tasks.extract_multi_voiceprints", args=[segment_id, payload.person_id])
             logger.info(
                 "Queued multi-clip voiceprint extraction for segment %s (%.1fs)",
                 segment_id, seg_duration,
             )
 
-        rerun_voiceprints_task.delay(segment.meeting_id)
+        send_task("tasks.rerun_voiceprints", args=[segment.meeting_id])
         logger.info(
             "Queued background voiceprint re-evaluation for meeting %s",
             segment.meeting_id,
@@ -232,8 +232,8 @@ def unconfirm_assignment(
 
     # ── Trigger background rerun so system re-matches this segment ─────────
     try:
-        from app.tasks import rerun_voiceprints_task
-        rerun_voiceprints_task.delay(segment.meeting_id)
+        from app.services.task_dispatch import send_task
+        send_task("tasks.rerun_voiceprints", args=[segment.meeting_id])
         logger.info(
             "Queued background voiceprint re-evaluation for meeting %s (unconfirm)",
             segment.meeting_id,
@@ -322,8 +322,8 @@ def reprocess_meeting(meeting_id: str, db: Session = Depends(get_db)):
     if not meeting:
         raise HTTPException(404, "Meeting not found")
 
-    from app.tasks import rerun_voiceprints_task
-    rerun_voiceprints_task.delay(meeting_id)
+    from app.services.task_dispatch import send_task
+    send_task("tasks.rerun_voiceprints", args=[meeting_id])
     return {"meeting_id": meeting_id, "status": "queued"}
 
 

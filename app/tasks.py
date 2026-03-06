@@ -93,6 +93,144 @@ def process_video_task(self, meeting_id: str, media_id: str) -> dict:
         db.close()
 
 
+def _ingest_minutes_votes(db, doc) -> None:
+    """Auto-ingest votes from a minutes document after OCR completes.
+
+    Calls the same parser used by scripts/ingest_minutes_votes.py.
+    Skips if votes already exist for this meeting (idempotent).
+    Logs results to logs/minutes_vote_ingest.log.
+    """
+    from app import models
+    from app.services.minutes_parser import parse_minutes
+    from sqlalchemy import func
+
+    meeting = db.query(models.Meeting).filter_by(meeting_id=doc.meeting_id).first()
+    if not meeting:
+        return
+
+    # Skip if votes already ingested for this meeting
+    existing = db.query(func.count(models.MeetingVote.vote_id)) \
+                 .filter(models.MeetingVote.meeting_id == doc.meeting_id).scalar()
+    if existing > 0:
+        logger.info("Vote ingest: skipped %s — %d votes already exist", doc.meeting_id, existing)
+        return
+
+    result = parse_minutes(
+        ocr_text=doc.ocr_text,
+        meeting_id=meeting.meeting_id,
+        document_id=doc.document_id,
+        meeting_date=meeting.meeting_date,
+        group_name=meeting.group_name,
+    )
+
+    # Always record parse status on the document (even if we don't ingest)
+    doc.minutes_parse_status = result.parse_status
+    doc.minutes_parse_notes = result.parse_notes_json
+    db.commit()
+
+    # Safety gate: only auto-ingest when the parse is clean or empty.
+    # "partial" / "unrecognized" means the format may have changed —
+    # flag it for human review instead of writing potentially bad data.
+    if result.parse_status not in ("ok", "empty"):
+        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
+                         result.parse_status, result.unmatched_paragraphs,
+                         skipped=True)
+        logger.warning("Vote ingest: FLAGGED %s %s — parse_status=%s, "
+                        "%d unmatched paragraphs (not ingested, needs review)",
+                        meeting.meeting_date, meeting.title[:40],
+                        result.parse_status, len(result.unmatched_paragraphs))
+        return
+
+    if not result.votes:
+        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
+                         result.parse_status, [])
+        logger.info("Vote ingest: %s %s — no votes (special meeting) [%s]",
+                     meeting.meeting_date, meeting.title[:40], result.parse_status)
+        return
+
+    # Build person lookup from roster
+    person_map = _build_vote_person_lookup(db)
+
+    saved = 0
+    for v in result.votes:
+        row = models.MeetingVote(
+            vote_id=v.vote_id,
+            meeting_id=v.meeting_id,
+            document_id=v.document_id,
+            meeting_date=v.meeting_date,
+            group_name=v.group_name,
+            agenda_section=v.agenda_section,
+            item_description=v.item_description,
+            resolution_number=v.resolution_number,
+            outcome=v.outcome,
+            vote_tally=v.vote_tally,
+            mover=v.mover,
+            seconder=v.seconder,
+            mover_person_id=person_map.get(v.mover),
+            seconder_person_id=person_map.get(v.seconder),
+        )
+        db.add(row)
+        for name in v.yes_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="yes", person_id=person_map.get(name)))
+        for name in v.no_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="no", person_id=person_map.get(name)))
+        for name in v.absent_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="absent", person_id=person_map.get(name)))
+        saved += 1
+
+    db.commit()
+
+    # Log to file
+    _log_vote_ingest(meeting.meeting_date, meeting.title, saved,
+                     result.parse_status, result.unmatched_paragraphs)
+    logger.info("Vote ingest: %s %s — %d votes [%s]",
+                meeting.meeting_date, meeting.title[:40], saved, result.parse_status)
+
+
+def _build_vote_person_lookup(db) -> dict:
+    """Build last-name → person_id mapping from supervisor roster."""
+    import json as _json
+    from app import models
+
+    roster_path = Path(__file__).parent.parent / "config" / "supervisors.json"
+    if not roster_path.exists():
+        return {}
+    try:
+        data = _json.loads(roster_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    last_to_full = {}
+    for entry in data.get("district_supervisors", []):
+        full = entry.get("supervisor", "")
+        last = full.rsplit(" ", 1)[-1]
+        if last not in last_to_full:
+            last_to_full[last] = full
+    people = {p.canonical_name: p.person_id for p in db.query(models.Person).all()}
+    return {last: people[full] for last, full in last_to_full.items() if full in people}
+
+
+def _log_vote_ingest(meeting_date, title, vote_count, status, unmatched,
+                     skipped=False):
+    """Append vote ingest result to logs/minutes_vote_ingest.log."""
+    log_dir = Path(__file__).parent.parent / "logs"
+    log_file = log_dir / "minutes_vote_ingest.log"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            flag = "FLAGGED " if skipped else ""
+            f.write(f"{ts}  {flag}{meeting_date}  {title[:55]:<55}  "
+                    f"votes={vote_count}  status={status}\n")
+            if unmatched:
+                for i, para in enumerate(unmatched[:5], 1):
+                    f.write(f"  [{i}] {para[:200]}\n")
+    except Exception:
+        pass
+
+
 @celery_app.task(
     bind=True,
     name="tasks.process_pdf",
@@ -127,6 +265,14 @@ def process_pdf_task(self, document_id: str) -> dict:
         out_file.write_text(text, encoding="utf-8")
 
         logger.info("PDF processed: %s (%d chars)", doc.file_path, len(text))
+
+        # Auto-ingest votes if this is a minutes document with OCR text
+        if doc.document_type == "minutes" and text:
+            try:
+                _ingest_minutes_votes(db, doc)
+            except Exception as vote_exc:
+                logger.warning("Vote ingest failed for document %s: %s", document_id, vote_exc)
+
         return {"document_id": document_id, "char_count": len(text), "status": "complete"}
 
     except Exception as exc:
@@ -613,7 +759,8 @@ def primegov_download_task(
         if auto_process and results.get("video", {}).get("status") == "complete":
             media_id = results["video"].get("media_id")
             if media_id:
-                process_video_task.delay(meeting_id, media_id)
+                from app.services.task_dispatch import send_task
+                send_task("tasks.process_video", args=[meeting_id, media_id])
                 results["auto_process"] = "queued"
 
         return {"meeting_id": meeting_id, "results": results}
@@ -770,7 +917,8 @@ def export_clip_task(self, clip_id: str) -> dict:
         logger.info("export_clip_task complete: %s → %s", clip_id, out_path)
 
         # Auto-cleanup old exports so abandoned clips don't pile up
-        cleanup_clips_task.delay()
+        from app.services.task_dispatch import send_task
+        send_task("tasks.cleanup_clips")
 
         return {"clip_id": clip_id, "status": "ready"}
 

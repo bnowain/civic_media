@@ -186,16 +186,16 @@ def run_discovery(
     docs_queued = 0
     if newly_doc_updated:
         try:
-            from app.tasks import primegov_download_task
+            from app.services.task_dispatch import send_task
             for meeting in newly_doc_updated:
-                primegov_download_task.delay(
-                    meeting.meeting_id,
-                    download_video=False,
-                    download_agenda=meeting.agenda_url is not None,
-                    download_minutes=meeting.minutes_url is not None,
-                    download_packet=meeting.packet_url is not None,
-                    auto_process=False,
-                )
+                send_task("tasks.primegov_download", kwargs={
+                    "meeting_id": meeting.meeting_id,
+                    "download_video": False,
+                    "download_agenda": meeting.agenda_url is not None,
+                    "download_minutes": meeting.minutes_url is not None,
+                    "download_packet": meeting.packet_url is not None,
+                    "auto_process": False,
+                })
                 docs_queued += 1
             logger.info(
                 "Auto-queued document downloads for %d meetings that gained new doc URLs",

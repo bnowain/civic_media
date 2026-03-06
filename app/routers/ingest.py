@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.database import get_db
+from app.services.task_dispatch import send_task
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 
@@ -29,9 +30,6 @@ def run_ingest(
     db: Session = Depends(get_db),
 ):
     """Start an ingest run. Optionally filter to a single source."""
-    from app.tasks import ingest_radio_task
-    from app.services.worker_manager import ensure_worker
-
     if source_id:
         src = db.query(models.IngestSource).filter_by(source_id=source_id).first()
         if not src:
@@ -39,10 +37,9 @@ def run_ingest(
         if not src.enabled:
             raise HTTPException(400, "Ingest source is disabled")
 
-    ensure_worker()
-    result = ingest_radio_task.delay(source_id)
+    task_id = send_task("tasks.ingest_radio", [source_id])
     return schemas.IngestRunResponse(
-        task_id=result.id,
+        task_id=task_id,
         status="queued",
         message=f"Ingest started{' for ' + source_id if source_id else ' for all sources'}",
     )
@@ -58,7 +55,7 @@ def ingest_status():
         return schemas.IngestStatusResponse(running=False)
 
     try:
-        data = json.loads(progress_path.read_text())
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
         return schemas.IngestStatusResponse(**data)
     except Exception:
         return schemas.IngestStatusResponse(running=False)
