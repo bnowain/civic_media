@@ -3,6 +3,7 @@ ORM table definitions for Civic Media.
 
 Tables: meetings, governing_bodies, media_files, documents,
 transcript_segments, people, voiceprints, segment_assignments,
+civic_officials, civic_chair_history, civic_frequent_speakers,
 tv_newscasts, tv_news_segments, tv_news_transcription_chunks,
 tags, tag_assignments, tag_denials, people_mentions, people_mention_denials,
 clips, news_articles, article_comments, facebook_pages, facebook_posts,
@@ -183,6 +184,72 @@ class Person(Base):
     assignments = relationship("SegmentAssignment", back_populates="predicted_person")
     mentions    = relationship("PeopleMention",     back_populates="person",
                                cascade="all, delete-orphan")
+
+
+# ── Civic Officials & Speakers ────────────────────────────────────────────
+
+class CivicOfficial(Base):
+    """Elected/appointed officials roster with role, district, and alias tracking."""
+    __tablename__ = "civic_officials"
+    __table_args__ = (
+        Index("ix_civic_officials_lookup",
+              "official_jurisdiction", "official_body_type", "official_is_current"),
+    )
+
+    official_id           = Column(String, primary_key=True, default=_gen_id)
+    official_jurisdiction = Column(String, nullable=False)    # "shasta_county", "redding_ca"
+    official_body_type    = Column(String, nullable=False)    # "board_of_supervisors", "city_council"
+    official_body_name    = Column(String, nullable=True)     # "Shasta County Board of Supervisors"
+    official_person_name  = Column(String, nullable=False)    # canonical full name
+    official_role         = Column(String, nullable=False)    # "Supervisor", "Councilmember"
+    official_district     = Column(String, nullable=True)     # "1".."5", "at-large", NULL
+    official_term_start   = Column(String, nullable=True)     # ISO 8601 date
+    official_term_end     = Column(String, nullable=True)     # ISO 8601 date
+    official_is_current   = Column(Integer, default=1)
+    official_aliases      = Column(Text, default="[]")        # JSON array of name variants
+    official_notes        = Column(Text, nullable=True)
+    person_id             = Column(String, ForeignKey("people.person_id"), nullable=True)
+    created_at            = Column(DateTime, default=datetime.utcnow)
+    updated_at            = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    person = relationship("Person")
+
+
+class CivicChairHistory(Base):
+    """Date-bounded chair/vice-chair history for governing bodies."""
+    __tablename__ = "civic_chair_history"
+
+    chair_id     = Column(String, primary_key=True, default=_gen_id)
+    jurisdiction = Column(String, nullable=False)
+    body_type    = Column(String, nullable=False)
+    chair_name   = Column(String, nullable=False)    # canonical name matching official_person_name
+    chair_start  = Column(String, nullable=False)    # ISO 8601 date
+    chair_end    = Column(String, nullable=True)     # NULL = ongoing
+    chair_role   = Column(String, nullable=False, default="chair")  # "chair" | "vice_chair"
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+
+class CivicFrequentSpeaker(Base):
+    """Known recurring public speakers with alias tracking for ASR correction."""
+    __tablename__ = "civic_frequent_speakers"
+    __table_args__ = (
+        Index("ix_frequent_speakers_lookup",
+              "speaker_jurisdiction", "speaker_body_type"),
+    )
+
+    speaker_id           = Column(String, primary_key=True, default=_gen_id)
+    speaker_jurisdiction = Column(String, nullable=False)
+    speaker_body_type    = Column(String, nullable=True)     # NULL = any body type
+    canonical_name       = Column(String, nullable=False)
+    speaker_aliases      = Column(Text, default="[]")        # JSON array of ASR variants
+    appearance_count     = Column(Integer, default=1)
+    last_seen            = Column(String, nullable=True)     # ISO 8601 date
+    speaker_notes        = Column(Text, nullable=True)
+    person_id            = Column(String, ForeignKey("people.person_id"), nullable=True)
+    created_at           = Column(DateTime, default=datetime.utcnow)
+    updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    person = relationship("Person")
 
 
 class Voiceprint(Base):

@@ -864,9 +864,10 @@ All documents from the same meeting share a `meeting_package_id`:
 The jurisdiction slug lowercases the jurisdiction string, replaces ", " with "_", and
 replaces remaining spaces with "-".
 
-### 8.2 Document Types in `knowledge.db`
+### 8.2 Document Types in civic_media's Database
 
-All documents are stored in `knowledge.db` under `section='civic'` with these subsections:
+All processed meeting documents are stored in civic_media's SQLite database. Summary
+and analysis outputs use the following subsection conventions:
 
 | Subsection | Description |
 |-----------|-------------|
@@ -904,7 +905,7 @@ Use this checklist when processing a government meeting transcript end-to-end.
 
 ### Step 2: Infer Speakers (if anonymous/mixed)
 - [ ] **Pass 1 (Regex):** Run `infer_speaker_names_regex()` with roster and frequent speakers
-  - [ ] Load `civic_officials` and `civic_frequent_speakers` from DB
+  - [ ] Load `civic_officials` and `civic_frequent_speakers` from civic_media.db (or via `GET /api/civic-officials`)
   - [ ] Build alias_map, district_map, role_map from roster
   - [ ] Run per-turn loop: queue → self-intro → chair-address → thank-you (pc only) → role-title → respondent → district → acting-chair → chair-role
   - [ ] Post-loop: clerk and county counsel detection across ALL turns
@@ -953,12 +954,13 @@ Use this checklist when processing a government meeting transcript end-to-end.
 ### Step 9: Delta Analysis (if minutes available)
 - [ ] Run `delta_analysis()` comparing long summary against official minutes text
 - [ ] Use synthesis model for reasoning quality
-- [ ] Store as `subsection=delta_analysis` in knowledge.db
+- [ ] Store as `subsection=delta_analysis` in civic_media.db
 
 ### Step 10: Write to Database
-- [ ] All documents share `meeting_package_id` in `knowledge_meta`
+- [ ] All documents share `meeting_package_id`
 - [ ] Transcript chunks: one row per agenda item (`subsection=transcript_chunk`)
 - [ ] Summaries, actions, delta: separate rows with appropriate subsections
+- [ ] Civic officials, chair history, frequent speakers live in civic_media.db (not knowledge.db)
 - [ ] `page_url` populated if document has a web-accessible source URL (Rule 3)
 
 ---

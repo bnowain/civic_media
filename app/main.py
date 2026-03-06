@@ -27,9 +27,10 @@ from app.config import BASE_DIR, MEDIA_DIR
 from app.database import engine, validate_schema_columns
 from app import models
 from app.routers import (
-    articles, assignments, backfill, clips, comments, documents, facebook,
-    groups, ingest, library, media, meetings, mentions, news, people, primegov,
-    segments, system, tags, tagging, transcribe, venues, votes,
+    articles, assignments, backfill, civic_officials, clips, comments,
+    documents, facebook, groups, ingest, library, media, meetings, mentions,
+    news, people, primegov, segments, system, tags, tagging, transcribe,
+    venues, votes,
 )
 
 # Create all tables (idempotent)
@@ -212,6 +213,7 @@ app.include_router(backfill.router)
 app.include_router(venues.router)
 app.include_router(system.router)
 app.include_router(votes.router)
+app.include_router(civic_officials.router)
 
 # ── Static files ─────────────────────────────────────────────────────────────
 _static_dir = BASE_DIR / "app" / "static"

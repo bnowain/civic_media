@@ -26,7 +26,12 @@ without the user explicitly confirming it's working.
 
 ## Review Page (review.html / review.js)
 
-<!-- Add items here -->
+- [ ] **Votes tab** — Per-meeting vote display on the review page. The API already exists (`GET /api/votes/{meeting_id}`) and vote badges appear on index.html meeting cards. The review page needs a "Votes" tab (alongside Transcript / Documents) showing:
+  - Vote table: item description, outcome (passed/failed/tabled), vote tally (ayes/nays/abstentions)
+  - Expandable rows showing mover, seconder, and per-member vote breakdown
+  - Visual indicators: green/red/yellow for pass/fail/tabled
+  - "No votes recorded" empty state for meetings without vote data
+  - Links between vote items and transcript segments (if `segment_id` exists on vote records)
 
 ---
 
