@@ -90,7 +90,10 @@ def extract_m3u8_url(swagit_url: str) -> Optional[str]:
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context()
+            # Hard 60s limit on entire browser session — prevents Playwright hangs
+            context.set_default_timeout(30000)
+            page = context.new_page()
 
             m3u8_url = None
             found_event = threading.Event()
@@ -129,6 +132,7 @@ def extract_m3u8_url(swagit_url: str) -> Optional[str]:
                 if match:
                     m3u8_url = match.group(0)
 
+            context.close()
             browser.close()
 
             if m3u8_url:
@@ -221,6 +225,10 @@ def download_video(db: Session, meeting_id: str) -> dict:
         str(output_path),
     ]
 
+    import time as _time
+    _DOWNLOAD_TIMEOUT = 3600      # 1 hour total
+    _STALL_TIMEOUT = 300          # 5 min with no progress tick → kill
+
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -229,15 +237,47 @@ def download_video(db: Session, meeting_id: str) -> dict:
         # Read ffmpeg progress lines and emit ticks so the self-healer
         # knows we're still alive.  HLS downloads don't have a known
         # duration, so we just keep the progress at 20-80% range.
+        #
+        # Use select/polling to avoid blocking forever if ffmpeg stalls.
+        import selectors
+        sel = selectors.DefaultSelector()
+        sel.register(proc.stdout, selectors.EVENT_READ)
+
         last_tick = 0
-        for line in proc.stdout:
+        last_tick_time = _time.monotonic()
+        start_time = last_tick_time
+        timed_out = False
+
+        while True:
+            # Check overall timeout
+            elapsed_total = _time.monotonic() - start_time
+            if elapsed_total > _DOWNLOAD_TIMEOUT:
+                timed_out = True
+                break
+
+            # Check stall timeout (no progress tick in 5 min)
+            if _time.monotonic() - last_tick_time > _STALL_TIMEOUT:
+                timed_out = True
+                break
+
+            events = sel.select(timeout=10)  # poll every 10s
+            if not events:
+                # No data ready — check if process exited
+                if proc.poll() is not None:
+                    break
+                continue
+
+            line = proc.stdout.readline()
+            if not line:
+                break  # EOF — ffmpeg finished
+
             decoded = line.decode("utf-8", errors="ignore").strip()
             if decoded.startswith("out_time_us="):
                 val = decoded.split("=", 1)[1].strip()
                 if val.isdigit() and int(val) > 0:
-                    # Map elapsed time to 20-80% range (we don't know total duration)
+                    last_tick_time = _time.monotonic()
                     elapsed_sec = int(val) / 1_000_000
-                    tick_pct = min(80, 20 + int(elapsed_sec / 60))  # +1% per minute
+                    tick_pct = min(80, 20 + int(elapsed_sec / 60))
                     if tick_pct > last_tick:
                         last_tick = tick_pct
                         _write_progress(
@@ -245,7 +285,19 @@ def download_video(db: Session, meeting_id: str) -> dict:
                             f"Downloading... {int(elapsed_sec)}s elapsed",
                         )
 
-        proc.wait(timeout=3600)  # 1 hour max
+        sel.close()
+
+        if timed_out:
+            try:
+                proc.kill()
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+            detail = "Download stalled (no progress)" if (_time.monotonic() - last_tick_time > _STALL_TIMEOUT) else "Download timed out (1hr limit)"
+            _write_progress(meeting_id, "Error", 0, detail, error=True)
+            return {"error": detail, "status": "error"}
+
+        proc.wait(timeout=60)
 
         if proc.returncode != 0:
             stderr_tail = ""
