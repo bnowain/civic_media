@@ -156,6 +156,56 @@ def run_discovery(
             else:
                 skipped += 1
         else:
+            # Addendum entries are supplemental document packets, not separate
+            # meetings.  Merge their doc URLs onto the real meeting for that date.
+            if pm.title.startswith("Addendum:"):
+                real_title = pm.title.replace("Addendum:", "").strip()
+                real_meeting = (
+                    db.query(Meeting)
+                    .filter(
+                        Meeting.meeting_date == pm.meeting_date_iso,
+                        ~Meeting.title.like("Addendum:%"),
+                    )
+                    .all()
+                )
+                # Find by video URL or title substring match
+                match = None
+                for rm in real_meeting:
+                    if pm.video_url and rm.video_url:
+                        if pm.video_url.split("?")[0].rstrip("/") == rm.video_url.split("?")[0].rstrip("/"):
+                            match = rm
+                            break
+                    if real_title.lower() in rm.title.lower() or rm.title.lower() in real_title.lower():
+                        match = rm
+                        break
+
+                if match:
+                    doc_changed = False
+                    if match.agenda_url is None and pm.agenda_url:
+                        match.agenda_url = pm.agenda_url
+                        doc_changed = True
+                    if match.minutes_url is None and pm.minutes_url:
+                        match.minutes_url = pm.minutes_url
+                        doc_changed = True
+                    if match.packet_url is None and pm.packet_url:
+                        match.packet_url = pm.packet_url
+                        doc_changed = True
+                    if doc_changed:
+                        updated += 1
+                        newly_doc_updated.append(match)
+                    else:
+                        skipped += 1
+                    logger.info(
+                        "Addendum merge: %s %s → %s",
+                        pm.meeting_date_iso, pm.title, match.title,
+                    )
+                    continue
+                # No match found — fall through and create as a standalone meeting
+                logger.warning(
+                    "Addendum with no matching meeting: %s %s — creating standalone",
+                    pm.meeting_date_iso, pm.title,
+                )
+
             # Create new Meeting record
             if pm.committee_name not in group_cache:
                 group_cache[pm.committee_name] = _ensure_group(
