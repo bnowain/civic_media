@@ -64,6 +64,38 @@ _STUCK_SECONDS_BY_STAGE = {
     "process":   7200,     # 2 hr  — pyannote diarization has no progress callback
 }
 
+# Minimum process timeout (even for short meetings)
+_MIN_PROCESS_TIMEOUT = 7200  # 2 hr
+
+
+def _get_process_timeout(db: "Session", meeting_id: str) -> int:
+    """Return a dynamic process-stage timeout based on media duration.
+
+    For long meetings (4-6 hr), the fixed 2 hr timeout is too short.
+    Scale to 1.5x the media duration (in seconds), with a floor of 2 hr.
+    """
+    from app import models
+
+    media = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            models.MediaFile.duration.isnot(None),
+        )
+        .first()
+    )
+    if media and media.duration and media.duration > 0:
+        return max(_MIN_PROCESS_TIMEOUT, int(media.duration * 1.5))
+    return _MIN_PROCESS_TIMEOUT
+
+
+def _stage_timeout(db: "Session", job) -> int:
+    """Get the stuck timeout for a job, using dynamic duration for process stage."""
+    if job.stage == "process":
+        return _get_process_timeout(db, job.meeting_id)
+    return _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+
 # Self-healing loop interval (seconds). A background thread runs _do_reset_stuck
 # this often, so stuck jobs are recovered even if no next-* endpoints are called.
 _SELF_HEAL_INTERVAL = 300  # 5 minutes
@@ -142,7 +174,7 @@ def _is_active(db: Session, meeting_id: str) -> bool:
         .all()
     )
     for job in jobs:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, job)
         age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
         if age < timeout:
             return True
@@ -163,7 +195,7 @@ def _active_meeting_ids(db: Session) -> set[str]:
     )
     active = set()
     for job in jobs:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, job)
         age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
         if age < timeout:
             active.add(job.meeting_id)
@@ -181,7 +213,7 @@ def _count_stuck(db: Session) -> int:
     )
     count = 0
     for job in active_jobs:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, job)
         age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
         if age >= timeout:
             count += 1
@@ -215,7 +247,7 @@ def _do_reset_stuck(db: Session) -> dict:
     # Phase 1: Reset stale jobs (per-stage timeout)
     reset_ids = []
     for job in active_jobs:
-        stage_timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        stage_timeout = _stage_timeout(db, job)
         age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
         if age < stage_timeout:
             continue
@@ -376,7 +408,7 @@ def backfill_queue(
     # Map: meeting_id → job (only non-stuck jobs)
     active_by_meeting: dict[str, models.ProcessingJob] = {}
     for j in all_running:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(j.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, j)
         age = (now - j.updated_at).total_seconds() if j.updated_at else float("inf")
         if age < timeout:
             active_by_meeting[j.meeting_id] = j
@@ -651,7 +683,7 @@ def _build_init_state(db: Session) -> dict:
     )
     job = None
     for candidate in running_jobs:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(candidate.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, candidate)
         age = (now - candidate.updated_at).total_seconds() if candidate.updated_at else float("inf")
         if age < timeout:
             job = candidate
@@ -1209,7 +1241,7 @@ def backfill_stuck(db: Session = Depends(get_db)):
 
     stuck = []
     for job in active_jobs:
-        timeout = _STUCK_SECONDS_BY_STAGE.get(job.stage, _STUCK_SECONDS)
+        timeout = _stage_timeout(db, job)
         age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
         if age < timeout:
             continue
