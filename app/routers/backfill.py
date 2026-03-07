@@ -849,13 +849,10 @@ def backfill_next_process(
     else:
         media_by_meeting = {}
 
-    # Meetings with 3+ process errors — auto-skip without dispatching
+    # Meetings with 3+ errors (any stage) — auto-skip without dispatching
     error_counts = dict(
         db.query(models.ProcessingJob.meeting_id, func.count(models.ProcessingJob.job_id))
-        .filter(
-            models.ProcessingJob.stage == "process",
-            models.ProcessingJob.status == "error",
-        )
+        .filter(models.ProcessingJob.status == "error")
         .group_by(models.ProcessingJob.meeting_id)
         .all()
     )
@@ -953,13 +950,10 @@ def backfill_next_process_newest(
     else:
         media_by_meeting = {}
 
-    # Meetings with 3+ process errors — auto-skip without dispatching
+    # Meetings with 3+ errors (any stage) — auto-skip without dispatching
     error_counts = dict(
         db.query(models.ProcessingJob.meeting_id, func.count(models.ProcessingJob.job_id))
-        .filter(
-            models.ProcessingJob.stage == "process",
-            models.ProcessingJob.status == "error",
-        )
+        .filter(models.ProcessingJob.status == "error")
         .group_by(models.ProcessingJob.meeting_id)
         .all()
     )
