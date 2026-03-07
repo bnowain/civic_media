@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.config import MEDIA_DIR
 from app.database import get_db
+from app.paths import to_relative, to_absolute
 from app.utils import generate_media_filename
 
 router = APIRouter(tags=["media"])
@@ -61,7 +62,7 @@ def _find_media_file(meeting_id: str, db: Session) -> Path | None:
         .all()
     )
     for source in candidates:
-        p = Path(source.file_path)
+        p = Path(to_absolute(source.file_path))
         if p.exists():
             return p
     return None
@@ -188,7 +189,7 @@ async def upload_video(
     media = models.MediaFile(
         meeting_id=meeting_id,
         file_type=file_type,
-        file_path=str(dest_path),
+        file_path=to_relative(str(dest_path)),
         duration=None,
     )
     db.add(media)
@@ -208,7 +209,7 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
     Transcode a meeting's video to 540p (960x540).
     Deletes the original file on success.
     Must be done before processing the pipeline for large downloaded files.
-    Runs in a background thread — no Celery required.
+    Runs in a background thread.
     """
     import threading
 
@@ -230,7 +231,7 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
 
     # Prefer a record whose file exists on disk; fall back to first record so
     # run_transcode's recovery logic can still handle the missing-source case.
-    media = next((c for c in candidates if Path(c.file_path).exists()), candidates[0])
+    media = next((c for c in candidates if Path(to_absolute(c.file_path)).exists()), candidates[0])
 
     if media.transcode_status == "transcoding":
         raise HTTPException(400, "Transcode already in progress")
@@ -242,7 +243,7 @@ def transcode_meeting_video(meeting_id: str, db: Session = Depends(get_db)):
     media.transcode_status = "transcoding"
     db.commit()
 
-    # Run in background thread so it works without Celery
+    # Run in background thread
     from app.services.transcoder import run_transcode
     t = threading.Thread(target=run_transcode, args=(meeting_id, media_id), daemon=True)
     t.start()
@@ -257,7 +258,7 @@ def process_meeting(meeting_id: str, db: Session = Depends(get_db)):
     """
     Trigger the processing pipeline for a meeting that has a media file
     but hasn't been processed yet (e.g. ingested radio episodes).
-    Tries Celery first; falls back to a background thread if Celery is unavailable.
+    Dispatches via Huey task queue; falls back to a background thread if unavailable.
     """
     meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
     if not meeting:
@@ -364,7 +365,7 @@ def rerun_pipeline(meeting_id: str, db: Session = Depends(get_db)):
         if p.exists():
             p.unlink()
 
-    # Requeue pipeline via direct Redis dispatch
+    # Requeue pipeline
     from app.services.task_dispatch import send_task
     send_task("tasks.process_video", args=[meeting_id, source_media.media_id])
 

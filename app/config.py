@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 BASE_DIR       = Path(__file__).parent.parent
+STORAGE_ROOT   = Path(os.environ.get("CIVIC_MEDIA_STORAGE_ROOT", str(BASE_DIR))).resolve()
 DATABASE_PATH  = BASE_DIR / "database" / "civic_media.db"
 MEDIA_DIR      = BASE_DIR / "media"
 DOCUMENTS_DIR  = BASE_DIR / "documents"
@@ -19,8 +20,10 @@ COMSKIP_INI_DIR = BASE_DIR / "config" / "comskip"
 ATLAS_API_URL  = os.environ.get("ATLAS_API_URL", "http://localhost:8888/api")
 
 DATABASE_URL   = f"sqlite:///{DATABASE_PATH}"
-CELERY_BROKER  = os.environ.get("CELERY_BROKER", "redis://localhost:6379/0")
-CELERY_BACKEND = os.environ.get("CELERY_BACKEND", "redis://localhost:6379/1")
+
+# Huey task queue — SQLite-backed, no external service required
+HUEY_DB        = BASE_DIR / "database" / "huey.db"
+HUEY_LIGHT_DB  = BASE_DIR / "database" / "huey_light.db"
 
 # Voiceprint similarity thresholds
 SIMILARITY_HIGH   = 0.92

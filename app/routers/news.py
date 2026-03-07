@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models, schemas
 from app.config import TV_NEWS_DIR
+from app.paths import to_relative
 
 router = APIRouter(prefix="/api/news", tags=["news"])
 
@@ -74,11 +75,11 @@ async def upload_newscast_video(
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    newscast.source_file = str(dest)
+    newscast.source_file = to_relative(str(dest))
     newscast.status = "queued"
     db.commit()
 
-    # Dispatch task via direct Redis push
+    # Dispatch task via Huey
     from app.services.task_dispatch import send_task
     task_id = send_task("tasks.process_newscast", args=[newscast_id, skip_commercial_strip])
 

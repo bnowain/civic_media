@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import MEDIA_DIR
+from app.paths import to_relative, to_absolute
 from app.utils import generate_media_filename
 from app.services import (
     aligner,
@@ -121,7 +122,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     Full video ingestion pipeline.
 
     Args:
-        db:         Active SQLAlchemy session (owned by the Celery task).
+        db:         Active SQLAlchemy session (owned by the Huey task).
         meeting_id: UUID of the parent meeting.
         media_id:   UUID of the MediaFile record for the uploaded video.
 
@@ -134,7 +135,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
     if not media:
         raise ValueError(f"MediaFile {media_id} not found")
 
-    video_path = media.file_path
+    video_path = to_absolute(media.file_path)
     logger.info("[%s] Pipeline start - video: %s", meeting_id, video_path)
 
     # -- Guard: skip meetings that have crashed too many times ----------------
@@ -189,8 +190,8 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
 
     # Guard: detect truncated WAV files (ffmpeg killed mid-run leaves a partial file
     # that passes the file-exists check but produces garbage transcription).
-    if audio_record and Path(audio_record.file_path).exists():
-        _wav_dur = audio_extractor.get_wav_duration(audio_record.file_path)
+    if audio_record and Path(to_absolute(audio_record.file_path)).exists():
+        _wav_dur = audio_extractor.get_wav_duration(to_absolute(audio_record.file_path))
         _vid_dur = audio_extractor._probe_duration(video_path)
         if _vid_dur > 60 and _wav_dur < _vid_dur * 0.1:
             logger.warning(
@@ -198,13 +199,13 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
                 "Deleting and re-extracting.",
                 meeting_id, _wav_dur, _vid_dur, 100 * _wav_dur / _vid_dur,
             )
-            Path(audio_record.file_path).unlink(missing_ok=True)
+            Path(to_absolute(audio_record.file_path)).unlink(missing_ok=True)
             db.delete(audio_record)
             db.commit()
             audio_record = None  # fall through to extraction block below
 
-    if audio_record and Path(audio_record.file_path).exists():
-        audio_path = audio_record.file_path
+    if audio_record and Path(to_absolute(audio_record.file_path)).exists():
+        audio_path = to_absolute(audio_record.file_path)
         logger.info("[%s] Audio already extracted - skipping.", meeting_id)
         duration = audio_record.duration
     else:
@@ -268,7 +269,7 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         audio_record = models.MediaFile(
             meeting_id=meeting_id,
             file_type="audio",
-            file_path=audio_path,
+            file_path=to_relative(audio_path),
             duration=duration,
         )
         db.add(audio_record)

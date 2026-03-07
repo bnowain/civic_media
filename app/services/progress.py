@@ -3,11 +3,10 @@ Centralized progress tracking helper.
 
 Writes to BOTH the processing_jobs DB table (authoritative state) AND
 progress.json (backward compat for existing media/news/clip endpoints).
-Also publishes to Redis pub/sub for the SSE stream.
 
 Public API
 ──────────
-  create_job(db, meeting_id, stage, celery_task_id=None) -> ProcessingJob
+  create_job(db, meeting_id, stage, task_id=None) -> ProcessingJob
   update_progress(db, meeting_id, stage_label, pct, detail="")
   complete_job(db, meeting_id)
   fail_job(db, meeting_id, error_msg)
@@ -19,7 +18,6 @@ Design notes
   the most-recently-queued one wins.
 - If no active job is found (e.g. called from a legacy code path), DB write
   is silently skipped and only progress.json is written.
-- Redis publish is non-critical: wrapped in try/except, always fire-and-forget.
 - All file writes use encoding='utf-8' (CLAUDE.md §14 — Windows cp1252 default breaks Unicode).
 """
 
@@ -33,37 +31,9 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.config import CELERY_BROKER, MEDIA_DIR
+from app.config import MEDIA_DIR
 
 logger = logging.getLogger(__name__)
-
-_REDIS_CHANNEL = "civic_media:progress"
-
-
-# ── Redis pub/sub (fire-and-forget) ──────────────────────────────────────────
-
-def _redis_sync():
-    """Return a short-timeout synchronous Redis client, or None on failure."""
-    try:
-        import redis
-        url = CELERY_BROKER.replace("localhost", "127.0.0.1")
-        return redis.from_url(url, socket_connect_timeout=1, socket_timeout=1)
-    except Exception:
-        return None
-
-
-def _publish(event_type: str, meeting_id: str, **kwargs) -> None:
-    """Publish a progress event to Redis pub/sub. Non-critical — never raises."""
-    try:
-        r = _redis_sync()
-        if r is None:
-            return
-        payload = json.dumps({"type": event_type, "meeting_id": meeting_id, **kwargs},
-                             default=str)
-        r.publish(_REDIS_CHANNEL, payload)
-        r.close()
-    except Exception as exc:
-        logger.debug("progress publish failed (non-fatal): %s", exc)
 
 
 # ── progress.json writer (backward compat) ───────────────────────────────────
@@ -111,6 +81,8 @@ def create_job(
     db: Session,
     meeting_id: str,
     stage: str,
+    task_id: Optional[str] = None,
+    # Keep backward compat alias
     celery_task_id: Optional[str] = None,
 ):
     """
@@ -122,11 +94,11 @@ def create_job(
     2. Existing "running" job → absorb it (task retry or re-queue scenario;
        the old attempt is dead, this is the new one taking over).
     3. No active job → create a new one.
-
-    This prevents the #1 cause of stuck jobs: a task retry creating a new
-    "queued" job while the old "running" job is never cleaned up.
     """
     from app.models import ProcessingJob
+
+    # Support both param names
+    _task_id = task_id or celery_task_id
 
     now = datetime.utcnow()
 
@@ -149,8 +121,8 @@ def create_job(
             )
         existing.stage = stage
         existing.status = "queued"
-        if celery_task_id:
-            existing.celery_task_id = celery_task_id
+        if _task_id:
+            existing.celery_task_id = _task_id
         existing.updated_at = now
         existing.error_msg = None
         db.commit()
@@ -163,7 +135,7 @@ def create_job(
         meeting_id=meeting_id,
         stage=stage,
         status="queued",
-        celery_task_id=celery_task_id,
+        celery_task_id=_task_id,
         pct=0,
         queued_at=now,
         updated_at=now,
@@ -173,7 +145,6 @@ def create_job(
     db.refresh(job)
 
     _write_json(meeting_id, f"Queued ({stage})", 0)
-    _publish("status", meeting_id, status="queued", stage=stage)
     logger.debug("create_job: %s/%s job_id=%s", meeting_id, stage, job.job_id)
     return job
 
@@ -188,7 +159,7 @@ def update_progress(
     """
     Update the active job for this meeting.
     Transitions queued→running on first call; updates pct/stage_label/detail.
-    Also writes progress.json and publishes SSE event.
+    Also writes progress.json.
     """
     job = _active_job(db, meeting_id)
     if job is not None:
@@ -210,7 +181,6 @@ def update_progress(
 
     # Always write progress.json (backward compat, even if no active job)
     _write_json(meeting_id, stage_label, pct, detail)
-    _publish("progress", meeting_id, stage_label=stage_label, pct=pct, detail=detail)
 
 
 def complete_job(db: Session, meeting_id: str) -> None:
@@ -232,16 +202,13 @@ def complete_job(db: Session, meeting_id: str) -> None:
                 pass
 
     _write_json(meeting_id, "Complete", 100)
-    _publish("complete", meeting_id, pct=100)
 
 
 def fail_job(db: Session, meeting_id: str, error_msg: str) -> None:
     """Mark the active job as failed (status='error', error_msg set).
 
     Resilient to dirty session state: if the session has been rolled back
-    or is otherwise broken, falls back to a fresh session to ensure the
-    job is marked as error. A stuck "running" job is the worst outcome —
-    we must prevent it even if the original session is dead.
+    or is otherwise broken, falls back to a fresh session.
     """
     def _do_fail(session: Session) -> bool:
         job = _active_job(session, meeting_id)
@@ -264,7 +231,7 @@ def fail_job(db: Session, meeting_id: str, error_msg: str) -> None:
 
     # Try with the caller's session first
     if not _do_fail(db):
-        # Fallback: fresh session (handles post-rollback dirty state)
+        # Fallback: fresh session
         try:
             from app.database import SessionLocal
             fresh = SessionLocal()
@@ -276,4 +243,3 @@ def fail_job(db: Session, meeting_id: str, error_msg: str) -> None:
             logger.warning("fail_job fallback session failed for %s: %s", meeting_id, exc)
 
     _write_json(meeting_id, "Error", 0, str(error_msg)[:500], error=True)
-    _publish("error", meeting_id, error_msg=str(error_msg)[:500])

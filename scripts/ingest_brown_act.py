@@ -163,12 +163,13 @@ def ingest(pdf_path: str, force: bool = False) -> None:
         sections  = split_into_sections(full_text)
         print(f"Found {len(sections)} sections.")
 
+        from app.paths import to_relative
         ref_doc = models.ReferenceDocument(
             ref_doc_id=str(uuid.uuid4()),
             name="Brown Act 2026",
             doc_type="law",
             year=2026,
-            source_file=pdf_path,
+            source_file=to_relative(pdf_path),
             full_text=full_text,
         )
         db.add(ref_doc)

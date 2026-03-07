@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 civic_media is a local-first civic meeting transcription and speaker diarization tool. It processes meeting videos into searchable, speaker-attributed transcripts with a voiceprint learning system that improves speaker identification over time.
 
-**Stack**: FastAPI + SQLAlchemy (SQLite/WAL) | Celery (solo pool) + Redis | faster-whisper (large-v3) | pyannote.audio 3.1 | SpeechBrain ECAPA-TDNN | Vanilla JS frontend
+**Stack**: FastAPI + SQLAlchemy (SQLite/WAL) | Huey (SqliteHuey) | faster-whisper (large-v3) | pyannote.audio 3.1 | SpeechBrain ECAPA-TDNN | Vanilla JS frontend
 
 ## UI Feature Backlog
 
@@ -20,11 +20,14 @@ user confirmation that it's working in the browser.
 # Start the API server (dev mode with auto-reload)
 uvicorn app.main:app --reload
 
-# Start the Celery worker (separate terminal)
-celery -A app.worker worker --loglevel=info --concurrency=1 --pool=solo
+# Start the Huey GPU worker (separate terminal)
+python -m huey.bin.huey_consumer app.worker.huey -w 1 -k thread -C --logfile logs/huey.log
 
-# Or use the startup script (starts Redis, worker, and API together)
-# Windows: .\start.ps1
+# Start the Huey light worker (I/O tasks — separate terminal)
+python -m huey.bin.huey_consumer app.worker.huey_light -w 1 -k thread -C --logfile logs/huey_light.log
+
+# Or use the startup script (starts workers and API together)
+# Windows: .huey_watchdog.cmd + start_light_worker.cmd + uvicorn
 # Linux: bash run.sh
 
 # Initialize/reset database tables
@@ -40,13 +43,13 @@ python diagnose.py
 python backfill_voiceprints.py
 ```
 
-There is no test suite, linter config, or CI pipeline. Redis must be running for Celery tasks (Docker: `docker-compose up -d`).
+There is no test suite, linter config, or CI pipeline. No external services required — Huey uses SQLite for task queuing (`database/huey.db` and `database/huey_light.db`).
 
 ## Architecture
 
 ### Processing Pipeline (`app/services/pipeline.py`)
 
-Video upload triggers a Celery task that runs six sequential stages, each with checkpoints for resume:
+Video upload triggers a Huey task that runs six sequential stages, each with checkpoints for resume:
 
 1. **Audio extraction** (`audio_extractor.py`) — ffmpeg: video → mono 16kHz WAV with highpass + loudnorm
 2. **Transcription** (`transcriber.py`) — faster-whisper: WAV → `TranscriptSegment` rows with confidence metadata
@@ -63,7 +66,7 @@ The core differentiating feature. When a user confirms a speaker assignment:
 
 1. Segment's embedding is added as a new `Voiceprint` row (purely additive, never deleted)
 2. `SegmentAssignment` marked `verified=True` (never auto-touched again)
-3. Background Celery task recomputes all person centroids and re-matches all unverified segments
+3. Background Huey task recomputes all person centroids and re-matches all unverified segments
 
 Thresholds: high ≥ 0.92, medium ≥ 0.75 (both in `app/config.py`).
 
@@ -73,12 +76,12 @@ Thresholds: high ≥ 0.92, medium ≥ 0.75 (both in `app/config.py`).
 - **Services** (`app/services/`) — all business logic, ML model invocations, file I/O
 - **Models** (`app/models.py`) — SQLAlchemy ORM: Meeting, MediaFile, Document, TranscriptSegment, Person, Voiceprint, SegmentAssignment
 - **Schemas** (`app/schemas.py`) — Pydantic v2 with `from_attributes = True`
-- **Tasks** (`app/tasks.py`) — three Celery tasks: `process_video`, `process_pdf`, `rerun_voiceprints`
+- **Tasks** (`app/tasks.py`) — 13 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `export_clip`, `cleanup_clips`, `full_ingest`)
 - **Config** (`app/config.py`) — all paths, thresholds, model identifiers, env var defaults
 
 ### Database
 
-SQLite with WAL mode. Foreign keys enforced. Pragmas set in `app/database.py` on every connection. Celery tasks create their own sessions via `SessionLocal()` (never share sessions across task boundaries).
+SQLite with WAL mode. Foreign keys enforced. Pragmas set in `app/database.py` on every connection. Huey tasks create their own sessions via `SessionLocal()` (never share sessions across task boundaries).
 
 Key relationships: Meeting → MediaFile, Document, TranscriptSegment (cascade delete). TranscriptSegment → SegmentAssignment (1:1). Person → Voiceprint (1:many), SegmentAssignment (1:many).
 
@@ -95,7 +98,7 @@ Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|js
 ## Key Design Decisions
 
 - **Embeddings stored as `LargeBinary`** — serialized numpy arrays in SQLite, not a vector DB
-- **Single Celery worker** — one video at a time; GPU models can't parallelize
+- **Dual Huey workers** — GPU worker (1 thread, heavy ML tasks) + light worker (1 thread, I/O tasks like download/transcode)
 - **Purely additive voiceprints** — old embeddings retained, centroids always recomputed fresh
 - **Pipeline is resumable** — each stage checks for existing data before running
 - **Diarization cached to disk** — `diarization.json` saves 10-20 min on re-runs
@@ -107,7 +110,7 @@ Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|js
 - **PyTorch nightly** required for RTX 5090 — library patches must be reapplied after venv rebuild (see INSTALL.md)
 - **HF_TOKEN** env var required for pyannote model access
 - **External tools**: ffmpeg, ffprobe, tesseract (for PDF OCR), poppler-utils
-- **Redis** required for Celery broker/backend (default: localhost:6379)
+- **No external services** — Huey uses SQLite for task queuing (no Redis/RabbitMQ needed)
 
 ## Vocab Hints
 

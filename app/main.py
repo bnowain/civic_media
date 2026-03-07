@@ -121,6 +121,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.debug("Startup clip cleanup skipped", exc_info=True)
 
+    # On startup: auto-start Huey workers if not already running
+    try:
+        from app.services.worker_manager import ensure_workers
+        ensure_workers()
+    except Exception:
+        logger.warning("Could not auto-start Huey workers", exc_info=True)
+
     # On startup: reset orphaned "exporting" clips to "error"
     # (daemon threads die on server restart, leaving status stuck)
     try:

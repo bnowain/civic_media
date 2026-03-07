@@ -33,6 +33,7 @@ from app.config import (
     CLIPS_DIR, MEDIA_DIR,
 )
 from app.database import SessionLocal, get_db
+from app.paths import to_relative, to_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def _resolve_source_media(
         )
         if not media:
             raise HTTPException(404, "No media file found for this meeting")
-        return media.file_path, media.file_type
+        return to_absolute(media.file_path), media.file_type
 
     elif source_type == "newscast":
         newscast = (
@@ -72,7 +73,7 @@ def _resolve_source_media(
         path = newscast.cleaned_file or newscast.source_file
         if not path:
             raise HTTPException(400, "Newscast has no media file")
-        return path, "video"
+        return to_absolute(path), "video"
 
     else:
         raise HTTPException(400, f"Invalid source_type: {source_type}")
@@ -142,17 +143,18 @@ def _export_clip_bg(clip_id: str) -> None:
 
         clip_dir = CLIPS_DIR / clip_id
         clip_dir.mkdir(parents=True, exist_ok=True)
-        source = clip.source_media_path
+        source = to_absolute(clip.source_media_path)
 
         progress_json = clip_dir / "progress.json"
 
         # Build FFmpeg command — progress goes to stdout via pipe:1
-        if clip.cover_image_path and Path(clip.cover_image_path).exists():
+        cover_abs = to_absolute(clip.cover_image_path) if clip.cover_image_path else None
+        if cover_abs and Path(cover_abs).exists():
             out_path = clip_dir / "clip.mp4"
             cmd = [
                 "ffmpeg", "-y",
                 "-progress", "pipe:1", "-nostats",
-                "-loop", "1", "-i", clip.cover_image_path,
+                "-loop", "1", "-i", cover_abs,
                 "-ss", str(clip.start_time),
                 "-to", str(clip.end_time),
                 "-i", source,
@@ -226,7 +228,7 @@ def _export_clip_bg(clip_id: str) -> None:
             logger.error("_export_clip_bg FFmpeg error for %s: exit code %d", clip_id, proc.returncode)
             return
 
-        clip.export_path = str(out_path)
+        clip.export_path = to_relative(str(out_path))
         clip.export_status = "ready"
         db.commit()
         logger.info("_export_clip_bg complete: %s -> %s", clip_id, out_path)
@@ -269,7 +271,7 @@ def _run_cleanup(db: Session) -> int:
             continue
 
         if clip.export_path:
-            p = Path(clip.export_path)
+            p = Path(to_absolute(clip.export_path))
             if p.exists():
                 p.unlink()
 
@@ -306,7 +308,7 @@ def create_clip(payload: schemas.ClipCreate, db: Session = Depends(get_db)):
     clip = models.Clip(
         source_type=payload.source_type,
         source_id=payload.source_id,
-        source_media_path=source_path,
+        source_media_path=to_relative(source_path),
         media_type=media_type,
         start_time=payload.start_time,
         end_time=payload.end_time,
@@ -326,12 +328,12 @@ def create_clip(payload: schemas.ClipCreate, db: Session = Depends(get_db)):
         source_path, media_type, payload.start_time, payload.end_time, clip_dir
     )
     if thumb:
-        clip.thumbnail_path = thumb
+        clip.thumbnail_path = to_relative(thumb)
 
     db.commit()
     db.refresh(clip)
 
-    # Start export immediately in a background thread (no Celery queue)
+    # Start export immediately in a background thread
     threading.Thread(
         target=_export_clip_bg, args=(clip.clip_id,), daemon=True,
     ).start()
@@ -432,7 +434,7 @@ def download_clip(clip_id: str, db: Session = Depends(get_db)):
     if clip.export_status != "ready" or not clip.export_path:
         raise HTTPException(400, f"Clip not ready (status: {clip.export_status})")
 
-    export = Path(clip.export_path)
+    export = Path(to_absolute(clip.export_path))
     if not export.exists():
         raise HTTPException(404, "Export file not found on disk")
 
@@ -457,11 +459,11 @@ def get_thumbnail(clip_id: str, db: Session = Depends(get_db)):
     clip = db.query(models.Clip).filter_by(clip_id=clip_id).first()
     if not clip:
         raise HTTPException(404, "Clip not found")
-    if not clip.thumbnail_path or not Path(clip.thumbnail_path).exists():
+    if not clip.thumbnail_path or not Path(to_absolute(clip.thumbnail_path)).exists():
         raise HTTPException(404, "Thumbnail not available")
 
     return FileResponse(
-        path=clip.thumbnail_path,
+        path=to_absolute(clip.thumbnail_path),
         media_type="image/jpeg",
     )
 
@@ -476,7 +478,7 @@ def re_export_clip(clip_id: str, db: Session = Depends(get_db)):
     if clip.export_status == "exporting":
         raise HTTPException(409, "Export already in progress")
 
-    if not Path(clip.source_media_path).exists():
+    if not Path(to_absolute(clip.source_media_path)).exists():
         raise HTTPException(400, "Source media file no longer exists")
 
     clip.export_status = "pending"
@@ -486,7 +488,7 @@ def re_export_clip(clip_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(clip)
 
-    # Start export immediately in a background thread (no Celery queue)
+    # Start export immediately in a background thread
     threading.Thread(
         target=_export_clip_bg, args=(clip.clip_id,), daemon=True,
     ).start()
@@ -515,7 +517,7 @@ async def upload_cover_image(
     with cover_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    clip.cover_image_path = str(cover_path)
+    clip.cover_image_path = to_relative(str(cover_path))
     db.commit()
     db.refresh(clip)
     return clip

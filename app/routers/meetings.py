@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models, schemas
 from app.config import MEDIA_DIR, DOCUMENTS_DIR, OCR_TEXT_DIR
+from app.paths import to_relative
 
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 
@@ -76,7 +77,7 @@ def create_meeting(payload: schemas.MeetingCreate, db: Session = Depends(get_db)
         data["group_id"] = ensure_group(db, data["group_name"], group_type="show")
 
     meeting = models.Meeting(meeting_id=meeting_id, **data)
-    meeting.media_directory = str(MEDIA_DIR / meeting_id)
+    meeting.media_directory = to_relative(str(MEDIA_DIR / meeting_id))
     db.add(meeting)
     db.commit()
     db.refresh(meeting)

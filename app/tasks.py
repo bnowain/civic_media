@@ -1,13 +1,22 @@
 """
-Celery task definitions.
+Huey task definitions.
 
-Six tasks:
-  - process_video_task:            Full video ingestion pipeline.
-  - process_pdf_task:              PDF text extraction (native + OCR fallback).
+Tasks on `huey` (GPU worker):
+  - process_video_task:             Full video ingestion pipeline.
+  - process_pdf_task:               PDF text extraction (native + OCR fallback).
   - extract_multi_voiceprints_task: Extra voiceprints from long confirmed segments.
-  - rerun_voiceprints_task:        Background voiceprint re-evaluation after confirmation.
-  - export_clip_task:              FFmpeg clip export (video/audio/audio-to-MP4).
-  - cleanup_clips_task:            Delete old export files, keep metadata.
+  - rerun_voiceprints_task:         Background voiceprint re-evaluation.
+  - process_newscast_task:          TV news processing pipeline.
+
+Tasks on `huey_light` (light worker):
+  - primegov_discover_task:         PrimeGov meeting discovery.
+  - primegov_download_task:         PrimeGov asset download.
+  - transcode_video_task:           FFmpeg 540p transcode.
+  - ingest_radio_task:              Radio show scraper.
+  - retag_content_task:             Re-tag content via Atlas LLM.
+  - export_clip_task:               FFmpeg clip export.
+  - cleanup_clips_task:             Delete old export files.
+  - full_ingest_task:               Download + transcode + process in one task.
 
 All tasks use their own DB sessions (never share across task boundaries).
 """
@@ -19,8 +28,9 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.worker import celery_app
+from app.worker import huey, huey_light
 from app.config import MEDIA_DIR, TV_NEWS_DIR
+from app.paths import to_relative, to_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +51,24 @@ def _write_error_progress(base_dir: Path, item_id: str, error_msg: str) -> None:
         logger.warning("Could not write error progress.json: %s", exc)
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.process_video",
-    max_retries=3,
-    retry_backoff=True,
-    retry_backoff_max=120,
-)
-def process_video_task(self, meeting_id: str, media_id: str) -> dict:
-    """
-    Run the full video ingestion pipeline for a single video file.
-    Returns a summary dict with segment count.
-    """
+# ── GPU-heavy tasks (huey) ───────────────────────────────────────────────────
+
+
+@huey.task(retries=3, retry_delay=60, context=True)
+def process_video_task(meeting_id: str, media_id: str, task=None) -> dict:
+    """Run the full video ingestion pipeline for a single video file."""
     from app.database import SessionLocal
     from app.services.pipeline import run_video_pipeline
     from app.services.progress import create_job, complete_job, fail_job
 
+    task_id = task.id if task else None
+
     db = SessionLocal()
     try:
-        create_job(db, meeting_id, "process", celery_task_id=self.request.id)
+        create_job(db, meeting_id, "process", task_id=task_id)
         result = run_video_pipeline(db, meeting_id, media_id)
 
-        # Auto-skipped meetings return a dict instead of None — don't mark complete
+        # Auto-skipped meetings return a dict — don't mark complete
         if isinstance(result, dict) and result.get("status") == "auto_skipped":
             fail_job(db, meeting_id, result.get("reason", "auto-skipped"))
             return result
@@ -74,179 +80,18 @@ def process_video_task(self, meeting_id: str, media_id: str) -> dict:
 
     except Exception as exc:
         db.rollback()
-        # SoftTimeLimitExceeded means the task hit the 110-minute soft wall.
-        # Don't retry — write an error to progress.json and give up cleanly.
-        from celery.exceptions import SoftTimeLimitExceeded
-        if isinstance(exc, SoftTimeLimitExceeded):
-            logger.error(
-                "process_video_task: soft time limit exceeded for meeting %s — "
-                "task ran > 110 min. Marking as error (no retry).",
-                meeting_id,
-            )
-            fail_job(db, meeting_id, "Task timed out after 110 minutes")
-            return {"meeting_id": meeting_id, "status": "timeout"}
-
-        logger.exception("process_video_task failed for meeting %s (attempt %d/%d)",
-                         meeting_id, self.request.retries + 1, self.max_retries + 1)
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            logger.error("process_video_task: all retries exhausted for meeting %s", meeting_id)
-            fail_job(db, meeting_id, str(exc))
-            return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
+        logger.exception(
+            "process_video_task failed for meeting %s", meeting_id,
+        )
+        fail_job(db, meeting_id, str(exc))
+        raise
     finally:
         db.close()
 
 
-def _ingest_minutes_votes(db, doc) -> None:
-    """Auto-ingest votes from a minutes document after OCR completes.
-
-    Calls the same parser used by scripts/ingest_minutes_votes.py.
-    Skips if votes already exist for this meeting (idempotent).
-    Logs results to logs/minutes_vote_ingest.log.
-    """
-    from app import models
-    from app.services.minutes_parser import parse_minutes
-    from sqlalchemy import func
-
-    meeting = db.query(models.Meeting).filter_by(meeting_id=doc.meeting_id).first()
-    if not meeting:
-        return
-
-    # Skip if votes already ingested for this meeting
-    existing = db.query(func.count(models.MeetingVote.vote_id)) \
-                 .filter(models.MeetingVote.meeting_id == doc.meeting_id).scalar()
-    if existing > 0:
-        logger.info("Vote ingest: skipped %s — %d votes already exist", doc.meeting_id, existing)
-        return
-
-    result = parse_minutes(
-        ocr_text=doc.ocr_text,
-        meeting_id=meeting.meeting_id,
-        document_id=doc.document_id,
-        meeting_date=meeting.meeting_date,
-        group_name=meeting.group_name,
-    )
-
-    # Always record parse status on the document (even if we don't ingest)
-    doc.minutes_parse_status = result.parse_status
-    doc.minutes_parse_notes = result.parse_notes_json
-    db.commit()
-
-    # Safety gate: only auto-ingest when the parse is clean or empty.
-    # "partial" / "unrecognized" means the format may have changed —
-    # flag it for human review instead of writing potentially bad data.
-    if result.parse_status not in ("ok", "empty"):
-        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
-                         result.parse_status, result.unmatched_paragraphs,
-                         skipped=True)
-        logger.warning("Vote ingest: FLAGGED %s %s — parse_status=%s, "
-                        "%d unmatched paragraphs (not ingested, needs review)",
-                        meeting.meeting_date, meeting.title[:40],
-                        result.parse_status, len(result.unmatched_paragraphs))
-        return
-
-    if not result.votes:
-        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
-                         result.parse_status, [])
-        logger.info("Vote ingest: %s %s — no votes (special meeting) [%s]",
-                     meeting.meeting_date, meeting.title[:40], result.parse_status)
-        return
-
-    # Build person lookup from roster
-    person_map = _build_vote_person_lookup(db)
-
-    saved = 0
-    for v in result.votes:
-        row = models.MeetingVote(
-            vote_id=v.vote_id,
-            meeting_id=v.meeting_id,
-            document_id=v.document_id,
-            meeting_date=v.meeting_date,
-            group_name=v.group_name,
-            agenda_section=v.agenda_section,
-            item_description=v.item_description,
-            resolution_number=v.resolution_number,
-            outcome=v.outcome,
-            vote_tally=v.vote_tally,
-            mover=v.mover,
-            seconder=v.seconder,
-            mover_person_id=person_map.get(v.mover),
-            seconder_person_id=person_map.get(v.seconder),
-        )
-        db.add(row)
-        for name in v.yes_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
-                                     vote_value="yes", person_id=person_map.get(name)))
-        for name in v.no_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
-                                     vote_value="no", person_id=person_map.get(name)))
-        for name in v.absent_members:
-            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
-                                     vote_value="absent", person_id=person_map.get(name)))
-        saved += 1
-
-    db.commit()
-
-    # Log to file
-    _log_vote_ingest(meeting.meeting_date, meeting.title, saved,
-                     result.parse_status, result.unmatched_paragraphs)
-    logger.info("Vote ingest: %s %s — %d votes [%s]",
-                meeting.meeting_date, meeting.title[:40], saved, result.parse_status)
-
-
-def _build_vote_person_lookup(db) -> dict:
-    """Build last-name → person_id mapping from supervisor roster."""
-    import json as _json
-    from app import models
-
-    roster_path = Path(__file__).parent.parent / "config" / "supervisors.json"
-    if not roster_path.exists():
-        return {}
-    try:
-        data = _json.loads(roster_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    last_to_full = {}
-    for entry in data.get("district_supervisors", []):
-        full = entry.get("supervisor", "")
-        last = full.rsplit(" ", 1)[-1]
-        if last not in last_to_full:
-            last_to_full[last] = full
-    people = {p.canonical_name: p.person_id for p in db.query(models.Person).all()}
-    return {last: people[full] for last, full in last_to_full.items() if full in people}
-
-
-def _log_vote_ingest(meeting_date, title, vote_count, status, unmatched,
-                     skipped=False):
-    """Append vote ingest result to logs/minutes_vote_ingest.log."""
-    log_dir = Path(__file__).parent.parent / "logs"
-    log_file = log_dir / "minutes_vote_ingest.log"
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        with log_file.open("a", encoding="utf-8") as f:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            flag = "FLAGGED " if skipped else ""
-            f.write(f"{ts}  {flag}{meeting_date}  {title[:55]:<55}  "
-                    f"votes={vote_count}  status={status}\n")
-            if unmatched:
-                for i, para in enumerate(unmatched[:5], 1):
-                    f.write(f"  [{i}] {para[:200]}\n")
-    except Exception:
-        pass
-
-
-@celery_app.task(
-    bind=True,
-    name="tasks.process_pdf",
-    max_retries=1,
-    default_retry_delay=10,
-)
-def process_pdf_task(self, document_id: str) -> dict:
-    """
-    Extract text from a PDF document and store it in the database.
-    Also writes a .txt file to ocr_text/{meeting_id}/.
-    """
+@huey.task(retries=1, retry_delay=10, context=True)
+def process_pdf_task(document_id: str, task=None) -> dict:
+    """Extract text from a PDF document and store it in the database."""
     from app.database import SessionLocal
     from app.models import Document
     from app.services.pdf_ingestor import extract_text
@@ -259,7 +104,7 @@ def process_pdf_task(self, document_id: str) -> dict:
             logger.error("Document %s not found", document_id)
             return {"error": "not_found"}
 
-        text = extract_text(doc.file_path)
+        text = extract_text(to_absolute(doc.file_path))
         doc.ocr_text = text
         db.commit()
 
@@ -283,27 +128,14 @@ def process_pdf_task(self, document_id: str) -> dict:
     except Exception as exc:
         db.rollback()
         logger.exception("process_pdf_task failed for document %s", document_id)
-        raise self.retry(exc=exc)
+        raise
     finally:
         db.close()
 
 
-@celery_app.task(
-    name="tasks.extract_multi_voiceprints",
-    max_retries=0,
-)
+@huey.task()
 def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
-    """
-    Extract additional voiceprints from non-overlapping windows of a long
-    confirmed segment.  The pipeline's embedding phase only uses the first
-    MAX_EMBED_AUDIO_SEC of audio; this task harvests the rest so the person's
-    voiceprint pool captures more vocal diversity.
-
-    Dispatched after a human confirmation for segments longer than
-    MULTI_CLIP_MIN_SEGMENT.  Runs before the rerun_voiceprints_task in the
-    Celery queue (FIFO with concurrency=1) so the new voiceprints are
-    available when re-evaluation starts.
-    """
+    """Extract additional voiceprints from non-overlapping windows of a long segment."""
     from app.database import SessionLocal
     from app.config import MAX_EMBED_AUDIO_SEC, MULTI_CLIP_DURATION, EMBED_END_MARGIN
     from app.services.voiceprint import MIN_VOICEPRINT_DURATION
@@ -319,7 +151,6 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
             logger.warning("extract_multi_voiceprints: segment %s not found", segment_id)
             return {"error": "segment not found"}
 
-        # Find extracted audio via DB (any *_extracted.wav)
         extracted_media = (
             db.query(models.MediaFile)
             .filter(
@@ -328,20 +159,16 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
             )
             .first()
         )
-        if not extracted_media or not Path(extracted_media.file_path).exists():
+        if not extracted_media or not Path(to_absolute(extracted_media.file_path)).exists():
             logger.warning("extract_multi_voiceprints: extracted audio not found for meeting %s", segment.meeting_id)
             return {"error": "audio not found"}
-        audio_path = extracted_media.file_path
+        audio_path = to_absolute(extracted_media.file_path)
 
-        # Build windows starting after the primary center-extraction window.
-        # The primary window is computed by compute_embed_window(); multi-clips
-        # start after it ends.  The end margin only applies to the segment
-        # boundary (last window), not interior windows.
         primary = embedder.compute_embed_window(segment.start_time, segment.end_time)
         if primary is None:
             return {"segment_id": segment_id, "extra_voiceprints": 0}
         usable_end = segment.end_time - EMBED_END_MARGIN
-        clip_start = primary[1]  # start after primary window ends
+        clip_start = primary[1]
         windows: list[tuple[float, float]] = []
         while clip_start < usable_end:
             clip_end = min(clip_start + MULTI_CLIP_DURATION, usable_end)
@@ -385,14 +212,8 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
         db.close()
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.process_newscast",
-    max_retries=3,
-    retry_backoff=True,
-    retry_backoff_max=120,
-)
-def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = False) -> dict:
+@huey.task(retries=3, retry_delay=60, context=True)
+def process_newscast_task(newscast_id: str, skip_commercial_strip: bool = False, task=None) -> dict:
     """Run the full TV news processing pipeline for a newscast."""
     from app.database import SessionLocal
     from app.services.news_pipeline import run_news_pipeline
@@ -407,7 +228,6 @@ def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = 
 
     except Exception as exc:
         db.rollback()
-        # Update newscast status to error
         try:
             from app.models import TVNewscast
             newscast = db.query(TVNewscast).filter_by(newscast_id=newscast_id).first()
@@ -417,22 +237,39 @@ def process_newscast_task(self, newscast_id: str, skip_commercial_strip: bool = 
                 db.commit()
         except Exception:
             pass
-        logger.exception("process_newscast_task failed for newscast %s (attempt %d/%d)",
-                         newscast_id, self.request.retries + 1, self.max_retries + 1)
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            logger.error("process_newscast_task: all retries exhausted for newscast %s", newscast_id)
-            _write_error_progress(TV_NEWS_DIR, newscast_id, str(exc))
-            return {"newscast_id": newscast_id, "status": "error", "error": str(exc)[:500]}
+        logger.exception("process_newscast_task failed for newscast %s", newscast_id)
+        _write_error_progress(TV_NEWS_DIR, newscast_id, str(exc))
+        raise
     finally:
         db.close()
 
 
-@celery_app.task(
-    name="tasks.retag_content",
-    max_retries=0,
-)
+@huey.task()
+def rerun_voiceprints_task(meeting_id: str) -> dict:
+    """Re-evaluate all unverified segments against current voiceprints."""
+    from app.database import SessionLocal
+    from app.services import voiceprint as vp_service
+
+    db = SessionLocal()
+    try:
+        count = vp_service.rerun_unverified_segments(db, meeting_id)
+        logger.info(
+            "rerun_voiceprints_task complete: %d segments re-evaluated for meeting %s",
+            count, meeting_id,
+        )
+        return {"meeting_id": meeting_id, "segments_reprocessed": count}
+    except Exception:
+        db.rollback()
+        logger.exception("rerun_voiceprints_task failed for meeting %s", meeting_id)
+        raise
+    finally:
+        db.close()
+
+
+# ── Light tasks (huey_light) ────────────────────────────────────────────────
+
+
+@huey_light.task()
 def retag_content_task(content_type: str, content_id: str) -> dict:
     """Re-tag a content item via Atlas LLM."""
     from app.database import SessionLocal
@@ -442,7 +279,6 @@ def retag_content_task(content_type: str, content_id: str) -> dict:
 
     db = SessionLocal()
     try:
-        # Get the text content to send to Atlas
         text = ""
         metadata = {}
 
@@ -487,16 +323,9 @@ def retag_content_task(content_type: str, content_id: str) -> dict:
         db.close()
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.ingest_radio",
-    max_retries=0,
-)
-def ingest_radio_task(self, source_id: str | None = None) -> dict:
-    """
-    Scrape radio show sources, download new episodes, and create
-    unprocessed Meeting records. Does NOT auto-process.
-    """
+@huey_light.task()
+def ingest_radio_task(source_id: str | None = None) -> dict:
+    """Scrape radio show sources, download new episodes, create Meeting records."""
     from app.database import SessionLocal
     from app.services.ingest import run_ingest
 
@@ -512,33 +341,26 @@ def ingest_radio_task(self, source_id: str | None = None) -> dict:
         db.close()
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.transcode_video",
-    max_retries=0,
-)
-def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
-    """
-    Transcode a video to 540p (960x540) using ffmpeg.
-    Deletes the original file on success and updates MediaFile.
-    Writes progress to media/{meeting_id}/progress.json.
-    """
-    import re
+@huey_light.task(retries=1, retry_delay=30, context=True)
+def transcode_video_task(meeting_id: str, media_id: str, task=None) -> dict:
+    """Transcode a video to 540p (960x540) using ffmpeg."""
     import subprocess
     from app.database import SessionLocal
     from app import models
     from app.services.progress import create_job, update_progress, complete_job, fail_job
 
+    task_id = task.id if task else None
+
     db = SessionLocal()
     try:
-        create_job(db, meeting_id, "transcode", celery_task_id=self.request.id)
+        create_job(db, meeting_id, "transcode", task_id=task_id)
 
         media = db.query(models.MediaFile).filter_by(media_id=media_id).first()
         if not media:
             fail_job(db, meeting_id, "MediaFile not found")
             return {"error": "MediaFile not found", "status": "error"}
 
-        original_path = Path(media.file_path)
+        original_path = Path(to_absolute(media.file_path))
 
         # Guard: already a _540p file — just mark as transcoded
         if "_540p" in original_path.stem:
@@ -555,15 +377,12 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
         media.transcode_status = "transcoding"
         db.commit()
 
-        # Build output path: same dir, add _540p suffix
         stem = original_path.stem
         out_path = original_path.parent / f"{stem}_540p.mp4"
 
         update_progress(db, meeting_id, "Transcoding to 540p", 5,
                         f"Source: {original_path.name}")
 
-        # ffmpeg: scale to 540p (height=540, width auto even),
-        # libx264 crf 23, aac audio, fast preset
         cmd = [
             "ffmpeg", "-y",
             "-progress", "pipe:1", "-nostats",
@@ -575,7 +394,6 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
             str(out_path),
         ]
 
-        # Get source duration for progress calculation
         duration_sec = media.duration
         if not duration_sec:
             try:
@@ -603,7 +421,7 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
                     update_progress(db, meeting_id, "Transcoding to 540p", pct,
                                     f"{pct}% complete")
 
-        proc.wait(timeout=7200)  # 2 hour timeout
+        proc.wait(timeout=7200)
 
         if proc.returncode != 0:
             media.transcode_status = "pending"
@@ -638,7 +456,7 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
         original_path.unlink()
 
         # Update MediaFile record
-        media.file_path = str(out_path)
+        media.file_path = to_relative(str(out_path))
         media.transcode_status = "transcoded"
         if new_duration:
             media.duration = new_duration
@@ -674,22 +492,13 @@ def transcode_video_task(self, meeting_id: str, media_id: str) -> dict:
         db.close()
 
 
-@celery_app.task(
-    name="tasks.primegov_discover",
-    max_retries=0,
-)
+@huey_light.task()
 def primegov_discover_task(
     committee_ids: list[int] | None = None,
     years: list[int] | None = None,
     mode: str = "update",
 ) -> dict:
-    """
-    Run PrimeGov meeting discovery: scrape API → deduplicate → create/update
-    Meeting records.  Does NOT download any assets.
-
-    mode="update" (default): only fetch meetings within 90 days of newest in DB.
-    mode="full": fetch all history.
-    """
+    """Run PrimeGov meeting discovery."""
     from app.database import SessionLocal
     from app.services.primegov.discovery import run_discovery
 
@@ -704,25 +513,17 @@ def primegov_discover_task(
         db.close()
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.primegov_download",
-    max_retries=1,
-    default_retry_delay=30,
-)
+@huey_light.task(retries=1, retry_delay=30, context=True)
 def primegov_download_task(
-    self,
     meeting_id: str,
     download_video: bool = True,
     download_agenda: bool = True,
     download_minutes: bool = True,
     download_packet: bool = True,
     auto_process: bool = False,
+    task=None,
 ) -> dict:
-    """
-    Download PrimeGov assets (video, agenda, minutes) for a single meeting.
-    Optionally triggers process_video_task after video download.
-    """
+    """Download PrimeGov assets (video, agenda, minutes) for a single meeting."""
     from app.database import SessionLocal
     from app.services.primegov.downloader import (
         download_video as dl_video,
@@ -730,12 +531,12 @@ def primegov_download_task(
     )
     from app.services.progress import create_job, update_progress, complete_job, fail_job
 
+    task_id = task.id if task else None
+
     db = SessionLocal()
     results = {}
     try:
-        # Always create the job up front so progress is tracked regardless
-        # of which assets are requested.
-        create_job(db, meeting_id, "download", celery_task_id=self.request.id)
+        create_job(db, meeting_id, "download", task_id=task_id)
 
         if download_video:
             results["video"] = dl_video(db, meeting_id)
@@ -743,9 +544,7 @@ def primegov_download_task(
             if video_status == "error":
                 fail_job(db, meeting_id, results["video"].get("error", "Download failed"))
                 return {"meeting_id": meeting_id, "results": results}
-            # "not_available_yet" and "skipped" continue to docs without error
 
-        # Document downloads — each has its own visible progress stage
         if download_agenda:
             update_progress(db, meeting_id, "Downloading agenda PDF...", 50)
             results["agenda"] = dl_doc(db, meeting_id, "agenda")
@@ -773,55 +572,15 @@ def primegov_download_task(
     except Exception as exc:
         db.rollback()
         logger.exception("primegov_download_task failed for meeting %s", meeting_id)
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            fail_job(db, meeting_id, str(exc))
-            return {"meeting_id": meeting_id, "status": "error", "error": str(exc)[:500]}
-    finally:
-        db.close()
-
-
-@celery_app.task(
-    name="tasks.rerun_voiceprints",
-    max_retries=0,
-)
-def rerun_voiceprints_task(meeting_id: str) -> dict:
-    """
-    Re-evaluate all unverified segments in a meeting against current voiceprints.
-    Runs in the background after a human confirmation so the HTTP response
-    returns immediately without blocking on 1700+ segment re-evaluations.
-    """
-    from app.database import SessionLocal
-    from app.services import voiceprint as vp_service
-
-    db = SessionLocal()
-    try:
-        count = vp_service.rerun_unverified_segments(db, meeting_id)
-        logger.info(
-            "rerun_voiceprints_task complete: %d segments re-evaluated for meeting %s",
-            count, meeting_id,
-        )
-        return {"meeting_id": meeting_id, "segments_reprocessed": count}
-    except Exception:
-        db.rollback()
-        logger.exception("rerun_voiceprints_task failed for meeting %s", meeting_id)
+        fail_job(db, meeting_id, str(exc))
         raise
     finally:
         db.close()
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.export_clip",
-    max_retries=1,
-    default_retry_delay=10,
-)
-def export_clip_task(self, clip_id: str) -> dict:
-    """
-    Export a clip via FFmpeg.  Supports video, audio, and audio-to-MP4
-    (when a cover image is set).
-    """
+@huey_light.task(retries=1, retry_delay=10, context=True)
+def export_clip_task(clip_id: str, task=None) -> dict:
+    """Export a clip via FFmpeg."""
     import subprocess
     from app.database import SessionLocal
     from app.config import CLIPS_DIR
@@ -840,16 +599,17 @@ def export_clip_task(self, clip_id: str) -> dict:
 
         clip_dir = CLIPS_DIR / clip_id
         clip_dir.mkdir(parents=True, exist_ok=True)
-        source = clip.source_media_path
+        source = to_absolute(clip.source_media_path)
 
         import json as _json
 
-        if clip.cover_image_path and Path(clip.cover_image_path).exists():
+        cover_abs = to_absolute(clip.cover_image_path) if clip.cover_image_path else None
+        if cover_abs and Path(cover_abs).exists():
             out_path = clip_dir / "clip.mp4"
             cmd = [
                 "ffmpeg", "-y",
                 "-progress", "pipe:1", "-nostats",
-                "-loop", "1", "-i", clip.cover_image_path,
+                "-loop", "1", "-i", cover_abs,
                 "-ss", str(clip.start_time),
                 "-to", str(clip.end_time),
                 "-i", source,
@@ -916,12 +676,12 @@ def export_clip_task(self, clip_id: str) -> dict:
             logger.error("export_clip_task FFmpeg error for %s: exit code %d", clip_id, proc.returncode)
             return {"clip_id": clip_id, "status": "error"}
 
-        clip.export_path = str(out_path)
+        clip.export_path = to_relative(str(out_path))
         clip.export_status = "ready"
         db.commit()
         logger.info("export_clip_task complete: %s → %s", clip_id, out_path)
 
-        # Auto-cleanup old exports so abandoned clips don't pile up
+        # Auto-cleanup old exports
         from app.services.task_dispatch import send_task
         send_task("tasks.cleanup_clips")
 
@@ -938,62 +698,64 @@ def export_clip_task(self, clip_id: str) -> dict:
         except Exception:
             pass
         logger.exception("export_clip_task failed for clip %s", clip_id)
-        raise self.retry(exc=exc)
+        raise
     finally:
         db.close()
 
 
-@celery_app.task(
-    name="tasks.full_ingest",
-    max_retries=0,
-)
+@huey_light.task()
 def full_ingest_task(meeting_id: str) -> dict:
-    """
-    Run all three pipeline stages sequentially for a single meeting:
-      1. Download video (primegov downloader)
-      2. Transcode to 540p (transcoder, auto_process=False)
-      3. Run video pipeline (diarize, transcribe, embed, voiceprint)
-
-    Intended for the backfill API's /full/{meeting_id} endpoint and for
-    new meetings where the caller wants a single Celery task to handle
-    the entire lifecycle without chaining queue entries.
-
-    All three stages create their own short-lived DB sessions.
-    """
+    """Download + transcode + process in one task."""
     from app.database import SessionLocal
     from app.services.primegov.downloader import download_video as dl_video
     from app.services.transcoder import run_transcode
     from app.services.pipeline import run_video_pipeline
-
     from app.services.progress import create_job, complete_job, fail_job
 
     logger.info("full_ingest_task: starting for meeting %s", meeting_id)
 
-    # ── Stage 1: Download ──────────────────────────────────────────────────
+    # Stage 1: Download (skip if media already exists)
     db = SessionLocal()
     try:
         create_job(db, meeting_id, "download")
         dl_result = dl_video(db, meeting_id)
-        if dl_result.get("status") == "complete":
+        if dl_result.get("status") in ("complete", "skipped"):
             complete_job(db, meeting_id)
         else:
             fail_job(db, meeting_id, dl_result.get("error", "Download failed"))
     finally:
         db.close()
 
-    if dl_result.get("status") != "complete":
+    if dl_result.get("status") not in ("complete", "skipped"):
         logger.error("full_ingest_task: download failed for %s: %s", meeting_id, dl_result)
         return {"meeting_id": meeting_id, "status": "error", "stage": "download", "detail": dl_result}
 
+    # Get media_id — from download result or from DB if already existed
     media_id = dl_result.get("media_id")
     if not media_id:
-        logger.error("full_ingest_task: no media_id after download for %s", meeting_id)
+        db = SessionLocal()
+        try:
+            from app import models as _m
+            existing = (
+                db.query(_m.MediaFile)
+                .filter(
+                    _m.MediaFile.meeting_id == meeting_id,
+                    _m.MediaFile.file_type.in_(["video", "audio"]),
+                    ~_m.MediaFile.file_path.like("%_extracted.wav"),
+                )
+                .first()
+            )
+            media_id = existing.media_id if existing else None
+        finally:
+            db.close()
+
+    if not media_id:
+        logger.error("full_ingest_task: no media_id for %s", meeting_id)
         return {"meeting_id": meeting_id, "status": "error", "stage": "download", "detail": "no media_id"}
 
     logger.info("full_ingest_task: download complete for %s (media_id=%s)", meeting_id, media_id)
 
-    # ── Stage 2: Transcode ─────────────────────────────────────────────────
-    # run_transcode creates its own DB session internally
+    # Stage 2: Transcode
     db = SessionLocal()
     try:
         create_job(db, meeting_id, "transcode")
@@ -1017,16 +779,15 @@ def full_ingest_task(meeting_id: str) -> dict:
 
     logger.info("full_ingest_task: transcode complete for %s", meeting_id)
 
-    # ── Stage 3: Pipeline (transcribe, diarize, embed, voiceprint) ─────────
+    # Stage 3: Pipeline
     db = SessionLocal()
     try:
         create_job(db, meeting_id, "process")
         result = run_video_pipeline(db, meeting_id, media_id)
 
-        # Auto-skipped meetings return a dict — don't mark complete
         if isinstance(result, dict) and result.get("status") == "auto_skipped":
             fail_job(db, meeting_id, result.get("reason", "auto-skipped"))
-            logger.warning("full_ingest_task: auto-skipped %s — too many failures", meeting_id)
+            logger.warning("full_ingest_task: auto-skipped %s", meeting_id)
             return {"meeting_id": meeting_id, "status": "auto_skipped", "stage": "process"}
 
         from app.models import TranscriptSegment
@@ -1039,23 +800,13 @@ def full_ingest_task(meeting_id: str) -> dict:
         db.close()
 
     logger.info("full_ingest_task: pipeline complete for %s (%d segments)", meeting_id, count)
-    return {
-        "meeting_id": meeting_id,
-        "status": "complete",
-        "segment_count": count,
-    }
+    return {"meeting_id": meeting_id, "status": "complete", "segment_count": count}
 
 
-@celery_app.task(
-    name="tasks.cleanup_clips",
-    max_retries=0,
-)
+@huey_light.task()
 def cleanup_clips_task() -> dict:
-    """
-    Delete export files for downloaded or expired clips.
-    Keeps metadata and thumbnails for re-export.
-    """
-    from datetime import datetime, timedelta
+    """Delete export files for downloaded or expired clips."""
+    from datetime import timedelta
     from app.database import SessionLocal
     from app.config import CLIP_CLEANUP_HOURS
     from app import models
@@ -1083,7 +834,7 @@ def cleanup_clips_task() -> dict:
                 continue
 
             if clip.export_path:
-                p = Path(clip.export_path)
+                p = Path(to_absolute(clip.export_path))
                 if p.exists():
                     p.unlink()
 
@@ -1100,3 +851,131 @@ def cleanup_clips_task() -> dict:
         raise
     finally:
         db.close()
+
+
+# ── Minutes vote ingest helpers (unchanged) ──────────────────────────────────
+
+def _ingest_minutes_votes(db, doc) -> None:
+    """Auto-ingest votes from a minutes document after OCR completes."""
+    from app import models
+    from app.services.minutes_parser import parse_minutes
+    from sqlalchemy import func
+
+    meeting = db.query(models.Meeting).filter_by(meeting_id=doc.meeting_id).first()
+    if not meeting:
+        return
+
+    existing = db.query(func.count(models.MeetingVote.vote_id)) \
+                 .filter(models.MeetingVote.meeting_id == doc.meeting_id).scalar()
+    if existing > 0:
+        logger.info("Vote ingest: skipped %s — %d votes already exist", doc.meeting_id, existing)
+        return
+
+    result = parse_minutes(
+        ocr_text=doc.ocr_text,
+        meeting_id=meeting.meeting_id,
+        document_id=doc.document_id,
+        meeting_date=meeting.meeting_date,
+        group_name=meeting.group_name,
+    )
+
+    doc.minutes_parse_status = result.parse_status
+    doc.minutes_parse_notes = result.parse_notes_json
+    db.commit()
+
+    if result.parse_status not in ("ok", "empty"):
+        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
+                         result.parse_status, result.unmatched_paragraphs,
+                         skipped=True)
+        logger.warning("Vote ingest: FLAGGED %s %s — parse_status=%s, "
+                        "%d unmatched paragraphs (not ingested, needs review)",
+                        meeting.meeting_date, meeting.title[:40],
+                        result.parse_status, len(result.unmatched_paragraphs))
+        return
+
+    if not result.votes:
+        _log_vote_ingest(meeting.meeting_date, meeting.title, 0,
+                         result.parse_status, [])
+        logger.info("Vote ingest: %s %s — no votes (special meeting) [%s]",
+                     meeting.meeting_date, meeting.title[:40], result.parse_status)
+        return
+
+    person_map = _build_vote_person_lookup(db)
+
+    saved = 0
+    for v in result.votes:
+        row = models.MeetingVote(
+            vote_id=v.vote_id,
+            meeting_id=v.meeting_id,
+            document_id=v.document_id,
+            meeting_date=v.meeting_date,
+            group_name=v.group_name,
+            agenda_section=v.agenda_section,
+            item_description=v.item_description,
+            resolution_number=v.resolution_number,
+            outcome=v.outcome,
+            vote_tally=v.vote_tally,
+            mover=v.mover,
+            seconder=v.seconder,
+            mover_person_id=person_map.get(v.mover),
+            seconder_person_id=person_map.get(v.seconder),
+        )
+        db.add(row)
+        for name in v.yes_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="yes", person_id=person_map.get(name)))
+        for name in v.no_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="no", person_id=person_map.get(name)))
+        for name in v.absent_members:
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="absent", person_id=person_map.get(name)))
+        saved += 1
+
+    db.commit()
+
+    _log_vote_ingest(meeting.meeting_date, meeting.title, saved,
+                     result.parse_status, result.unmatched_paragraphs)
+    logger.info("Vote ingest: %s %s — %d votes [%s]",
+                meeting.meeting_date, meeting.title[:40], saved, result.parse_status)
+
+
+def _build_vote_person_lookup(db) -> dict:
+    """Build last-name → person_id mapping from supervisor roster."""
+    import json as _json
+    from app import models
+
+    roster_path = Path(__file__).parent.parent / "config" / "supervisors.json"
+    if not roster_path.exists():
+        return {}
+    try:
+        data = _json.loads(roster_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    last_to_full = {}
+    for entry in data.get("district_supervisors", []):
+        full = entry.get("supervisor", "")
+        last = full.rsplit(" ", 1)[-1]
+        if last not in last_to_full:
+            last_to_full[last] = full
+    people = {p.canonical_name: p.person_id for p in db.query(models.Person).all()}
+    return {last: people[full] for last, full in last_to_full.items() if full in people}
+
+
+def _log_vote_ingest(meeting_date, title, vote_count, status, unmatched,
+                     skipped=False):
+    """Append vote ingest result to logs/minutes_vote_ingest.log."""
+    log_dir = Path(__file__).parent.parent / "logs"
+    log_file = log_dir / "minutes_vote_ingest.log"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            flag = "FLAGGED " if skipped else ""
+            f.write(f"{ts}  {flag}{meeting_date}  {title[:55]:<55}  "
+                    f"votes={vote_count}  status={status}\n")
+            if unmatched:
+                for i, para in enumerate(unmatched[:5], 1):
+                    f.write(f"  [{i}] {para[:200]}\n")
+    except Exception:
+        pass

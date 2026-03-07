@@ -3,8 +3,8 @@ Backfill API — controlled one-at-a-time stage progression.
 
 Each next-* endpoint finds ONE meeting, queues it, and returns immediately.
 The UI loops: queue one → wait for worker idle → pause 3s → queue next.
-Nothing runs concurrently — the Celery solo pool enforces that at the worker
-level, and the UI enforces it at the trigger level.
+Nothing runs concurrently — the Huey thread worker (workers=1) enforces that
+at the worker level, and the UI enforces it at the trigger level.
 
 Each next-* endpoint also auto-resets stuck meetings before selecting a
 candidate, so reset-stuck never needs to be called manually.
@@ -15,7 +15,7 @@ GET  /api/backfill/status               Counts: download/transcode/process/diari
 GET  /api/backfill/queue                Paginated list of process-pending meetings
 GET  /api/backfill/active               Currently running meeting (from processing_jobs DB)
 GET  /api/backfill/progress/{id}        Latest job for a specific meeting
-GET  /api/backfill/worker-idle          True if Celery queue + unacked are both empty
+GET  /api/backfill/worker-idle          True if Huey queues are empty and no DB jobs running
 GET  /api/backfill/events               SSE stream: real-time progress updates
 POST /api/backfill/next-download        Queue one primegov_download_task
 POST /api/backfill/next-transcode       Queue one transcode_video_task
@@ -44,7 +44,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.config import MEDIA_DIR, CELERY_BROKER
+from app.config import MEDIA_DIR, BASE_DIR
+from app.paths import to_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ _STUCK_SECONDS_BY_STAGE = {
 # this often, so stuck jobs are recovered even if no next-* endpoints are called.
 _SELF_HEAL_INTERVAL = 300  # 5 minutes
 
-_SKIP_KEY = "backfill:skipped"
+_SKIP_FILE = BASE_DIR / "database" / "backfill_skipped.json"
 
 
 # ── DB dependency ─────────────────────────────────────────────────────────────
@@ -80,36 +81,35 @@ def get_db():
         db.close()
 
 
-# ── Redis skip-set helpers ────────────────────────────────────────────────────
-
-def _redis():
-    import redis
-    # Force 127.0.0.1 — on Windows, 'localhost' resolves IPv6 first which
-    # can hang for 20+ seconds before falling back to IPv4.
-    url = CELERY_BROKER.replace("localhost", "127.0.0.1")
-    return redis.from_url(url, decode_responses=True,
-                          socket_connect_timeout=2, socket_timeout=2)
-
+# ── Skip-set helpers (file-backed, no Redis) ────────────────────────────────
 
 def _get_skipped() -> set[str]:
     try:
-        return _redis().smembers(_SKIP_KEY)
+        if _SKIP_FILE.exists():
+            return set(json.loads(_SKIP_FILE.read_text(encoding="utf-8")))
     except Exception:
-        return set()
+        pass
+    return set()
+
+
+def _save_skipped(skipped: set[str]) -> None:
+    try:
+        _SKIP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SKIP_FILE.write_text(json.dumps(sorted(skipped)), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("skip save failed: %s", exc)
 
 
 def _skip(meeting_id: str) -> None:
-    try:
-        _redis().sadd(_SKIP_KEY, meeting_id)
-    except Exception as exc:
-        logger.warning("skip add failed for %s: %s", meeting_id, exc)
+    skipped = _get_skipped()
+    skipped.add(meeting_id)
+    _save_skipped(skipped)
 
 
 def _unskip(meeting_id: str) -> None:
-    try:
-        _redis().srem(_SKIP_KEY, meeting_id)
-    except Exception as exc:
-        logger.warning("skip remove failed for %s: %s", meeting_id, exc)
+    skipped = _get_skipped()
+    skipped.discard(meeting_id)
+    _save_skipped(skipped)
 
 
 # ── Active-job helpers ────────────────────────────────────────────────────────
@@ -303,30 +303,25 @@ def backfill_status(db: Session = Depends(get_db)):
     }
     download_pending = len(meeting_ids_with_url - meeting_ids_with_media)
 
-    transcode_pending = (
-        db.query(models.MediaFile)
-        .filter(models.MediaFile.transcode_status == "pending")
-        .count()
-    )
-
-    ready_meeting_ids = {
+    # All meetings with any source media (including transcode-pending)
+    all_media_meeting_ids = {
         r.meeting_id for r in
         db.query(models.MediaFile.meeting_id)
         .filter(
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
-            models.MediaFile.transcode_status.in_(["transcoded", None]),
         ).distinct().all()
     }
     meetings_with_segments_ids = {
         r.meeting_id for r in
         db.query(models.TranscriptSegment.meeting_id).distinct().all()
     }
+    # Process pending = has media (any transcode state), no segments, not processed
     process_pending = (
         db.query(models.Meeting)
         .filter(
             models.Meeting.processed_at.is_(None),
-            models.Meeting.meeting_id.in_(ready_meeting_ids),
+            models.Meeting.meeting_id.in_(all_media_meeting_ids),
             ~models.Meeting.meeting_id.in_(meetings_with_segments_ids),
         ).count()
     )
@@ -347,7 +342,6 @@ def backfill_status(db: Session = Depends(get_db)):
 
     return {
         "download_pending": download_pending,
-        "transcode_pending": transcode_pending,
         "process_pending": process_pending,
         "diarize_pending": diarize_pending,
         "stuck": stuck_count,
@@ -434,7 +428,7 @@ def backfill_queue(
             "media_id": media.media_id if media else None,
             "file_type": media.file_type if media else None,
             "transcode_status": media.transcode_status if media else None,
-            "file_exists": bool(media and Path(media.file_path).exists()),
+            "file_exists": bool(media and Path(to_absolute(media.file_path)).exists()),
             "skipped": meeting.meeting_id in skipped,
             "active": meeting.meeting_id in active_by_meeting,
             "stage": job.stage_label if job else "",
@@ -518,21 +512,19 @@ def backfill_progress(meeting_id: str, db: Session = Depends(get_db)):
 @router.get("/worker-idle")
 def backfill_worker_idle(db: Session = Depends(get_db)):
     """
-    Return True if the Celery worker has no queued or in-flight tasks.
-    Also checks processing_jobs for any running jobs as extra safety.
+    Return True if the Huey queues have no pending tasks and no
+    processing_jobs are running in the DB.
     """
     from app import models
 
+    # Check Huey queues for pending tasks
+    huey_idle = True
     try:
-        import redis as _redis_lib
-        url = CELERY_BROKER.replace("localhost", "127.0.0.1")
-        r = _redis_lib.from_url(url, socket_connect_timeout=2, socket_timeout=2)
-        queue_len = r.llen("celery")
-        unacked_len = r.hlen("unacked")
-        redis_idle = queue_len == 0 and unacked_len == 0
+        from app.worker import huey, huey_light
+        pending = huey.pending_count() + huey_light.pending_count()
+        huey_idle = pending == 0
     except Exception as exc:
-        logger.warning("worker-idle Redis check failed: %s", exc)
-        redis_idle = True
+        logger.warning("worker-idle Huey check failed: %s", exc)
 
     # Also check DB for any running jobs (belt-and-suspenders)
     threshold = datetime.utcnow() - timedelta(seconds=_STUCK_SECONDS)
@@ -545,7 +537,7 @@ def backfill_worker_idle(db: Session = Depends(get_db)):
         .count()
     )
 
-    return {"idle": redis_idle and db_running == 0}
+    return {"idle": huey_idle and db_running == 0}
 
 
 # ── SSE events stream ─────────────────────────────────────────────────────────
@@ -553,11 +545,10 @@ def backfill_worker_idle(db: Session = Depends(get_db)):
 @router.get("/events")
 async def backfill_events():
     """
-    Server-Sent Events stream. Pushes progress updates, job completions,
-    and status changes in real time.
+    Server-Sent Events stream. Polls the processing_jobs DB every 3 seconds
+    for changes and pushes updates to connected clients.
 
     On connect, sends an 'init' event with current status + active job.
-    Subsequent events are published via Redis pub/sub by the progress helper.
     """
     async def generate():
         import asyncio
@@ -570,60 +561,34 @@ async def backfill_events():
             db.close()
         yield f"data: {json.dumps({'type': 'init', **init_data})}\n\n"
 
-        # ── Subscribe to Redis pub/sub ─────────────────────────────────────
-        try:
-            import redis.asyncio as aioredis
-        except ImportError:
-            # Fallback: yield a keepalive every 30s if async Redis isn't available
-            logger.warning("redis.asyncio not available — SSE will send keepalives only")
-            while True:
-                await asyncio.sleep(30)
-                yield ": keepalive\n\n"
-            return
+        # ── Poll for changes ───────────────────────────────────────────────
+        prev_state: dict | None = None
+        keepalive_counter = 0
 
-        url = CELERY_BROKER.replace("localhost", "127.0.0.1")
-        try:
-            # socket_timeout=None — never time out on idle pub/sub reads.
-            # Long jobs (transcription, diarization) can go 10+ minutes without
-            # a progress message; a short socket_timeout would kill the stream.
-            r = aioredis.from_url(url, socket_connect_timeout=5, socket_timeout=None)
-            pubsub = r.pubsub()
-            await pubsub.subscribe("civic_media:progress")
-        except Exception as exc:
-            logger.warning("SSE Redis subscribe failed: %s", exc)
-            # Can't subscribe — send keepalives only
-            while True:
-                await asyncio.sleep(30)
-                yield ": keepalive\n\n"
-            return
+        while True:
+            await asyncio.sleep(3)
+            keepalive_counter += 1
 
-        try:
-            # Use get_message() with asyncio.wait_for so we can send SSE keepalives
-            # during long silent phases without closing the Redis connection.
-            while True:
-                try:
-                    message = await asyncio.wait_for(
-                        pubsub.get_message(ignore_subscribe_messages=True),
-                        timeout=25,
-                    )
-                except asyncio.TimeoutError:
-                    # No progress message for 25s — send SSE keepalive comment
-                    yield ": keepalive\n\n"
-                    continue
-                if message is None:
-                    # Subscription acknowledged but no data yet
-                    await asyncio.sleep(0.05)
-                    continue
-                data = message["data"]
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8", errors="replace")
-                yield f"data: {data}\n\n"
-        finally:
             try:
-                await pubsub.unsubscribe("civic_media:progress")
-                await r.aclose()
-            except Exception:
-                pass
+                db = SessionLocal()
+                try:
+                    state = _build_init_state(db)
+                finally:
+                    db.close()
+
+                # Only send update if something changed
+                if state != prev_state:
+                    prev_state = state
+                    yield f"data: {json.dumps({'type': 'update', **state})}\n\n"
+                elif keepalive_counter >= 10:
+                    # Send keepalive every ~30s even if no changes
+                    keepalive_counter = 0
+                    yield ": keepalive\n\n"
+            except Exception as exc:
+                logger.debug("SSE poll error (non-fatal): %s", exc)
+                if keepalive_counter >= 10:
+                    keepalive_counter = 0
+                    yield ": keepalive\n\n"
 
     return StreamingResponse(
         generate(),
@@ -647,29 +612,23 @@ def _build_init_state(db: Session) -> dict:
         .filter(models.MediaFile.file_type.in_(["video", "audio"]))
         .distinct().all()
     }
-    transcode_pending = (
-        db.query(models.MediaFile)
-        .filter(models.MediaFile.transcode_status == "pending")
-        .count()
-    )
     meetings_with_segments_ids = {
         r.meeting_id for r in
         db.query(models.TranscriptSegment.meeting_id).distinct().all()
     }
-    ready_ids = {
+    all_media_ids = {
         r.meeting_id for r in
         db.query(models.MediaFile.meeting_id)
         .filter(
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
-            models.MediaFile.transcode_status.in_(["transcoded", None]),
         ).distinct().all()
     }
     process_pending = (
         db.query(models.Meeting)
         .filter(
             models.Meeting.processed_at.is_(None),
-            models.Meeting.meeting_id.in_(ready_ids),
+            models.Meeting.meeting_id.in_(all_media_ids),
             ~models.Meeting.meeting_id.in_(meetings_with_segments_ids),
         ).count()
     )
@@ -712,7 +671,6 @@ def _build_init_state(db: Session) -> dict:
     return {
         "status": {
             "download_pending": len(meeting_ids_with_url - meeting_ids_with_media),
-            "transcode_pending": transcode_pending,
             "process_pending": process_pending,
             "diarize_pending": diarize_pending,
             "stuck": stuck,
@@ -840,11 +798,14 @@ def backfill_next_process(
     db: Session = Depends(get_db),
 ):
     """
-    Auto-reset stuck meetings, then queue one process_video_task for the
-    oldest meeting with ready source media, 0 segments, and processed_at=null.
+    Auto-reset stuck meetings, then queue one task for the oldest meeting
+    with source media, 0 segments, and processed_at=null.
 
-    Skips: meetings in the skip set, videos still needing transcode,
-           meetings whose file no longer exists on disk.
+    Smart routing:
+      - Already transcoded / no transcode needed → process_video
+      - Needs transcode (status='pending')       → full_ingest (transcode + process)
+
+    Skips: meetings in the skip set, meetings whose file is missing on disk.
     Optional group_name/category filters let the UI scope "Process All"
     to a specific show or content type.
     """
@@ -871,13 +832,13 @@ def backfill_next_process(
 
     if candidates:
         candidate_ids = [m.meeting_id for m in candidates]
+        # Fetch ALL media (including transcode_status='pending')
         media_rows = (
             db.query(models.MediaFile)
             .filter(
                 models.MediaFile.meeting_id.in_(candidate_ids),
                 models.MediaFile.file_type.in_(["video", "audio"]),
                 ~models.MediaFile.file_path.like("%_extracted.wav"),
-                models.MediaFile.transcode_status.in_(["transcoded", None]),
             )
             .all()
         )
@@ -912,18 +873,25 @@ def backfill_next_process(
         media = media_by_meeting.get(meeting.meeting_id)
         if not media:
             continue
-        if not Path(media.file_path).exists():
+        if not Path(to_absolute(media.file_path)).exists():
             logger.warning("next-process: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
             continue
 
-        send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
-        logger.info("next-process: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
+        # Route: needs transcode → full_ingest, otherwise → process_video
+        if media.transcode_status == "pending":
+            send_task("tasks.full_ingest", args=[meeting.meeting_id])
+            action = "full_ingest"
+        else:
+            send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
+            action = "process"
+        logger.info("next-process: queued %s [%s] (%s)", meeting.meeting_id, action, meeting.meeting_date)
         return {
             "queued": True,
             "meeting_id": meeting.meeting_id,
             "media_id": media.media_id,
             "meeting_date": meeting.meeting_date,
             "title": meeting.title,
+            "action": action,
             "auto_reset": reset_summary,
         }
 
@@ -943,6 +911,8 @@ def backfill_next_process_newest(
     Used by Worker 2 in the opposite-end dual-worker strategy: Worker 1
     processes oldest-first, Worker 2 processes newest-first. They converge
     toward the middle without ever colliding.
+
+    Smart routing: needs transcode → full_ingest, otherwise → process_video.
     """
     from app import models
     from app.services.task_dispatch import send_task
@@ -973,7 +943,6 @@ def backfill_next_process_newest(
                 models.MediaFile.meeting_id.in_(candidate_ids),
                 models.MediaFile.file_type.in_(["video", "audio"]),
                 ~models.MediaFile.file_path.like("%_extracted.wav"),
-                models.MediaFile.transcode_status.in_(["transcoded", None]),
             )
             .all()
         )
@@ -1008,18 +977,24 @@ def backfill_next_process_newest(
         media = media_by_meeting.get(meeting.meeting_id)
         if not media:
             continue
-        if not Path(media.file_path).exists():
+        if not Path(to_absolute(media.file_path)).exists():
             logger.warning("next-process-newest: skipping %s — file missing: %s", meeting.meeting_id, media.file_path)
             continue
 
-        send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
-        logger.info("next-process-newest: queued %s (%s)", meeting.meeting_id, meeting.meeting_date)
+        if media.transcode_status == "pending":
+            send_task("tasks.full_ingest", args=[meeting.meeting_id])
+            action = "full_ingest"
+        else:
+            send_task("tasks.process_video", args=[meeting.meeting_id, media.media_id])
+            action = "process"
+        logger.info("next-process-newest: queued %s [%s] (%s)", meeting.meeting_id, action, meeting.meeting_date)
         return {
             "queued": True,
             "meeting_id": meeting.meeting_id,
             "media_id": media.media_id,
             "meeting_date": meeting.meeting_date,
             "title": meeting.title,
+            "action": action,
             "auto_reset": reset_summary,
         }
 
@@ -1082,7 +1057,7 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
             )
             .first()
         )
-        if not wav_record or not Path(wav_record.file_path).exists():
+        if not wav_record or not Path(to_absolute(wav_record.file_path)).exists():
             logger.warning(
                 "next-diarize: skipping %s — extracted WAV missing", meeting.meeting_id
             )
@@ -1099,9 +1074,9 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
             )
             .first()
         )
-        if source_media and Path(source_media.file_path).exists():
-            src_dur = _probe_duration(source_media.file_path)
-            wav_dur = get_wav_duration(wav_record.file_path)
+        if source_media and Path(to_absolute(source_media.file_path)).exists():
+            src_dur = _probe_duration(to_absolute(source_media.file_path))
+            wav_dur = get_wav_duration(to_absolute(wav_record.file_path))
             if src_dur > 60 and wav_dur < src_dur * 0.80:
                 logger.warning(
                     "next-diarize: skipping %s — WAV %.0fs is only %.0f%% of source %.0fs "
@@ -1133,11 +1108,17 @@ def backfill_next_diarize(db: Session = Depends(get_db)):
 
 @router.post("/process-now/{meeting_id}")
 def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
-    """Queue process_video_task for a specific meeting immediately."""
+    """Queue processing for a specific meeting immediately.
+
+    Smart routing:
+      - If media needs transcode → queue full_ingest (transcode + process)
+      - If already transcoded   → queue process_video directly
+    """
     from app import models
     from app.services.task_dispatch import send_task
     from fastapi import HTTPException
 
+    # First try: already transcoded or no-transcode-needed media
     media = (
         db.query(models.MediaFile)
         .filter(
@@ -1148,14 +1129,35 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
         )
         .first()
     )
-    if not media:
-        raise HTTPException(status_code=404, detail="No eligible media found for this meeting")
-    if not Path(media.file_path).exists():
-        raise HTTPException(status_code=409, detail="Media file not found on disk")
+    if media:
+        if not Path(to_absolute(media.file_path)).exists():
+            raise HTTPException(status_code=409, detail="Media file not found on disk")
+        send_task("tasks.process_video", args=[meeting_id, media.media_id])
+        logger.info("process-now: queued process_video %s / %s", meeting_id, media.media_id)
+        return {"queued": True, "meeting_id": meeting_id, "media_id": media.media_id,
+                "action": "process"}
 
-    send_task("tasks.process_video", args=[meeting_id, media.media_id])
-    logger.info("process-now: queued %s / %s", meeting_id, media.media_id)
-    return {"queued": True, "meeting_id": meeting_id, "media_id": media.media_id}
+    # Second try: needs transcode — queue full_ingest (transcode → process)
+    media_pending = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
+            models.MediaFile.transcode_status == "pending",
+        )
+        .first()
+    )
+    if media_pending:
+        if not Path(to_absolute(media_pending.file_path)).exists():
+            raise HTTPException(status_code=409, detail="Media file not found on disk")
+        send_task("tasks.full_ingest", args=[meeting_id])
+        logger.info("process-now: queued full_ingest (needs transcode) %s / %s",
+                     meeting_id, media_pending.media_id)
+        return {"queued": True, "meeting_id": meeting_id, "media_id": media_pending.media_id,
+                "action": "full_ingest"}
+
+    raise HTTPException(status_code=404, detail="No eligible media found for this meeting")
 
 
 # ── Full ingest ───────────────────────────────────────────────────────────────

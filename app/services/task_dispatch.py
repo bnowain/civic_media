@@ -1,106 +1,75 @@
 """
-Lightweight task dispatch — pushes Celery-compatible messages directly to Redis.
+Task dispatch — calls Huey task functions by name.
 
-Bypasses Celery's kombu connection pool which can hang indefinitely on Windows
-when ghost worker bindings exist. The messages are fully compatible with Celery
-workers consuming from the same Redis broker.
+Keeps the same send_task(task_name, args, kwargs) API so all existing callers
+work unchanged. Internally maps string task names to the actual Huey-decorated
+functions, which handle serialization and queue push via SqliteHuey.
 """
 
-import json
 import logging
-import uuid
-
-import redis
-
-from app.config import CELERY_BROKER
 
 logger = logging.getLogger(__name__)
 
-# Must mirror task_routes in app/worker.py
-_LIGHT_TASKS = {
-    "tasks.ingest_radio",
-    "tasks.primegov_discover",
-    "tasks.primegov_download",
-    "tasks.transcode_video",
-    "tasks.retag_content",
-    "tasks.export_clip",
-    "tasks.cleanup_clips",
-    "tasks.full_ingest",
-}
+# Lazy import to avoid circular imports at module level.
+# Task functions are imported on first call.
+_task_map: dict | None = None
+
+
+def _get_task_map() -> dict:
+    global _task_map
+    if _task_map is not None:
+        return _task_map
+
+    from app.tasks import (
+        process_video_task,
+        process_pdf_task,
+        extract_multi_voiceprints_task,
+        rerun_voiceprints_task,
+        process_newscast_task,
+        retag_content_task,
+        ingest_radio_task,
+        transcode_video_task,
+        primegov_discover_task,
+        primegov_download_task,
+        export_clip_task,
+        cleanup_clips_task,
+        full_ingest_task,
+    )
+
+    _task_map = {
+        "tasks.process_video": process_video_task,
+        "tasks.process_pdf": process_pdf_task,
+        "tasks.extract_multi_voiceprints": extract_multi_voiceprints_task,
+        "tasks.rerun_voiceprints": rerun_voiceprints_task,
+        "tasks.process_newscast": process_newscast_task,
+        "tasks.retag_content": retag_content_task,
+        "tasks.ingest_radio": ingest_radio_task,
+        "tasks.transcode_video": transcode_video_task,
+        "tasks.primegov_discover": primegov_discover_task,
+        "tasks.primegov_download": primegov_download_task,
+        "tasks.export_clip": export_clip_task,
+        "tasks.cleanup_clips": cleanup_clips_task,
+        "tasks.full_ingest": full_ingest_task,
+    }
+    return _task_map
 
 
 def send_task(task_name: str, args: list | None = None, kwargs: dict | None = None,
               queue: str | None = None) -> str:
-    """Push a task message to Redis in Celery's native format.
+    """Dispatch a task by name. Returns the task ID (UUID string).
 
-    If queue is None, auto-routes based on _LIGHT_TASKS mapping.
-    Auto-starts the light worker if dispatching to the light queue
-    and it isn't running.
-    Returns the task ID (UUID string).
+    The queue parameter is ignored — Huey routes tasks based on which
+    instance they're registered with (huey vs huey_light).
     """
-    if queue is None:
-        queue = "light" if task_name in _LIGHT_TASKS else "celery"
+    task_map = _get_task_map()
+    task_fn = task_map.get(task_name)
+    if task_fn is None:
+        raise ValueError(f"Unknown task: {task_name}")
 
-    task_id = str(uuid.uuid4())
+    # Call the Huey task function — this enqueues it and returns a Result handle.
+    result = task_fn(*(args or []), **(kwargs or {}))
 
-    body = json.dumps([
-        args or [],          # positional args
-        kwargs or {},        # keyword args
-        {"callbacks": None, "errbacks": None, "chain": None, "chord": None},
-    ])
-
-    headers = {
-        "lang": "py",
-        "task": task_name,
-        "id": task_id,
-        "shadow": None,
-        "eta": None,
-        "expires": None,
-        "group": None,
-        "group_index": None,
-        "retries": 0,
-        "timelimit": [None, None],
-        "root_id": task_id,
-        "parent_id": None,
-        "argsrepr": repr(args or []),
-        "kwargsrepr": repr(kwargs or {}),
-        "origin": "api@dispatch",
-        "ignore_result": False,
-    }
-
-    properties = {
-        "correlation_id": task_id,
-        "reply_to": "",
-        "delivery_mode": 2,
-        "delivery_info": {"exchange": "", "routing_key": queue},
-        "priority": 0,
-        "body_encoding": "utf-8",
-        "delivery_tag": str(uuid.uuid4()),
-    }
-
-    message = json.dumps({
-        "body": body,
-        "content-encoding": "utf-8",
-        "content-type": "application/json",
-        "headers": headers,
-        "properties": properties,
-    })
-
-    # Force IPv4 — on Windows 'localhost' resolves IPv6 first, can hang 20+ seconds
-    broker_url = CELERY_BROKER.replace("localhost", "127.0.0.1")
-    r = redis.from_url(broker_url, socket_connect_timeout=3, socket_timeout=3)
-    try:
-        r.lpush(queue, message)
-        logger.info("Dispatched %s [%s] to queue '%s'", task_name, task_id, queue)
-    finally:
-        r.close()
-
-    # Auto-start light worker if needed (non-blocking, after task is in Redis)
-    if queue == "light":
-        try:
-            from app.services.worker_manager import ensure_light_worker
-            ensure_light_worker()
-        except Exception as exc:
-            logger.warning("Could not auto-start light worker: %s", exc)
-
-    return task_id
+    # result.id is the Huey task ID
+    task_id = result.id if result else "unknown"
+    logger.info("Dispatched %s [%s]", task_name, task_id)
+    return str(task_id)

@@ -2,8 +2,8 @@
 System management endpoints.
 
 GET   /api/system/status          — Check worker process health (PID-based).
-GET   /api/system/worker-health   — Celery worker + Redis health (ping-based).
-POST  /api/system/restart-worker  — Kill zombies and relaunch celery watchdog.
+GET   /api/system/worker-health   — Huey worker health (process-based).
+POST  /api/system/restart-worker  — Kill zombies and relaunch Huey watchdog.
 POST  /api/system/shutdown        — Gracefully stop all server processes.
 """
 
@@ -67,14 +67,14 @@ def system_status():
 
 @router.get("/worker-health")
 def worker_health():
-    """Return Celery worker and Redis health status for the UI status pill."""
+    """Return Huey worker health status for the UI status pill."""
     from app.services.worker_manager import check_worker_health
     return check_worker_health(use_cache=False)
 
 
 @router.post("/restart-worker")
 def restart_worker():
-    """Kill zombie workers and relaunch the celery watchdog."""
+    """Kill zombie workers and relaunch the Huey watchdog."""
     from app.services.worker_manager import restart_worker as _restart
     return _restart()
 
@@ -97,7 +97,7 @@ async def system_shutdown():
         except Exception:
             pids = {}
 
-        # Only kill the watchdog (celery worker tree) -- not our own uvicorn
+        # Only kill the watchdog (worker tree) -- not our own uvicorn
         watchdog_pid = pids.get("watchdog")
         if watchdog_pid and _pid_alive(watchdog_pid):
             try:

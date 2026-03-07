@@ -444,10 +444,6 @@
         <span id="cnt-download">—</span>
         <span class="label">Download</span>
       </div>
-      <div class="pill pill-amber">
-        <span id="cnt-transcode">—</span>
-        <span class="label">Transcode</span>
-      </div>
       <div class="pill pill-green">
         <span id="cnt-process">—</span>
         <span class="label">Process</span>
@@ -748,7 +744,6 @@ function startSSE() {
 function renderStatus(s) {
   if (!s) return;
   document.getElementById('cnt-download').textContent  = s.download_pending  ?? '—';
-  document.getElementById('cnt-transcode').textContent = s.transcode_pending ?? '—';
   document.getElementById('cnt-process').textContent   = s.process_pending   ?? '—';
   document.getElementById('cnt-diarize').textContent   = s.diarize_pending   ?? '—';
   document.getElementById('cnt-stuck').textContent     = s.stuck             ?? '—';
@@ -931,6 +926,8 @@ function renderTable() {
       : `<button class="btn btn-ghost btn-sm" onclick="skipMeeting('${m.meeting_id}', true)">Skip</button>`;
     const processBtn = m.active
       ? `<button class="btn btn-ghost btn-sm" disabled>Running…</button>`
+      : !m.file_exists
+      ? `<button class="btn btn-ghost btn-sm" disabled title="No file on disk">—</button>`
       : `<button class="btn btn-ghost btn-sm" onclick="processMeeting('${m.meeting_id}')" title="Queue now">▶</button>`;
 
     return `<tr class="${rowClass}" data-id="${m.meeting_id}">
@@ -947,8 +944,8 @@ function renderTable() {
 function badgeFor(m) {
   if (m.active)                               return '<span class="badge badge-active">ACTIVE</span>';
   if (!m.file_exists)                         return '<span class="badge badge-missing">NO FILE</span>';
-  if (m.transcode_status === 'pending')       return '<span class="badge badge-pending">TRANSCODE</span>';
   if (m.skipped)                              return '<span class="badge badge-skipped">SKIPPED</span>';
+  if (m.transcode_status === 'pending')       return '<span class="badge badge-ready">READY <small>(540p)</small></span>';
   return '<span class="badge badge-ready">READY</span>';
 }
 
@@ -1235,7 +1232,8 @@ async function processMeeting(id) {
     const d = await api(`/api/backfill/process-now/${id}`, 'POST');
     if (d.queued) {
       const title = S.meetings.find(m => m.meeting_id === id)?.title || id;
-      setLog(`▶ Queued: ${title}`, 'ok');
+      const label = d.action === 'full_ingest' ? '⟳▶ Transcode + Process' : '▶ Process';
+      setLog(`${label}: ${title}`, 'ok');
       renderActive({ meeting_id: id, title, stage: 'Queued', pct: 0 });
     }
   } catch (e) {

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import MEDIA_DIR
+from app.paths import to_relative
 from app.services.group_helper import ensure_group
 from app.utils import generate_media_filename
 from .base import ScrapedEpisode
@@ -116,7 +117,7 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
         source_url=episode.audio_url,
         page_url=episode.page_url,
         thumbnail_url=episode.thumbnail_url,
-        media_directory=str(meeting_dir),
+        media_directory=to_relative(str(meeting_dir)),
     )
     db.add(meeting)
 
@@ -129,13 +130,13 @@ def download_episode(db: Session, episode: ScrapedEpisode) -> models.Meeting:
         .first()
     )
     if media:
-        media.file_path = str(audio_path)
+        media.file_path = to_relative(str(audio_path))
         media.duration = episode.duration_hint
     else:
         media = models.MediaFile(
             meeting_id=meeting_id,
             file_type="audio",
-            file_path=str(audio_path),
+            file_path=to_relative(str(audio_path)),
             duration=episode.duration_hint,
         )
         db.add(media)

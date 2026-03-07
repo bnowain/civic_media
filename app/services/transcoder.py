@@ -2,7 +2,7 @@
 Video transcoder — 540p downscale via ffmpeg.
 
 Runs as a background thread from the API endpoint so it works
-without Celery. Writes progress to media/{meeting_id}/progress.json
+without a task queue. Writes progress to media/{meeting_id}/progress.json
 for the UI to poll.
 """
 
@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+
+from app.paths import to_relative, to_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def _write_progress(meeting_id: str, stage: str, pct: int, detail: str = "", err
 
 
 def _auto_dispatch_pipeline(meeting_id: str, media_id: str) -> None:
-    """Dispatch the processing pipeline via direct Redis push after a successful transcode."""
+    """Dispatch the processing pipeline after a successful transcode."""
     try:
         from app.services.task_dispatch import send_task
         send_task("tasks.process_video", args=[meeting_id, media_id])
@@ -68,7 +70,7 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
     Deletes the original file on success and updates MediaFile.
 
     If auto_process is True (default), automatically dispatches the
-    processing pipeline via Celery after a successful transcode.
+    processing pipeline via Huey after a successful transcode.
 
     Designed to run in a background thread — creates its own DB session.
     """
@@ -82,7 +84,7 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
             _write_progress(meeting_id, "Error", 0, "MediaFile not found", error=True)
             return {"error": "MediaFile not found", "status": "error"}
 
-        original_path = Path(media.file_path)
+        original_path = Path(to_absolute(media.file_path))
 
         # Guard: if file_path already contains _540p, it's already transcoded —
         # just update DB status and skip.
@@ -114,7 +116,7 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
                         "Source missing for %s but valid 540p found — recovering DB record",
                         meeting_id,
                     )
-                    media.file_path = str(out_path)
+                    media.file_path = to_relative(str(out_path))
                     media.transcode_status = "transcoded"
                     media.duration = out_dur
                     db.commit()
@@ -155,7 +157,7 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
                                 original_path.name,
                             )
 
-                media.file_path = str(out_path)
+                media.file_path = to_relative(str(out_path))
                 media.transcode_status = "transcoded"
                 if out_dur:
                     media.duration = out_dur
@@ -268,7 +270,7 @@ def run_transcode(meeting_id: str, media_id: str, auto_process: bool = True) -> 
                         original_path.name,
                     )
 
-        media.file_path = str(out_path)
+        media.file_path = to_relative(str(out_path))
         media.transcode_status = "transcoded"
         if new_duration:
             media.duration = new_duration

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.config import DOCUMENTS_DIR
 from app.database import get_db
+from app.paths import to_relative, to_absolute
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -62,7 +63,7 @@ async def upload_document(
     doc = models.Document(
         meeting_id=meeting_id,
         document_type=document_type,
-        file_path=str(dest_path),
+        file_path=to_relative(str(dest_path)),
     )
     db.add(doc)
     db.commit()
@@ -72,7 +73,7 @@ async def upload_document(
         from app.services.task_dispatch import send_task
         send_task("tasks.process_pdf", args=[doc.document_id])
     except Exception:
-        # Redis not available — run OCR directly
+        # Task queue unavailable — run OCR directly
         try:
             from app.services.pdf_ingestor import extract_text
             text = extract_text(str(dest_path))
@@ -119,7 +120,7 @@ def serve_document_file(meeting_id: str, document_id: str, db: Session = Depends
     if not doc:
         raise HTTPException(404, "Document not found")
 
-    pdf_path = Path(doc.file_path)
+    pdf_path = Path(to_absolute(doc.file_path))
     if not pdf_path.exists():
         raise HTTPException(404, "PDF file not found on disk")
 

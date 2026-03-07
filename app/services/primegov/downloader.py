@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.config import MEDIA_DIR, DOCUMENTS_DIR
 from app.models import Meeting, MediaFile, Document
+from app.paths import to_relative
 
 logger = logging.getLogger(__name__)
 
@@ -283,21 +284,21 @@ def download_video(db: Session, meeting_id: str) -> dict:
         .first()
     )
     if media_file:
-        media_file.file_path = str(output_path)
+        media_file.file_path = to_relative(str(output_path))
         media_file.duration = duration
         media_file.transcode_status = "pending"
     else:
         media_file = MediaFile(
             meeting_id=meeting_id,
             file_type="video",
-            file_path=str(output_path),
+            file_path=to_relative(str(output_path)),
             duration=duration,
             transcode_status="pending",
         )
         db.add(media_file)
 
     # Set media directory on meeting
-    meeting.media_directory = str(media_dir)
+    meeting.media_directory = to_relative(str(media_dir))
     db.commit()
 
     _write_progress(meeting_id, "Video downloaded", 100, f"{output_filename}")
@@ -372,7 +373,7 @@ def download_document(
     doc = Document(
         meeting_id=meeting_id,
         document_type=doc_type,
-        file_path=str(output_path),
+        file_path=to_relative(str(output_path)),
     )
     db.add(doc)
     db.commit()
@@ -383,12 +384,12 @@ def download_document(
         output_path.stat().st_size / 1024,
     )
 
-    # Run OCR — try direct Redis dispatch, fall back to direct extraction
+    # Run OCR — try task queue, fall back to direct extraction
     try:
         from app.services.task_dispatch import send_task
         send_task("tasks.process_pdf", args=[doc.document_id])
     except Exception:
-        logger.debug("Celery unavailable, running OCR directly")
+        logger.debug("Task queue unavailable, running OCR directly")
         try:
             from app.services.pdf_ingestor import extract_text
             text = extract_text(str(output_path))

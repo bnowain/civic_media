@@ -99,7 +99,7 @@ def download_meeting_assets(
     Download assets for a single meeting.
 
     Documents (agenda/minutes/packet) are downloaded synchronously — they're
-    small HTTP GETs that complete in seconds.  Video is queued as a Celery
+    small HTTP GETs that complete in seconds.  Video is queued as a Huey
     task since it requires Playwright + ffmpeg and can take minutes.
     """
     meeting = db.query(Meeting).filter_by(meeting_id=meeting_id).first()
@@ -118,7 +118,7 @@ def download_meeting_assets(
         if requested:
             doc_results[doc_type] = download_document(db, meeting_id, doc_type)
 
-    # ── Video: queue in Celery (Playwright + ffmpeg) ─────────────────────
+    # ── Video: queue in Huey (Playwright + ffmpeg) ───────────────────────
     video_task_id = None
     video_note = None
     if download_video:

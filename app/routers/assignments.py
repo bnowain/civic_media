@@ -37,7 +37,7 @@ def confirm_assignment(
     When a user confirms or corrects a speaker:
       1. The segment's embedding is stored as a new voiceprint for that person.
       2. The assignment is marked verified and committed immediately.
-      3. A background Celery task re-evaluates all unverified segments so the
+      3. A background Huey task re-evaluates all unverified segments so the
          HTTP response returns instantly (no blocking on 1700+ re-evaluations).
 
     Embeddings are NEVER overwritten — each confirmation adds a new row.
@@ -154,7 +154,7 @@ def confirm_assignment(
     #    concurrency=1 the extra voiceprints exist by the time
     #    re-evaluation starts.
     #    If workers are busy (solo pool can't respond to ping while processing),
-    #    the tasks still go to Redis and will be picked up when a worker is free.
+    #    the tasks still go to the queue and will be picked up when a worker is free.
     try:
         from app.config import MULTI_CLIP_MIN_SEGMENT
         from app.services.task_dispatch import send_task

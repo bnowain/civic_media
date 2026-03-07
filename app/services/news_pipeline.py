@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import TV_NEWS_DIR
+from app.paths import to_relative, to_absolute
 from app.services import audio_extractor, transcriber
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ def run_news_pipeline(
     Full TV news processing pipeline.
 
     Args:
-        db: Active SQLAlchemy session (owned by Celery task).
+        db: Active SQLAlchemy session (owned by Huey task).
         newscast_id: UUID of the newscast.
         skip_commercial_strip: If True, skip Comskip commercial detection.
     """
@@ -65,7 +66,7 @@ def run_news_pipeline(
     if not newscast.source_file:
         raise ValueError(f"Newscast {newscast_id} has no source file")
 
-    source_path = newscast.source_file
+    source_path = to_absolute(newscast.source_file)
     newscast_dir = TV_NEWS_DIR / newscast_id
     newscast_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +88,7 @@ def run_news_pipeline(
                 source_path, cleaned_path, station=newscast.station,
             )
             video_path = output
-            newscast.cleaned_file = output
+            newscast.cleaned_file = to_relative(output)
             db.commit()
             logger.info("[%s] Commercial strip done: %d breaks removed", newscast_id, len(breaks))
         except Exception as exc:
