@@ -54,9 +54,46 @@ def _get_task_map() -> dict:
     return _task_map
 
 
+# Tasks that take meeting_id as first arg and should get a queued ProcessingJob
+# immediately on dispatch (so the UI can show them before the worker picks them up).
+# Maps task_name → initial stage name.
+_MEETING_TASK_STAGES = {
+    "tasks.process_video":      "process",
+    "tasks.full_ingest":        "download",
+    "tasks.transcode_video":    "transcode",
+    "tasks.primegov_download":  "download",
+}
+
+
+def _create_queued_job(task_name: str, args: list | None, kwargs: dict | None,
+                       task_id: str) -> None:
+    """Create a 'queued' ProcessingJob so the task is visible before the worker runs it."""
+    stage = _MEETING_TASK_STAGES.get(task_name)
+    if not stage:
+        return  # Not a meeting-processing task
+
+    meeting_id = (args[0] if args else None) or (kwargs or {}).get("meeting_id")
+    if not meeting_id:
+        return
+
+    try:
+        from app.database import SessionLocal
+        from app.services.progress import create_job
+        db = SessionLocal()
+        try:
+            create_job(db, meeting_id, stage, task_id=task_id)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Pre-create queued job failed for %s (non-fatal): %s", meeting_id, exc)
+
+
 def send_task(task_name: str, args: list | None = None, kwargs: dict | None = None,
               queue: str | None = None) -> str:
     """Dispatch a task by name. Returns the task ID (UUID string).
+
+    Creates a 'queued' ProcessingJob immediately for meeting-processing tasks
+    so the UI can show them before the worker picks them up.
 
     The queue parameter is ignored — Huey routes tasks based on which
     instance they're registered with (huey vs huey_light).
@@ -71,5 +108,9 @@ def send_task(task_name: str, args: list | None = None, kwargs: dict | None = No
 
     # result.id is the Huey task ID
     task_id = result.id if result else "unknown"
+
+    # Create a visible "queued" job in the DB immediately
+    _create_queued_job(task_name, args, kwargs, str(task_id))
+
     logger.info("Dispatched %s [%s]", task_name, task_id)
     return str(task_id)
