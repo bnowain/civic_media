@@ -133,7 +133,18 @@ def run_discovery(
             changed = False
             doc_changed = False
 
-            if existing.video_url is None and pm.video_url:
+            # Update video_url if missing, OR if it's a /events/ livestream
+            # URL and PrimeGov now has the archived /videos/ URL.
+            _needs_video_update = (
+                (existing.video_url is None and pm.video_url)
+                or (
+                    existing.video_url
+                    and "/events/" in existing.video_url
+                    and pm.video_url
+                    and "/videos/" in pm.video_url
+                )
+            )
+            if _needs_video_update:
                 existing.video_url = pm.video_url
                 changed = True
             if existing.agenda_url is None and pm.agenda_url:
