@@ -506,6 +506,11 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         status = "processing"
         stage  = stage or "Transcoding to 540p"
         pct    = pct or 5
+    elif segment_count > 0 and (meeting and meeting.processed_at is not None):
+        # Meeting has segments and processed_at is set — it's done.
+        # This catches meetings where progress.json was cleared or stage is stale.
+        status = "complete"
+        pct    = 100
     elif (stage == "Complete" or pct == 100) and not is_transcode_stage and not is_download_stage and segment_count > 0:
         status = "complete"
         pct    = 100
@@ -523,7 +528,8 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         status = "pending"
         stage  = "Ready to process"
         pct    = 0
-    elif segment_count > 0 or stage:
+    elif segment_count > 0 or (stage and stage not in ("", "Complete")):
+        # Active processing — has a real stage label or segments being generated
         status = "processing"
         pct    = pct or 10
     elif meeting and meeting.processed_at is None and segment_count == 0:
@@ -532,9 +538,8 @@ def pipeline_status(meeting_id: str, db: Session = Depends(get_db)):
         stage  = "Ready to process"
         pct    = 0
     else:
-        status = "processing"
-        stage  = stage or "Starting..."
-        pct    = pct or 0
+        status = "complete"
+        pct    = 100
 
     # Vote ingest status
     vote_count = (

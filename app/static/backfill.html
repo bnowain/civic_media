@@ -125,60 +125,63 @@
     .btn-green:hover:not(:disabled) { background: #166534; }
     .btn-sm { padding: 4px 10px; font-size: 11px; }
 
-    /* ── Active task panel ── */
-    .active-panel {
-      background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--accent-blue);
-      border-radius: var(--radius);
-      padding: 14px 16px;
+    /* ── Worker panels ── */
+    .workers-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
       margin-bottom: 16px;
     }
-    .active-panel.idle { border-left-color: var(--border-light); }
-    .active-header {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 10px;
+    .worker-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-light);
+      border-radius: var(--radius);
+      padding: 12px 14px;
     }
-    .active-badge {
+    .worker-panel.wp-active { border-left-color: var(--accent-blue); }
+    .worker-panel.wp-gpu.wp-active { border-left-color: var(--accent-green); }
+    .worker-panel.wp-light.wp-active { border-left-color: var(--accent-blue); }
+    .wp-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .wp-badge {
       font-family: var(--font-mono);
       font-size: 10px;
-      font-weight: 500;
+      font-weight: 600;
       letter-spacing: 0.08em;
-      padding: 2px 6px;
+      padding: 2px 7px;
       border-radius: var(--radius-sm);
-      background: var(--accent-blue-dim);
-      color: var(--accent-blue);
-      border: 1px solid var(--accent-blue);
     }
-    .active-badge.idle-badge {
-      background: var(--bg-raised);
-      color: var(--text-muted);
-      border-color: var(--border);
-    }
-    .active-title { font-size: 14px; font-weight: 500; color: var(--text-primary); }
-    .active-meta  { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+    .wp-badge-gpu  { background: var(--accent-green-dim); color: #4ade80; border: 1px solid var(--accent-green); }
+    .wp-badge-light{ background: var(--accent-blue-dim);  color: #93b4fd; border: 1px solid var(--accent-blue); }
+    .wp-badge-idle { background: var(--bg-raised); color: var(--text-muted); border: 1px solid var(--border); }
+    .wp-title { font-size: 13px; font-weight: 500; color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wp-queued { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
 
     .progress-row {
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-top: 8px;
+      margin-top: 6px;
     }
     .progress-track {
       flex: 1;
-      height: 6px;
+      height: 5px;
       background: var(--bg-raised);
       border-radius: 99px;
       overflow: hidden;
     }
     .progress-fill {
       height: 100%;
-      background: var(--accent-blue);
       border-radius: 99px;
       transition: width 0.4s ease;
     }
+    .progress-fill-gpu  { background: var(--accent-green); }
+    .progress-fill-light{ background: var(--accent-blue); }
     .progress-pct {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -187,11 +190,98 @@
       text-align: right;
     }
     .progress-stage {
-      font-size: 12px;
-      color: var(--text-secondary);
+      font-size: 11px;
+      color: var(--text-muted);
       font-family: var(--font-mono);
-      margin-top: 4px;
+      margin-top: 3px;
     }
+
+    /* ── Task queue panel ── */
+    .task-queue-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .tq-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: var(--bg-raised);
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+    }
+    .tq-header:hover { background: var(--bg-hover); }
+    .tq-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      flex: 1;
+    }
+    .tq-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .tq-toggle {
+      font-size: 10px;
+      color: var(--text-muted);
+      transition: transform 0.2s;
+    }
+    .tq-toggle.open { transform: rotate(90deg); }
+    .tq-body { max-height: 300px; overflow-y: auto; }
+    .tq-body.collapsed { display: none; }
+    .tq-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .tq-row:last-child { border-bottom: none; }
+    .tq-row:hover { background: var(--bg-hover); }
+    .tq-num { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); min-width: 20px; }
+    .tq-stage {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      min-width: 60px;
+      text-align: center;
+    }
+    .tq-stage-download  { background: var(--accent-blue-dim);  color: #93b4fd; }
+    .tq-stage-transcode { background: #1e3a5f; color: #60a5fa; }
+    .tq-stage-process   { background: var(--accent-green-dim); color: #4ade80; }
+    .tq-date { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); min-width: 80px; }
+    .tq-name { flex: 1; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tq-actions { display: flex; gap: 4px; }
+    .tq-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text-muted);
+      font-size: 10px;
+      padding: 2px 6px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+    }
+    .tq-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
+    .tq-btn-priority:hover { border-color: var(--accent-amber); color: var(--accent-amber); }
+    .tq-btn-cancel:hover { border-color: var(--accent-red); color: var(--accent-red); }
+    .tq-empty {
+      padding: 12px 14px;
+      font-size: 12px;
+      color: var(--text-muted);
+      text-align: center;
+      font-family: var(--font-mono);
+    }
+
+    /* legacy active panel (hidden now, kept for JS compat) */
+    .active-panel { display: none; }
 
     /* ── Controls ── */
     .controls {
@@ -320,7 +410,8 @@
     .badge-ready   { background: var(--accent-green-dim);  color: #4ade80; }
     .badge-active  { background: var(--accent-blue-dim);   color: #93b4fd; animation: pulse 2s infinite; }
     .badge-skipped { background: var(--bg-overlay);        color: var(--text-muted); }
-    .badge-missing { background: var(--accent-red-dim);    color: #fca5a5; }
+    .badge-missing  { background: var(--accent-red-dim);    color: #fca5a5; }
+    .badge-download { background: var(--accent-amber-dim); color: #fbbf24; }
     .badge-pending { background: var(--accent-amber-dim);  color: #fcd34d; }
 
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
@@ -464,23 +555,53 @@
     </div>
   </div>
 
-  <!-- Active task panel -->
-  <div class="active-panel idle" id="active-panel">
-    <div class="active-header">
-      <span class="active-badge idle-badge" id="active-badge">IDLE</span>
-      <span class="active-title" id="active-title">No task running</span>
-    </div>
-    <div id="active-progress-row" class="hidden">
-      <div class="progress-row">
-        <div class="progress-track">
-          <div class="progress-fill" id="active-bar" style="width:0%"></div>
-        </div>
-        <span class="progress-pct" id="active-pct">0%</span>
+  <!-- Worker status panels -->
+  <div class="workers-row">
+    <div class="worker-panel wp-gpu" id="wp-gpu">
+      <div class="wp-header">
+        <span class="wp-badge wp-badge-idle" id="wp-gpu-badge">GPU</span>
+        <span class="wp-title" id="wp-gpu-title">Idle</span>
+        <span class="wp-queued" id="wp-gpu-queued"></span>
       </div>
-      <div class="progress-stage" id="active-stage"></div>
+      <div id="wp-gpu-progress" class="hidden">
+        <div class="progress-row">
+          <div class="progress-track">
+            <div class="progress-fill progress-fill-gpu" id="wp-gpu-bar" style="width:0%"></div>
+          </div>
+          <span class="progress-pct" id="wp-gpu-pct">0%</span>
+        </div>
+        <div class="progress-stage" id="wp-gpu-stage"></div>
+      </div>
     </div>
-    <div class="log-line" id="status-log"></div>
+    <div class="worker-panel wp-light" id="wp-light">
+      <div class="wp-header">
+        <span class="wp-badge wp-badge-idle" id="wp-light-badge">LIGHT</span>
+        <span class="wp-title" id="wp-light-title">Idle</span>
+        <span class="wp-queued" id="wp-light-queued"></span>
+      </div>
+      <div id="wp-light-progress" class="hidden">
+        <div class="progress-row">
+          <div class="progress-track">
+            <div class="progress-fill progress-fill-light" id="wp-light-bar" style="width:0%"></div>
+          </div>
+          <span class="progress-pct" id="wp-light-pct">0%</span>
+        </div>
+        <div class="progress-stage" id="wp-light-stage"></div>
+      </div>
+    </div>
   </div>
+
+  <!-- Task queue -->
+  <div class="task-queue-panel" id="task-queue-panel">
+    <div class="tq-header" onclick="toggleTaskQueue()">
+      <span class="tq-toggle" id="tq-toggle">&#9654;</span>
+      <span class="tq-title">Task Queue</span>
+      <span class="tq-count" id="tq-count">0 queued</span>
+    </div>
+    <div class="tq-body collapsed" id="tq-body"></div>
+  </div>
+
+  <div class="log-line" id="status-log"></div>
 
   <!-- Category tabs -->
   <div class="cat-tabs">
@@ -657,13 +778,18 @@ async function handleWorkerClick() {
   }
 }
 
+// ── Task queue state ──────────────────────────────────────────────────────
+let taskQueueOpen = false;
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   loadQueue();
+  loadTaskQueue();
   startSSE();
   document.getElementById('worker-status-btn').addEventListener('click', handleWorkerClick);
   pollWorkerHealth();
   setInterval(pollWorkerHealth, 10000);
+  setInterval(loadTaskQueue, 5000); // refresh task queue every 5s
 });
 
 // ── Server-Sent Events ─────────────────────────────────────────────────────
@@ -685,27 +811,26 @@ function startSSE() {
 
     switch (data.type) {
       case 'init':
+      case 'update':
         if (data.status) renderStatus(data.status);
+        if (data.workers) renderWorkers(data.workers);
+        // Legacy: update active panel for auto-loop compat
         if (S.mode === 'idle') {
-          if (data.active) activeJobMeta = data.active;  // cache title/date from server
+          if (data.active) activeJobMeta = data.active;
           renderActive(data.active || null);
         }
         break;
 
       case 'progress': {
-        // Resolve title from cache → queue list → UUID fallback
         const metaTitle = (activeJobMeta && activeJobMeta.meeting_id === data.meeting_id)
           ? activeJobMeta.title : null;
         const queueTitle = S.meetings.find(m => m.meeting_id === data.meeting_id)?.title;
         const resolvedTitle = metaTitle || queueTitle || null;
         const resolvedDate  = (activeJobMeta && activeJobMeta.meeting_id === data.meeting_id)
           ? activeJobMeta.meeting_date : null;
-
-        // Update cache so subsequent 'progress' events can reuse it
         if (resolvedTitle) {
           activeJobMeta = { meeting_id: data.meeting_id, title: resolvedTitle, meeting_date: resolvedDate };
         }
-
         if (S.mode === 'idle') {
           renderActive({
             meeting_id:   data.meeting_id,
@@ -716,7 +841,6 @@ function startSSE() {
             detail:       data.detail || '',
           });
         }
-        // Update queue row if visible
         updateQueueRowActive(data.meeting_id, true, data.stage_label || '', data.pct || 0);
         break;
       }
@@ -724,9 +848,9 @@ function startSSE() {
       case 'complete':
       case 'error':
         updateQueueRowActive(data.meeting_id, false, '', 0);
-        // Reload status + queue to reflect new state
         loadStatus();
         loadQueue();
+        loadTaskQueue();
         break;
 
       case 'status':
@@ -926,6 +1050,8 @@ function renderTable() {
       : `<button class="btn btn-ghost btn-sm" onclick="skipMeeting('${m.meeting_id}', true)">Skip</button>`;
     const processBtn = m.active
       ? `<button class="btn btn-ghost btn-sm" disabled>Running…</button>`
+      : m.needs_download
+      ? `<button class="btn btn-ghost btn-sm" onclick="downloadMeeting('${m.meeting_id}')" title="Queue download">⬇</button>`
       : !m.file_exists
       ? `<button class="btn btn-ghost btn-sm" disabled title="No file on disk">—</button>`
       : `<button class="btn btn-ghost btn-sm" onclick="processMeeting('${m.meeting_id}')" title="Queue now">▶</button>`;
@@ -943,6 +1069,7 @@ function renderTable() {
 
 function badgeFor(m) {
   if (m.active)                               return '<span class="badge badge-active">ACTIVE</span>';
+  if (m.needs_download)                       return '<span class="badge badge-download">DOWNLOAD</span>';
   if (!m.file_exists)                         return '<span class="badge badge-missing">NO FILE</span>';
   if (m.skipped)                              return '<span class="badge badge-skipped">SKIPPED</span>';
   if (m.transcode_status === 'pending')       return '<span class="badge badge-ready">READY <small>(540p)</small></span>';
@@ -957,40 +1084,121 @@ function typeBadge(m) {
   return '';
 }
 
-function renderActive(active) {
-  const panel       = document.getElementById('active-panel');
-  const badge       = document.getElementById('active-badge');
-  const title       = document.getElementById('active-title');
-  const progressRow = document.getElementById('active-progress-row');
-  const bar         = document.getElementById('active-bar');
-  const pct         = document.getElementById('active-pct');
-  const stage       = document.getElementById('active-stage');
+// ── Worker panels ─────────────────────────────────────────────────────────
+function renderWorkers(workers) {
+  if (!workers) return;
+  renderWorkerPanel('gpu', workers.gpu);
+  renderWorkerPanel('light', workers.light);
+}
+
+function renderWorkerPanel(type, data) {
+  const panel    = document.getElementById(`wp-${type}`);
+  const badge    = document.getElementById(`wp-${type}-badge`);
+  const title    = document.getElementById(`wp-${type}-title`);
+  const queued   = document.getElementById(`wp-${type}-queued`);
+  const progress = document.getElementById(`wp-${type}-progress`);
+  const bar      = document.getElementById(`wp-${type}-bar`);
+  const pct      = document.getElementById(`wp-${type}-pct`);
+  const stage    = document.getElementById(`wp-${type}-stage`);
+  if (!panel) return;
+
+  const active = data?.active;
+  const qCount = data?.queued_count || 0;
 
   if (active) {
-    panel.classList.remove('idle');
-    badge.className   = 'active-badge';
-    badge.textContent = 'ACTIVE';
-    // Show "Title · Apr 22" if we have a date, else title, else UUID
+    panel.classList.add('wp-active');
+    badge.className = `wp-badge wp-badge-${type}`;
+    badge.textContent = type.toUpperCase();
     let titleText = active.title || active.meeting_id;
     if (active.meeting_date) {
       try {
         const d = new Date(active.meeting_date + 'T12:00:00');
-        const ds = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        titleText = `${titleText} \u00b7 ${ds}`;
-      } catch { /* skip date */ }
+        titleText += ' \u00b7 ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      } catch {}
     }
     title.textContent = titleText;
-    progressRow.classList.remove('hidden');
-    bar.style.width   = (active.pct || 0) + '%';
-    pct.textContent   = (active.pct || 0) + '%';
-    stage.textContent = active.stage + (active.detail ? ' — ' + active.detail : '');
+    progress.classList.remove('hidden');
+    bar.style.width = (active.pct || 0) + '%';
+    pct.textContent = (active.pct || 0) + '%';
+    stage.textContent = (active.stage || '') + (active.detail ? ' \u2014 ' + active.detail : '');
   } else {
-    panel.classList.add('idle');
-    badge.className   = 'active-badge idle-badge';
-    badge.textContent = 'IDLE';
-    title.textContent = 'No task running';
-    progressRow.classList.add('hidden');
+    panel.classList.remove('wp-active');
+    badge.className = 'wp-badge wp-badge-idle';
+    badge.textContent = type.toUpperCase();
+    title.textContent = 'Idle';
+    progress.classList.add('hidden');
   }
+
+  queued.textContent = qCount > 0 ? `${qCount} queued` : '';
+}
+
+// ── Task queue ────────────────────────────────────────────────────────────
+async function loadTaskQueue() {
+  try {
+    const d = await api('/api/backfill/queued');
+    renderTaskQueue(d.items || []);
+  } catch (e) {
+    // non-fatal
+  }
+}
+
+function renderTaskQueue(items) {
+  const countEl = document.getElementById('tq-count');
+  const body    = document.getElementById('tq-body');
+  countEl.textContent = `${items.length} queued`;
+
+  if (items.length === 0) {
+    body.innerHTML = '<div class="tq-empty">No tasks in queue</div>';
+    return;
+  }
+
+  body.innerHTML = items.map((item, i) => {
+    const stageClass = `tq-stage-${item.stage || 'process'}`;
+    const stageLabel = item.stage_label || item.stage || '?';
+    return `<div class="tq-row">
+      <span class="tq-num">${i + 1}</span>
+      <span class="tq-stage ${stageClass}">${esc(stageLabel)}</span>
+      <span class="tq-date">${item.meeting_date || ''}</span>
+      <span class="tq-name" title="${esc(item.title)}">${esc(item.title)}</span>
+      <span class="tq-actions">
+        <button class="tq-btn tq-btn-priority" onclick="prioritizeJob('${item.job_id}')" title="Move to front">\u25b2</button>
+        <button class="tq-btn tq-btn-cancel" onclick="cancelJob('${item.job_id}')" title="Cancel">\u2715</button>
+      </span>
+    </div>`;
+  }).join('');
+}
+
+function toggleTaskQueue() {
+  taskQueueOpen = !taskQueueOpen;
+  document.getElementById('tq-body').classList.toggle('collapsed', !taskQueueOpen);
+  document.getElementById('tq-toggle').classList.toggle('open', taskQueueOpen);
+}
+
+async function cancelJob(jobId) {
+  try {
+    await api(`/api/backfill/queued/${jobId}`, 'DELETE');
+    loadTaskQueue();
+    setLog('Task cancelled.', 'ok');
+  } catch (e) {
+    setLog('Cancel failed: ' + e.message, 'err');
+  }
+}
+
+async function prioritizeJob(jobId) {
+  try {
+    const d = await api(`/api/backfill/queued/${jobId}/prioritize`, 'POST');
+    loadTaskQueue();
+    setLog(`Moved to front: ${d.title || jobId}`, 'ok');
+  } catch (e) {
+    setLog('Prioritize failed: ' + e.message, 'err');
+  }
+}
+
+// ── Legacy active panel (kept for auto-loop state tracking) ───────────────
+function renderActive(active) {
+  // The visible worker panels are rendered by renderWorkers() via SSE.
+  // This function only exists so the auto-loop can detect active state.
+  // No DOM updates needed — the panel is hidden.
 }
 
 // ── Selection ──────────────────────────────────────────────────────────────
@@ -1046,6 +1254,7 @@ async function triggerOne(type) {
     setAllBtnsDisabled(false);
     updateSelectedBtn();
     loadStatus();
+    loadTaskQueue();
   }
 }
 
@@ -1072,6 +1281,7 @@ async function toggleAuto(type) {
   updateSelectedBtn();
   loadQueue();
   loadStatus();
+  loadTaskQueue();
 }
 
 async function autoLoop(type) {
@@ -1209,6 +1419,7 @@ async function processSelected() {
   renderActive(null);
   loadQueue();
   loadStatus();
+  loadTaskQueue();
   setLog('Selected batch complete.', 'ok');
 }
 
@@ -1235,9 +1446,23 @@ async function processMeeting(id) {
       const label = d.action === 'full_ingest' ? '⟳▶ Transcode + Process' : '▶ Process';
       setLog(`${label}: ${title}`, 'ok');
       renderActive({ meeting_id: id, title, stage: 'Queued', pct: 0 });
+      loadTaskQueue();
     }
   } catch (e) {
     setLog('Error: ' + e.message, 'err');
+  }
+}
+
+async function downloadMeeting(id) {
+  try {
+    const d = await api(`/api/backfill/full/${id}`, 'POST');
+    if (d.queued) {
+      const title = d.title || id;
+      setLog(`⬇ Download queued: ${title}`, 'ok');
+      loadTaskQueue();
+    }
+  } catch (e) {
+    setLog('Download error: ' + e.message, 'err');
   }
 }
 
@@ -1283,7 +1508,8 @@ async function api(url, method = 'GET') {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || res.statusText);
   }
-  return res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
 }
 </script>
 </body>

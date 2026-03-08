@@ -779,28 +779,11 @@ def full_ingest_task(meeting_id: str) -> dict:
 
     logger.info("full_ingest_task: transcode complete for %s", meeting_id)
 
-    # Stage 3: Pipeline
-    db = SessionLocal()
-    try:
-        create_job(db, meeting_id, "process")
-        result = run_video_pipeline(db, meeting_id, media_id)
-
-        if isinstance(result, dict) and result.get("status") == "auto_skipped":
-            fail_job(db, meeting_id, result.get("reason", "auto-skipped"))
-            logger.warning("full_ingest_task: auto-skipped %s", meeting_id)
-            return {"meeting_id": meeting_id, "status": "auto_skipped", "stage": "process"}
-
-        from app.models import TranscriptSegment
-        count = db.query(TranscriptSegment).filter_by(meeting_id=meeting_id).count()
-        complete_job(db, meeting_id)
-    except Exception as exc:
-        fail_job(db, meeting_id, str(exc))
-        raise
-    finally:
-        db.close()
-
-    logger.info("full_ingest_task: pipeline complete for %s (%d segments)", meeting_id, count)
-    return {"meeting_id": meeting_id, "status": "complete", "segment_count": count}
+    # Stage 3: Dispatch process to GPU worker (not inline — GPU work belongs on GPU queue)
+    from app.services.task_dispatch import send_task
+    send_task("tasks.process_video", args=[meeting_id, media_id])
+    logger.info("full_ingest_task: dispatched process_video to GPU worker for %s", meeting_id)
+    return {"meeting_id": meeting_id, "status": "process_queued", "media_id": media_id}
 
 
 @huey_light.task()

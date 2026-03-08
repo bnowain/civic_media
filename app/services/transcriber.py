@@ -74,6 +74,7 @@ HIGH_NO_SPEECH_PROB       = 0.6    # no_speech_prob above this = likely silence
 HALLUCINATION_COMPRESSION_RATIO = 2.4
 HALLUCINATION_NO_SPEECH_PROB    = 0.9   # near-certain silence → drop
 MIN_SEGMENT_DURATION            = 0.1  # seconds; zero-duration = hallucination artifact
+MAX_CHARS_PER_SEC               = 25   # normal fast speech ~20 c/s; 25+ with 30+ chars = ghost
 
 
 def _get_model() -> "_WhisperModelType":
@@ -205,6 +206,17 @@ def transcribe(
             logger.warning(
                 "Filtered silence hallucination [%.1f-%.1f]: no_speech=%.3f | %r",
                 seg.start, seg.end, no_speech_prob, text[:80],
+            )
+            continue
+
+        # Ghost segment: long text crammed into impossibly short duration
+        # Normal fast speech maxes ~20 chars/sec; 25+ with 30+ chars is hallucination
+        chars_per_sec = len(text) / max(seg_duration, 0.01)
+        if len(text) >= 30 and chars_per_sec > MAX_CHARS_PER_SEC:
+            hallucination_count += 1
+            logger.warning(
+                "Filtered ghost segment [%.1f-%.1f]: %.0f chars/sec (%d chars in %.2fs) | %r",
+                seg.start, seg.end, chars_per_sec, len(text), seg_duration, text[:80],
             )
             continue
 

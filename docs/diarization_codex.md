@@ -61,10 +61,11 @@ Each stage is designed to preserve maximum information for the next stage and is
 
 - **`vad_filter=True`** with explicit parameters — Voice Activity Detection pre-filters silence before Whisper processes it. This prevents Whisper from hallucinating text during silent gaps (a common source of phantom segments). The parameters are pinned explicitly so the same audio always produces the same segment boundaries.
 
-- **Hallucination filtering** — Two filters remove garbage before it reaches diarization:
+- **Hallucination filtering** — Four filters remove garbage before it reaches diarization:
   - `compression_ratio > 2.4` → Whisper is looping on repeated phrases (zlib compression ratio measures text repetitiveness)
   - `no_speech_prob > 0.9` → Whisper is transcribing silence
   - `duration < 0.1s` → Zero-duration phantom segments (Whisper emitted text without advancing the audio position)
+  - `chars/sec > 25 with 30+ chars` → Ghost segments: full sentences crammed into impossibly short durations (normal fast speech ~20 c/s). Added 2026-03-08 after finding 5,020 ghosts in existing data.
 
 - **Vocab hints** — Domain-specific terms (names of board members, local agencies, places) are fed to Whisper via `initial_prompt`. This dramatically improves proper noun accuracy — "Supervisor Crye" instead of "supervisor cry" — which matters because the transcript text is what the human reviewer reads when deciding who is speaking.
 

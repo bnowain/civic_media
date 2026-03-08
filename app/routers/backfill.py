@@ -38,7 +38,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -432,7 +432,8 @@ def backfill_queue(
         if row.meeting_id not in media_by_meeting:
             media_by_meeting[row.meeting_id] = row
 
-    all_pending = (
+    # Process-pending: have media but no transcript segments
+    process_pending = (
         db.query(models.Meeting)
         .filter(
             models.Meeting.processed_at.is_(None),
@@ -443,6 +444,21 @@ def backfill_queue(
         .all()
     )
 
+    # Download-pending: have video_url but no media file at all
+    download_pending = (
+        db.query(models.Meeting)
+        .filter(
+            models.Meeting.video_url.isnot(None),
+            ~models.Meeting.meeting_id.in_(media_by_meeting.keys()),
+            ~models.Meeting.meeting_id.in_(meetings_with_segments_ids),
+        )
+        .order_by(models.Meeting.meeting_date)
+        .all()
+    )
+
+    all_pending = process_pending + download_pending
+    all_pending.sort(key=lambda m: m.meeting_date or "")
+
     total = len(all_pending)
     page_items = all_pending[offset: offset + limit]
 
@@ -450,6 +466,7 @@ def backfill_queue(
     for meeting in page_items:
         media = media_by_meeting.get(meeting.meeting_id)
         job = active_by_meeting.get(meeting.meeting_id)
+        needs_download = meeting.meeting_id not in media_by_meeting
 
         items.append({
             "meeting_id": meeting.meeting_id,
@@ -461,6 +478,7 @@ def backfill_queue(
             "file_type": media.file_type if media else None,
             "transcode_status": media.transcode_status if media else None,
             "file_exists": bool(media and Path(to_absolute(media.file_path)).exists()),
+            "needs_download": needs_download,
             "skipped": meeting.meeting_id in skipped,
             "active": meeting.meeting_id in active_by_meeting,
             "stage": job.stage_label if job else "",
@@ -503,6 +521,168 @@ def backfill_active(db: Session = Depends(get_db)):
             "group_name": meeting.group_name if meeting else "",
         }
     }
+
+
+# Stage → worker type mapping
+_LIGHT_STAGES = {"download", "transcode"}
+_GPU_STAGES = {"process"}
+
+
+def _worker_type_for_stage(stage: str) -> str:
+    """Return 'light' or 'gpu' based on the processing stage."""
+    return "light" if stage in _LIGHT_STAGES else "gpu"
+
+
+def _job_to_dict(job, meeting) -> dict:
+    """Convert a ProcessingJob + Meeting to a JSON-friendly dict."""
+    return {
+        "job_id": job.job_id,
+        "meeting_id": job.meeting_id,
+        "stage": job.stage,
+        "stage_label": job.stage_label or job.stage,
+        "status": job.status,
+        "pct": job.pct or 0,
+        "detail": job.detail or "",
+        "error_message": job.error_msg or "",
+        "worker_type": _worker_type_for_stage(job.stage),
+        "queued_at": job.queued_at.isoformat() if job.queued_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "meeting_date": meeting.meeting_date if meeting else None,
+        "title": meeting.title if meeting else job.meeting_id,
+        "group_name": meeting.group_name if meeting else "",
+    }
+
+
+@router.get("/workers")
+def backfill_workers(db: Session = Depends(get_db)):
+    """Return the active job for each worker type (GPU and light), plus their queues."""
+    from app import models
+
+    now = datetime.utcnow()
+
+    # Get all running jobs (non-stuck)
+    running = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status == "running")
+        .order_by(models.ProcessingJob.updated_at.desc())
+        .all()
+    )
+
+    gpu_active = None
+    light_active = None
+    for job in running:
+        timeout = _stage_timeout(db, job)
+        age = (now - job.updated_at).total_seconds() if job.updated_at else float("inf")
+        if age >= timeout:
+            continue
+        wt = _worker_type_for_stage(job.stage)
+        meeting = db.query(models.Meeting).filter_by(meeting_id=job.meeting_id).first()
+        job_dict = _job_to_dict(job, meeting)
+        if wt == "gpu" and gpu_active is None:
+            gpu_active = job_dict
+        elif wt == "light" and light_active is None:
+            light_active = job_dict
+
+    # Get all queued jobs
+    queued = (
+        db.query(models.ProcessingJob, models.Meeting)
+        .join(models.Meeting, models.ProcessingJob.meeting_id == models.Meeting.meeting_id)
+        .filter(models.ProcessingJob.status == "queued")
+        .order_by(models.ProcessingJob.queued_at.asc())
+        .all()
+    )
+
+    queued_items = [_job_to_dict(j, m) for j, m in queued]
+
+    return {
+        "gpu": {
+            "active": gpu_active,
+            "queued": [q for q in queued_items if q["worker_type"] == "gpu"],
+        },
+        "light": {
+            "active": light_active,
+            "queued": [q for q in queued_items if q["worker_type"] == "light"],
+        },
+    }
+
+
+@router.get("/queued")
+def backfill_queued(db: Session = Depends(get_db)):
+    """Return all queued processing jobs, ordered by queue time."""
+    from app import models
+
+    queued = (
+        db.query(models.ProcessingJob, models.Meeting)
+        .join(models.Meeting, models.ProcessingJob.meeting_id == models.Meeting.meeting_id)
+        .filter(models.ProcessingJob.status == "queued")
+        .order_by(models.ProcessingJob.queued_at.asc())
+        .all()
+    )
+
+    return {
+        "items": [_job_to_dict(j, m) for j, m in queued],
+        "total": len(queued),
+    }
+
+
+@router.delete("/queued/{job_id}")
+def backfill_cancel_queued(job_id: str, db: Session = Depends(get_db)):
+    """Cancel a queued processing job. Only works for status='queued'."""
+    from app import models
+
+    job = db.query(models.ProcessingJob).filter_by(job_id=job_id).first()
+    if not job:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Job not found")
+    if job.status != "queued":
+        from fastapi import HTTPException
+        raise HTTPException(400, f"Cannot cancel job with status '{job.status}' — only queued jobs can be cancelled")
+
+    meeting_id = job.meeting_id
+    db.delete(job)
+    db.commit()
+
+    # Also clear progress.json if it exists
+    try:
+        pf = MEDIA_DIR / meeting_id / "progress.json"
+        if pf.exists():
+            pf.unlink()
+    except Exception:
+        pass
+
+    logger.info("Cancelled queued job %s for meeting %s", job_id, meeting_id)
+    return {"cancelled": True, "job_id": job_id, "meeting_id": meeting_id}
+
+
+@router.post("/queued/{job_id}/prioritize")
+def backfill_prioritize(job_id: str, db: Session = Depends(get_db)):
+    """Move a queued job to the front of the queue by setting its queued_at to earliest."""
+    from app import models
+
+    job = db.query(models.ProcessingJob).filter_by(job_id=job_id).first()
+    if not job:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Job not found")
+    if job.status != "queued":
+        from fastapi import HTTPException
+        raise HTTPException(400, f"Cannot prioritize job with status '{job.status}'")
+
+    # Set queued_at to 1 second before the earliest queued job
+    earliest = (
+        db.query(func.min(models.ProcessingJob.queued_at))
+        .filter(models.ProcessingJob.status == "queued")
+        .scalar()
+    )
+    if earliest:
+        job.queued_at = earliest - timedelta(seconds=1)
+    else:
+        job.queued_at = datetime.utcnow()
+    db.commit()
+
+    meeting = db.query(models.Meeting).filter_by(meeting_id=job.meeting_id).first()
+    logger.info("Prioritized job %s for meeting %s", job_id, job.meeting_id)
+    return {"prioritized": True, "job_id": job_id, "title": meeting.title if meeting else job.meeting_id}
 
 
 # ── Per-meeting progress ──────────────────────────────────────────────────────
@@ -673,7 +853,7 @@ def _build_init_state(db: Session) -> dict:
     )
     stuck = _count_stuck(db)
 
-    # Active job: most recently updated running job that isn't stuck
+    # Active jobs: find one per worker type (GPU and light)
     now = datetime.utcnow()
     running_jobs = (
         db.query(models.ProcessingJob)
@@ -681,24 +861,40 @@ def _build_init_state(db: Session) -> dict:
         .order_by(models.ProcessingJob.updated_at.desc())
         .all()
     )
-    job = None
+    gpu_active = None
+    light_active = None
+    active = None  # legacy: first non-stuck job regardless of type
     for candidate in running_jobs:
         timeout = _stage_timeout(db, candidate)
         age = (now - candidate.updated_at).total_seconds() if candidate.updated_at else float("inf")
-        if age < timeout:
-            job = candidate
-            break
-    active = None
-    if job:
-        meeting = db.query(models.Meeting).filter_by(meeting_id=job.meeting_id).first()
-        active = {
-            "meeting_id": job.meeting_id,
-            "stage": job.stage_label or job.stage,
-            "pct": job.pct or 0,
-            "detail": job.detail or "",
-            "title": meeting.title if meeting else job.meeting_id,
+        if age >= timeout:
+            continue
+        meeting = db.query(models.Meeting).filter_by(meeting_id=candidate.meeting_id).first()
+        job_info = {
+            "meeting_id": candidate.meeting_id,
+            "stage": candidate.stage_label or candidate.stage,
+            "pct": candidate.pct or 0,
+            "detail": candidate.detail or "",
+            "title": meeting.title if meeting else candidate.meeting_id,
             "group_name": meeting.group_name if meeting else "",
+            "meeting_date": meeting.meeting_date if meeting else None,
         }
+        if active is None:
+            active = job_info  # legacy compat
+        wt = _worker_type_for_stage(candidate.stage)
+        if wt == "gpu" and gpu_active is None:
+            gpu_active = job_info
+        elif wt == "light" and light_active is None:
+            light_active = job_info
+
+    # Queued jobs count per worker
+    queued_jobs = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status == "queued")
+        .all()
+    )
+    gpu_queued = sum(1 for j in queued_jobs if _worker_type_for_stage(j.stage) == "gpu")
+    light_queued = sum(1 for j in queued_jobs if _worker_type_for_stage(j.stage) == "light")
 
     return {
         "status": {
@@ -708,6 +904,10 @@ def _build_init_state(db: Session) -> dict:
             "stuck": stuck,
         },
         "active": active,
+        "workers": {
+            "gpu": {"active": gpu_active, "queued_count": gpu_queued},
+            "light": {"active": light_active, "queued_count": light_queued},
+        },
     }
 
 
@@ -1145,13 +1345,14 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
     from fastapi import HTTPException
 
     # First try: already transcoded or no-transcode-needed media
+    # transcode_status can be NULL, empty string, or "transcoded" for ready media
     media = (
         db.query(models.MediaFile)
         .filter(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
-            models.MediaFile.transcode_status.in_(["transcoded", None]),
+            models.MediaFile.transcode_status.in_(["transcoded", None, ""]),
         )
         .first()
     )
@@ -1295,8 +1496,81 @@ def backfill_clear_errors(meeting_id: str, db: Session = Depends(get_db)):
     for job in deleted:
         db.delete(job)
     db.commit()
+
+    # Also clear progress.json so the UI stops showing the stale error
+    try:
+        pf = MEDIA_DIR / meeting_id / "progress.json"
+        if pf.exists():
+            pf.unlink()
+            logger.info("clear-errors: removed progress.json for %s", meeting_id)
+    except Exception:
+        pass
+
     logger.info("clear-errors: deleted %d job(s) for meeting %s", count, meeting_id)
     return {"meeting_id": meeting_id, "cleared": count}
+
+
+@router.get("/errors")
+def backfill_list_errors(db: Session = Depends(get_db)):
+    """List all meetings with error-status processing jobs, newest first."""
+    from app import models
+    jobs = (
+        db.query(models.ProcessingJob, models.Meeting)
+        .join(models.Meeting, models.ProcessingJob.meeting_id == models.Meeting.meeting_id)
+        .filter(models.ProcessingJob.status == "error")
+        .order_by(models.Meeting.meeting_date.desc())
+        .all()
+    )
+    items = []
+    for job, meeting in jobs:
+        items.append({
+            "meeting_id": meeting.meeting_id,
+            "meeting_date": meeting.meeting_date,
+            "title": meeting.title,
+            "group_name": meeting.group_name,
+            "stage": job.stage,
+            "error_message": job.error_msg or job.detail or "",
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "video_url": meeting.video_url,
+        })
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/clear-all-errors")
+def backfill_clear_all_errors(db: Session = Depends(get_db)):
+    """Clear error jobs for ALL meetings at once. Returns count cleared."""
+    from app import models
+    error_jobs = (
+        db.query(models.ProcessingJob)
+        .filter(models.ProcessingJob.status == "error")
+        .all()
+    )
+    meeting_ids = set()
+    for job in error_jobs:
+        meeting_ids.add(job.meeting_id)
+        db.delete(job)
+    db.commit()
+
+    # Clear progress.json files
+    cleared_progress = 0
+    for mid in meeting_ids:
+        try:
+            pf = MEDIA_DIR / mid / "progress.json"
+            if pf.exists():
+                pf.unlink()
+                cleared_progress += 1
+        except Exception:
+            pass
+
+    logger.info(
+        "clear-all-errors: deleted %d jobs across %d meetings, cleared %d progress files",
+        len(error_jobs), len(meeting_ids), cleared_progress,
+    )
+    return {
+        "cleared_jobs": len(error_jobs),
+        "meetings_affected": len(meeting_ids),
+        "progress_files_cleared": cleared_progress,
+    }
 
 
 # ── Self-healing background thread ────────────────────────────────────────────

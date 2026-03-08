@@ -220,50 +220,94 @@ def run_video_pipeline(db: Session, meeting_id: str, media_id: str) -> None:
         # Quick audio health check before committing to a full extraction.
         # Catches HLS-concatenated AAC profile mismatches early.
         audio_err = audio_extractor.probe_audio_errors(video_path)
-        if audio_err:
-            logger.warning("[%s] Audio pre-check: %s — will attempt source-URL fallback if local fails", meeting_id, audio_err)
 
-        try:
-            duration = audio_extractor.extract_audio(
-                video_path, audio_path, on_progress=_audio_progress,
+        # Resolve source URL once — used by both the pre-check skip and the fallback.
+        source_url = None
+        if meeting_obj:
+            source_url = meeting_obj.video_url
+        if not source_url:
+            _m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+            if _m:
+                source_url = _m.video_url
+
+        # If pre-check detected corrupt audio AND we have a source URL,
+        # skip the doomed local extraction entirely — go straight to URL fallback.
+        skip_local = False
+        if audio_err and source_url:
+            logger.warning(
+                "[%s] Audio pre-check failed: %s — skipping local extraction, "
+                "going straight to source URL fallback: %s",
+                meeting_id, audio_err, source_url,
             )
-        except RuntimeError as local_err:
-            # Local extraction failed. Try extracting from the source URL if available.
+            skip_local = True
+        elif audio_err:
+            logger.warning(
+                "[%s] Audio pre-check: %s — no source URL available, "
+                "will attempt local extraction anyway",
+                meeting_id, audio_err,
+            )
+
+        local_err = None
+        if not skip_local:
+            try:
+                duration = audio_extractor.extract_audio(
+                    video_path, audio_path, on_progress=_audio_progress,
+                )
+            except RuntimeError as exc:
+                local_err = exc
+
+        if skip_local or local_err is not None:
+            # Local extraction failed or was skipped. Try the source URL.
             # HLS sources re-initialise the AAC decoder per-segment, bypassing
             # the profile-mismatch issue that breaks the remuxed local MP4.
-            source_url = None
-            if meeting_obj:
-                source_url = meeting_obj.video_url
             if not source_url:
-                # Re-query in case meeting_obj wasn't loaded yet
-                _m = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
-                if _m:
-                    source_url = _m.video_url
+                raise RuntimeError(
+                    f"Local audio extraction failed and no source URL available: {local_err}"
+                ) from local_err
 
-            if source_url:
-                logger.info(
-                    "[%s] Local extraction failed (%s). Retrying from source URL: %s",
-                    meeting_id, local_err, source_url,
-                )
-                update_progress(db, meeting_id, "Extracting audio (source fallback)", 2)
-                # Use yt-dlp to resolve the page URL to a direct stream URL,
-                # then pass that to ffmpeg which handles HLS segments correctly.
-                import subprocess as _sp
+            err_desc = audio_err if skip_local else str(local_err)
+            logger.info(
+                "[%s] Using source URL fallback (%s): %s",
+                meeting_id, err_desc, source_url,
+            )
+            update_progress(db, meeting_id, "Extracting audio (source fallback)", 2)
+
+            # Resolution chain: yt-dlp → Playwright m3u8 → direct URL
+            stream_url = None
+
+            # 1. Try yt-dlp to resolve page URL to a direct stream URL
+            import subprocess as _sp
+            try:
                 resolve = _sp.run(
                     ["python", "-m", "yt_dlp", "--get-url", "-f", "bestaudio", source_url],
                     stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=30,
                 )
                 if resolve.returncode == 0 and resolve.stdout.strip():
                     stream_url = resolve.stdout.strip().decode("utf-8", errors="replace")
-                    logger.info("[%s] Resolved stream URL: %s", meeting_id, stream_url[:80])
-                    duration = audio_extractor.extract_audio_from_url(stream_url, audio_path)
+                    logger.info("[%s] yt-dlp resolved stream URL: %s", meeting_id, stream_url[:80])
+            except Exception as e:
+                logger.debug("[%s] yt-dlp resolution failed: %s", meeting_id, e)
+
+            # 2. Try Playwright m3u8 extraction for Swagit pages
+            if not stream_url and "swagit.com" in source_url:
+                logger.info("[%s] Trying Playwright m3u8 extraction for Swagit URL", meeting_id)
+                from app.services.primegov.downloader import extract_m3u8_url
+                m3u8_url = extract_m3u8_url(source_url)
+                if m3u8_url:
+                    stream_url = m3u8_url
+                    logger.info("[%s] Playwright resolved m3u8: %s", meeting_id, stream_url[:80])
+
+            # 3. Direct URL if it looks like a streamable format
+            if not stream_url:
+                if source_url.endswith(".m3u8") or "/playlist" in source_url:
+                    stream_url = source_url
                 else:
-                    # yt-dlp couldn't resolve — try the URL directly (works for m3u8)
-                    duration = audio_extractor.extract_audio_from_url(source_url, audio_path)
-            else:
-                raise RuntimeError(
-                    f"Local audio extraction failed and no source URL available: {local_err}"
-                ) from local_err
+                    raise RuntimeError(
+                        f"Audio extraction failed and could not resolve source URL "
+                        f"to a stream: {source_url} (error: {err_desc})"
+                    ) from local_err
+
+            duration = audio_extractor.extract_audio_from_url(stream_url, audio_path)
 
         media.duration = duration
         audio_record = models.MediaFile(

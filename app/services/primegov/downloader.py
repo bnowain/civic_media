@@ -52,6 +52,15 @@ def _within_grace_period(meeting_date, grace_days: int = _NOT_AVAILABLE_GRACE_DA
         return False
 
 
+def _cleanup_temp(*paths: Path) -> None:
+    """Silently delete temp files."""
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _write_progress(meeting_id: str, stage: str, pct: int = 0, detail: str = "", error: bool = False) -> None:
     """Write download progress — delegates to centralized helper (DB + file + pub/sub)."""
     from app.services.progress import update_progress, fail_job
@@ -214,10 +223,20 @@ def download_video(db: Session, meeting_id: str) -> dict:
     # most players but causes ffmpeg's audio decoder to fail mid-extraction,
     # producing a truncated WAV and a pipeline crash on the process step.
     #
-    # Uses -progress pipe:1 so we get periodic ticks for stuck detection.
+    # Uses -progress <file> so we get periodic ticks for stuck detection.
+    # Pipe-based progress (-progress pipe:1) doesn't work reliably on Windows
+    # because Python's pipe buffering delays output on slow HLS downloads,
+    # causing false "stall" kills. File-based polling is immune to this.
+    import time as _time
+    import tempfile
+
+    _DOWNLOAD_TIMEOUT = 3600      # 1 hour total
+    _STALL_TIMEOUT = 300          # 5 min with no progress tick → kill
+
+    progress_file = Path(tempfile.mktemp(suffix=".txt", prefix="ffprog_"))
     cmd = [
         "ffmpeg", "-y",
-        "-progress", "pipe:1", "-nostats",
+        "-progress", str(progress_file), "-nostats",
         "-i", m3u8_url,
         "-c:v", "copy",         # Video: stream copy (no re-encode, fast)
         "-c:a", "aac",          # Audio: re-encode to clean AAC-LC
@@ -225,30 +244,26 @@ def download_video(db: Session, meeting_id: str) -> dict:
         str(output_path),
     ]
 
-    import time as _time
-    _DOWNLOAD_TIMEOUT = 3600      # 1 hour total
-    _STALL_TIMEOUT = 300          # 5 min with no progress tick → kill
-
     try:
+        # stderr must NOT be PIPE — ffmpeg writes copious HLS segment info to stderr
+        # and if the pipe buffer fills (64KB on Windows), ffmpeg blocks completely,
+        # causing a deadlock where no progress is written and the download "stalls".
+        # Redirect stderr to a file so we can read it on failure without blocking.
+        stderr_file = Path(tempfile.mktemp(suffix=".txt", prefix="ffstderr_"))
+        stderr_fh = open(stderr_file, "w", encoding="utf-8", errors="replace")
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.DEVNULL, stderr=stderr_fh,
         )
 
-        # Read ffmpeg progress lines and emit ticks so the self-healer
-        # knows we're still alive.  HLS downloads don't have a known
-        # duration, so we just keep the progress at 20-80% range.
-        #
-        # Use select/polling to avoid blocking forever if ffmpeg stalls.
-        import selectors
-        sel = selectors.DefaultSelector()
-        sel.register(proc.stdout, selectors.EVENT_READ)
-
+        # Poll the progress file for out_time_us lines.
+        # ffmpeg appends to this file periodically — we read new content each loop.
         last_tick = 0
         last_tick_time = _time.monotonic()
         start_time = last_tick_time
         timed_out = False
+        file_pos = 0
 
-        while True:
+        while proc.poll() is None:
             # Check overall timeout
             elapsed_total = _time.monotonic() - start_time
             if elapsed_total > _DOWNLOAD_TIMEOUT:
@@ -260,32 +275,35 @@ def download_video(db: Session, meeting_id: str) -> dict:
                 timed_out = True
                 break
 
-            events = sel.select(timeout=10)  # poll every 10s
-            if not events:
-                # No data ready — check if process exited
-                if proc.poll() is not None:
-                    break
+            _time.sleep(5)  # poll every 5s
+
+            # Read new lines from progress file
+            try:
+                with open(progress_file, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(file_pos)
+                    new_data = f.read()
+                    file_pos = f.tell()
+            except FileNotFoundError:
                 continue
 
-            line = proc.stdout.readline()
-            if not line:
-                break  # EOF — ffmpeg finished
+            for line in new_data.splitlines():
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    val = line.split("=", 1)[1].strip()
+                    if val.isdigit() and int(val) > 0:
+                        last_tick_time = _time.monotonic()
+                        elapsed_sec = int(val) / 1_000_000
+                        tick_pct = min(80, 20 + int(elapsed_sec / 60))
+                        if tick_pct > last_tick:
+                            last_tick = tick_pct
+                            _write_progress(
+                                meeting_id, "Downloading video...", tick_pct,
+                                f"Downloading... {int(elapsed_sec)}s elapsed",
+                            )
 
-            decoded = line.decode("utf-8", errors="ignore").strip()
-            if decoded.startswith("out_time_us="):
-                val = decoded.split("=", 1)[1].strip()
-                if val.isdigit() and int(val) > 0:
-                    last_tick_time = _time.monotonic()
-                    elapsed_sec = int(val) / 1_000_000
-                    tick_pct = min(80, 20 + int(elapsed_sec / 60))
-                    if tick_pct > last_tick:
-                        last_tick = tick_pct
-                        _write_progress(
-                            meeting_id, "Downloading video...", tick_pct,
-                            f"Downloading... {int(elapsed_sec)}s elapsed",
-                        )
-
-        sel.close()
+        # Clean up progress file and close stderr handle
+        _cleanup_temp(progress_file)
+        stderr_fh.close()
 
         if timed_out:
             try:
@@ -295,6 +313,7 @@ def download_video(db: Session, meeting_id: str) -> dict:
                 pass
             detail = "Download stalled (no progress)" if (_time.monotonic() - last_tick_time > _STALL_TIMEOUT) else "Download timed out (1hr limit)"
             _write_progress(meeting_id, "Error", 0, detail, error=True)
+            _cleanup_temp(stderr_file)
             return {"error": detail, "status": "error"}
 
         proc.wait(timeout=60)
@@ -302,9 +321,10 @@ def download_video(db: Session, meeting_id: str) -> dict:
         if proc.returncode != 0:
             stderr_tail = ""
             try:
-                stderr_tail = proc.stderr.read().decode("utf-8", errors="ignore")[-500:]
+                stderr_tail = stderr_file.read_text(encoding="utf-8", errors="ignore")[-500:]
             except Exception:
                 pass
+            _cleanup_temp(stderr_file)
             logger.error("ffmpeg failed: %s", stderr_tail)
             if _within_grace_period(meeting.meeting_date):
                 _write_progress(meeting_id, "Not available yet", 0,
@@ -312,18 +332,40 @@ def download_video(db: Session, meeting_id: str) -> dict:
                 return {"error": "ffmpeg failed (within grace period)", "status": "not_available_yet"}
             _write_progress(meeting_id, "Error", 0, "ffmpeg download failed", error=True)
             return {"error": "ffmpeg failed", "status": "error"}
+        _cleanup_temp(stderr_file)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
             proc.wait(timeout=10)
         except Exception:
             pass
+        try:
+            stderr_fh.close()
+        except Exception:
+            pass
+        _cleanup_temp(stderr_file)
         _write_progress(meeting_id, "Error", 0, "Download timed out", error=True)
         return {"error": "Download timed out", "status": "error"}
 
     if not output_path.exists() or output_path.stat().st_size < 1000:
         _write_progress(meeting_id, "Error", 0, "Downloaded file too small or missing", error=True)
         return {"error": "Downloaded file invalid", "status": "error"}
+
+    # Validate file integrity with ffprobe
+    _write_progress(meeting_id, "Validating download...", 85, "Running ffprobe integrity check")
+    valid, detail = validate_media_file(str(output_path))
+    if not valid:
+        logger.error("[%s] Downloaded file failed validation: %s", meeting_id, detail)
+        _write_progress(meeting_id, "Error", 0, f"Corrupt download: {detail}", error=True)
+        # Delete the corrupt file
+        try:
+            output_path.unlink()
+            logger.info("[%s] Deleted corrupt download: %s", meeting_id, output_path.name)
+        except Exception:
+            pass
+        return {"error": f"File corrupt: {detail}", "status": "error"}
+
+    logger.info("[%s] Download validated: %s", meeting_id, detail)
 
     # Get duration
     duration = _get_duration(str(output_path))
@@ -476,3 +518,47 @@ def _get_duration(file_path: str) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+def validate_media_file(file_path: str) -> tuple[bool, str]:
+    """Validate a media file using ffprobe. Returns (ok, detail).
+
+    Checks:
+      1. ffprobe can read the container (not corrupt/truncated)
+      2. At least one audio or video stream exists
+      3. Duration is > 10 seconds (not a stub)
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration,nb_streams:stream=codec_type",
+                "-of", "json",
+                file_path,
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()[-300:] if result.stderr else "unknown error"
+            return False, f"ffprobe failed: {stderr}"
+
+        import json as _json
+        info = _json.loads(result.stdout)
+
+        # Check streams
+        streams = info.get("streams", [])
+        codec_types = {s.get("codec_type") for s in streams}
+        if not codec_types & {"audio", "video"}:
+            return False, f"No audio/video streams found (got {len(streams)} streams)"
+
+        # Check duration
+        duration = info.get("format", {}).get("duration")
+        if duration:
+            dur_sec = float(duration)
+            if dur_sec < 10:
+                return False, f"Duration too short ({dur_sec:.1f}s) — likely corrupt"
+
+        return True, f"{len(streams)} streams, {float(duration or 0):.0f}s"
+
+    except Exception as exc:
+        return False, f"Validation error: {exc}"
