@@ -196,29 +196,31 @@ def unconfirm_assignment(
         raise HTTPException(404, "Segment not found")
 
     assign = segment.assignment
-    if not assign or not assign.verified:
-        raise HTTPException(400, "Segment is not confirmed — nothing to unconfirm.")
+    if not assign or (not assign.verified and not assign.tagged):
+        raise HTTPException(400, "Segment is not confirmed or tagged — nothing to undo.")
 
     old_person_id = assign.predicted_person_id
 
-    # ── Delete voiceprints created from this segment ───────────────────────
-    deleted_count = db.query(models.Voiceprint).filter_by(
-        source_segment_id=segment_id,
-        person_id=old_person_id,
-    ).delete(synchronize_session="fetch")
-
-    # Byte-equality fallback for pre-migration voiceprints
-    if deleted_count == 0 and segment.embedding:
-        old_vp = db.query(models.Voiceprint).filter_by(
+    # ── Delete voiceprints created from this segment (only if was verified) ──
+    deleted_count = 0
+    if assign.verified and old_person_id:
+        deleted_count = db.query(models.Voiceprint).filter_by(
+            source_segment_id=segment_id,
             person_id=old_person_id,
-            embedding=segment.embedding,
-        ).first()
-        if old_vp:
-            db.delete(old_vp)
-            deleted_count = 1
+        ).delete(synchronize_session="fetch")
+
+        # Byte-equality fallback for pre-migration voiceprints
+        if deleted_count == 0 and segment.embedding:
+            old_vp = db.query(models.Voiceprint).filter_by(
+                person_id=old_person_id,
+                embedding=segment.embedding,
+            ).first()
+            if old_vp:
+                db.delete(old_vp)
+                deleted_count = 1
 
     logger.info(
-        "Unconfirm: deleted %d voiceprint(s) from person %s for segment %s",
+        "Undo assignment: deleted %d voiceprint(s) from person %s for segment %s",
         deleted_count, old_person_id, segment_id,
     )
 

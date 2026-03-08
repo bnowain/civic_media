@@ -38,6 +38,226 @@ const MAX_OVERLAP_FOR_VOICEPRINT = 0.15; // matches server-side config
 const video          = () => document.getElementById("video-player");
 const transcriptList = () => document.getElementById("transcript-list");
 
+// ── Virtual Scroller ─────────────────────────────────────────────────────────
+// Only renders ~60-80 cards visible on screen + overscan buffer.
+// Eliminates DOM bloat on meetings with thousands of segments.
+
+const VS = {
+  container: null,
+  spacerTop: null,
+  spacerBottom: null,
+  rows: [],              // flattened virtual rows: { type, seg, idx, grouped, speakerName, speakerId }
+  rowHeights: [],        // estimated or measured height per row
+  rowOffsets: [],         // cumulative Y offset (prefix sum)
+  totalHeight: 0,
+  renderStart: 0,
+  renderEnd: 0,
+  renderedEls: new Map(), // rowIndex → DOM element
+  segIdxToRow: new Map(), // segment array index → virtual row index
+  _raf: null,
+  _tagCache: new Map(),   // segmentId → tag assignments (avoids re-fetch on scroll)
+
+  CARD_H: 94,            // estimated ungrouped card height
+  GROUPED_H: 86,         // estimated grouped card height
+  HEADER_H: 28,          // group header height
+  OVERSCAN: 200,         // ~5 min of segments above/below viewport
+
+  init() {
+    this.container = transcriptList();
+    if (!this.container) return;
+
+    this.spacerTop = document.createElement("div");
+    this.spacerTop.className = "vs-spacer";
+    this.spacerBottom = document.createElement("div");
+    this.spacerBottom.className = "vs-spacer";
+
+    this.container.addEventListener("scroll", this._onScroll.bind(this), { passive: true });
+  },
+
+  setRows(rows) {
+    const savedScroll = this.container ? this.container.scrollTop : 0;
+    this.rows = rows;
+    this.renderedEls.clear();
+    this.segIdxToRow.clear();
+
+    // Build height estimates and segment index map
+    this.rowHeights = new Array(rows.length);
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      this.rowHeights[i] = r.type === "header" ? this.HEADER_H
+                         : r.grouped ? this.GROUPED_H : this.CARD_H;
+      if (r.type === "segment") {
+        this.segIdxToRow.set(r.idx, i);
+      }
+    }
+
+    this._recomputeOffsets(0);
+    this.renderStart = 0;
+    this.renderEnd = 0;
+
+    // Clear and set up DOM
+    this.container.innerHTML = "";
+    this.container.appendChild(this.spacerTop);
+    this.container.appendChild(this.spacerBottom);
+
+    // Restore scroll position (or 0 for fresh load)
+    this.container.scrollTop = savedScroll;
+    this._renderVisible();
+  },
+
+  _recomputeOffsets(fromIdx) {
+    this.rowOffsets = new Array(this.rows.length + 1);
+    if (fromIdx === 0) this.rowOffsets[0] = 0;
+    for (let i = fromIdx; i < this.rows.length; i++) {
+      this.rowOffsets[i + 1] = (this.rowOffsets[i] || 0) + this.rowHeights[i];
+    }
+    this.totalHeight = this.rowOffsets[this.rows.length] || 0;
+  },
+
+  _onScroll() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = null;
+      this._renderVisible();
+    });
+  },
+
+  _renderVisible() {
+    if (!this.container || this.rows.length === 0) return;
+
+    const scrollTop = this.container.scrollTop;
+    const viewH = this.container.clientHeight;
+
+    // Binary search for first visible row
+    let lo = 0, hi = this.rows.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.rowOffsets[mid + 1] <= scrollTop) lo = mid + 1;
+      else hi = mid;
+    }
+    const firstVisible = lo;
+
+    // Find last visible row
+    let lastVisible = firstVisible;
+    while (lastVisible < this.rows.length - 1 &&
+           this.rowOffsets[lastVisible] < scrollTop + viewH) {
+      lastVisible++;
+    }
+
+    const newStart = Math.max(0, firstVisible - this.OVERSCAN);
+    const newEnd = Math.min(this.rows.length, lastVisible + this.OVERSCAN + 1);
+
+    // Skip if range hasn't changed
+    if (newStart === this.renderStart && newEnd === this.renderEnd) return;
+
+    // Remove elements that fell out of range
+    for (let i = this.renderStart; i < this.renderEnd; i++) {
+      if (i < newStart || i >= newEnd) {
+        const el = this.renderedEls.get(i);
+        if (el) {
+          el.remove();
+          this.renderedEls.delete(i);
+        }
+      }
+    }
+
+    // Add new elements
+    const frag = document.createDocumentFragment();
+    const insertBefore = this.spacerBottom;
+
+    for (let i = newStart; i < newEnd; i++) {
+      if (this.renderedEls.has(i)) continue;
+      const el = this._buildRow(i);
+      if (!el) continue;
+      this.renderedEls.set(i, el);
+      frag.appendChild(el);
+    }
+
+    // Insert all new elements at once before bottom spacer
+    this.container.insertBefore(frag, insertBefore);
+
+    // Reorder DOM to match row order (elements may be out of order)
+    // Only needed when scrolling up (new elements prepended)
+    if (newStart < this.renderStart) {
+      for (let i = newStart; i < newEnd; i++) {
+        const el = this.renderedEls.get(i);
+        if (el) this.container.insertBefore(el, insertBefore);
+      }
+    }
+
+    this.renderStart = newStart;
+    this.renderEnd = newEnd;
+
+    // Update spacers
+    this.spacerTop.style.height = this.rowOffsets[newStart] + "px";
+    this.spacerBottom.style.height =
+      Math.max(0, this.totalHeight - (this.rowOffsets[newEnd] || this.totalHeight)) + "px";
+
+    // Measure actual heights and correct if needed (deferred to next frame)
+    requestAnimationFrame(() => this._measureAndCorrect(newStart, newEnd));
+  },
+
+  _measureAndCorrect(start, end) {
+    let changed = false;
+    for (let i = start; i < end; i++) {
+      const el = this.renderedEls.get(i);
+      if (!el) continue;
+      const actual = el.offsetHeight + 4; // +4 for margin-bottom
+      if (Math.abs(actual - this.rowHeights[i]) > 2) {
+        this.rowHeights[i] = actual;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._recomputeOffsets(0);
+      this.spacerTop.style.height = this.rowOffsets[this.renderStart] + "px";
+      this.spacerBottom.style.height =
+        Math.max(0, this.totalHeight - (this.rowOffsets[this.renderEnd] || this.totalHeight)) + "px";
+    }
+  },
+
+  _buildRow(i) {
+    const row = this.rows[i];
+    if (row.type === "header") {
+      const el = document.createElement("div");
+      el.className = "segment-group-header";
+      el.textContent = row.speakerName;
+      return el;
+    }
+    // segment row
+    return buildSegmentCard(row.seg, row.idx, row.grouped);
+  },
+
+  scrollToSegmentIdx(segIdx) {
+    const rowIdx = this.segIdxToRow.get(segIdx);
+    if (rowIdx == null) return;
+    const y = this.rowOffsets[rowIdx] || 0;
+    const viewH = this.container.clientHeight;
+    this.container.scrollTop = Math.max(0, y - viewH / 3);
+    // Force immediate render so the card exists
+    this._renderVisible();
+  },
+
+  getCardBySegmentIdx(segIdx) {
+    const rowIdx = this.segIdxToRow.get(segIdx);
+    if (rowIdx == null) return null;
+    return this.renderedEls.get(rowIdx) || null;
+  },
+
+  getCardBySegmentId(segId) {
+    return this.container?.querySelector(`[data-segment-id="${segId}"]`) || null;
+  },
+
+  destroy() {
+    this.rows = [];
+    this.renderedEls.clear();
+    this.segIdxToRow.clear();
+    this.renderStart = 0;
+    this.renderEnd = 0;
+    if (this.container) this.container.innerHTML = "";
+  },
+};
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -48,6 +268,7 @@ async function init() {
 
   await Promise.all([loadMeeting(), loadPeople()]);
   await _ensureIgnorePerson();
+  VS.init();
   await loadDocuments();
   await loadSegments();
   _buildPersonFrequency();
@@ -264,6 +485,7 @@ function renderTranscript() {
   const list = transcriptList();
 
   if (segments.length === 0) {
+    VS.destroy();
     list.innerHTML = `
       <div class="empty-state" id="transcript-empty">
         <span class="empty-icon">⬡</span>
@@ -273,37 +495,26 @@ function renderTranscript() {
     return;
   }
 
-  const scrollTop = list.scrollTop;
-  list.innerHTML = "";
-
+  // Build flattened virtual rows from speaker groups
   const groups = groupConsecutiveSpeakers(segments);
+  const rows = [];
 
   groups.forEach(group => {
     if (group.speakerId && group.segments.length > 1) {
-      // Grouped: shared header + contained segments
-      const wrapper = document.createElement("div");
-      wrapper.className = "segment-group";
-
-      const header = document.createElement("div");
-      header.className = "segment-group-header";
-      header.textContent = group.speakerName;
-      wrapper.appendChild(header);
-
+      rows.push({ type: "header", speakerName: group.speakerName, speakerId: group.speakerId });
       group.segments.forEach(seg => {
         const idx = segments.indexOf(seg);
-        wrapper.appendChild(buildSegmentCard(seg, idx, true));
+        rows.push({ type: "segment", seg, idx, grouped: true });
       });
-      list.appendChild(wrapper);
     } else {
-      // Ungrouped (no speaker or single segment): render individually
       group.segments.forEach(seg => {
         const idx = segments.indexOf(seg);
-        list.appendChild(buildSegmentCard(seg, idx, false));
+        rows.push({ type: "segment", seg, idx, grouped: false });
       });
     }
   });
 
-  list.scrollTop = scrollTop;
+  VS.setRows(rows);
   activeIndex = -1;
   syncActiveCard(video()?.currentTime ?? 0, false);
 }
@@ -392,6 +603,9 @@ function buildSegmentCard(seg, idx, grouped = false) {
               data-seg="${seg.segment_id}">
         ${verified ? "✓" : "Confirm"}
       </button>
+      <button class="seg-undo-btn" data-seg="${seg.segment_id}"
+              style="display:${verified || tagged ? "" : "none"}"
+              title="Remove assignment and voiceprints">✕</button>
       <button class="seg-new-btn" data-seg="${seg.segment_id}">+ New</button>
     </div>
     <div class="tag-pills" id="seg-tags-${seg.segment_id}"></div>
@@ -406,12 +620,23 @@ function buildSegmentCard(seg, idx, grouped = false) {
   // Load tags for this segment
   loadSegmentTags(seg.segment_id);
 
-  // Seek on card body click
+  // Seek on card body click (delayed to allow double-click on text)
+  const textEl = card.querySelector(".seg-text");
+  let _clickTimer = null;
   card.addEventListener("click", e => {
     if (e.target.closest(".seg-controls")) return;
     if (e.target.closest(".seg-quick-row")) return;
     if (e.target.closest(".seg-edit-controls")) return;
-    if (e.target.classList.contains("seg-text") && e.detail >= 2) return; // let dblclick handle
+    // If clicking on text area, delay seek to allow double-click
+    if (e.target.closest(".seg-text")) {
+      if (e.detail >= 2) return; // double-click — let dblclick handler fire
+      clearTimeout(_clickTimer);
+      _clickTimer = setTimeout(() => {
+        const v = video();
+        if (v) { v.currentTime = seg.start_time; v.play().catch(() => {}); }
+      }, 250);
+      return;
+    }
     const v = video();
     if (v) {
       v.currentTime = seg.start_time;
@@ -420,9 +645,9 @@ function buildSegmentCard(seg, idx, grouped = false) {
   });
 
   // Double-click text to edit
-  const textEl = card.querySelector(".seg-text");
   textEl.addEventListener("dblclick", e => {
     e.stopPropagation();
+    clearTimeout(_clickTimer); // cancel the pending seek
     startTextEdit(card, seg, textEl);
   });
 
@@ -444,6 +669,7 @@ function buildSegmentCard(seg, idx, grouped = false) {
   });
 
   // Confirm button (auto-falls back to Tag for short/overlapping segments)
+  // Also handles re-confirm: if already verified, user can change the input and click again
   card.querySelector(".seg-confirm-btn").addEventListener("click", async () => {
     const pid = _getAssignedPersonId(card);
     if (!pid) { alert("Select a speaker first."); return; }
@@ -454,6 +680,11 @@ function buildSegmentCard(seg, idx, grouped = false) {
     } else {
       await handleConfirm(seg.segment_id, pid, card);
     }
+  });
+
+  // Undo button — unconfirm/untag assignment
+  card.querySelector(".seg-undo-btn").addEventListener("click", async () => {
+    await handleUndo(seg.segment_id, card);
   });
 
   // New person button
@@ -576,8 +807,15 @@ function _setupAssignAutocomplete(cardEl) {
     }
   }
 
-  // On focus — show all candidates (unfiltered), select text so typing replaces it
+  // On focus — pause video so short segments don't advance, show all candidates
   input.addEventListener("focus", () => {
+    const v = video();
+    if (v && !v.paused) {
+      input._wasPlaying = true;
+      v.pause();
+    } else {
+      input._wasPlaying = false;
+    }
     input.select();
     renderDropdown("");
   });
@@ -615,7 +853,7 @@ function _setupAssignAutocomplete(cardEl) {
     }
   });
 
-  // On blur — close dropdown, restore value if no valid selection
+  // On blur — close dropdown, restore value if no valid selection, resume video
   input.addEventListener("blur", () => {
     // Small delay to allow mousedown on dropdown items
     setTimeout(() => {
@@ -623,6 +861,12 @@ function _setupAssignAutocomplete(cardEl) {
       // If personId is cleared (user typed but didn't select), restore or clear
       if (!input.dataset.personId) {
         input.value = "";
+      }
+      // Resume video if it was playing before focus
+      if (input._wasPlaying) {
+        input._wasPlaying = false;
+        const v = video();
+        if (v) v.play().catch(() => {});
       }
     }, 150);
   });
@@ -732,18 +976,67 @@ async function handleQuickAssign(segmentId, personId, cardEl) {
   _refreshAllQuickButtons();
 }
 
+// Debounced refresh: batches rapid-fire calls into a single idle-time update.
+// Nearby cards (within ±20 of the active card) update immediately;
+// the rest update in chunks during idle frames.
+let _refreshTimer = null;
 function _refreshAllQuickButtons() {
-  const cards = transcriptList().querySelectorAll(".segment-card");
-  for (const card of cards) {
-    const segId = card.dataset.segmentId;
-    if (segId) _renderQuickButtons(segId, card);
-  }
+  if (_refreshTimer) return; // already scheduled
+  _refreshTimer = requestAnimationFrame(() => {
+    _refreshTimer = null;
+    const cards = Array.from(transcriptList().querySelectorAll(".segment-card"));
+    if (cards.length === 0) return;
+
+    // Find the card nearest to the user's position for immediate update
+    const activeCard = transcriptList().querySelector(".is-active");
+    let activeDomIdx = activeCard ? cards.indexOf(activeCard) : 0;
+    if (activeDomIdx < 0) activeDomIdx = 0;
+
+    // Immediate: update ±20 cards around active position
+    const NEARBY = 20;
+    const nearStart = Math.max(0, activeDomIdx - NEARBY);
+    const nearEnd = Math.min(cards.length, activeDomIdx + NEARBY + 1);
+    for (let i = nearStart; i < nearEnd; i++) {
+      const segId = cards[i].dataset.segmentId;
+      if (segId) _renderQuickButtons(segId, cards[i]);
+    }
+
+    // Deferred: update the rest in chunks during idle time
+    const remaining = [];
+    for (let i = 0; i < nearStart; i++) remaining.push(cards[i]);
+    for (let i = nearEnd; i < cards.length; i++) remaining.push(cards[i]);
+
+    if (remaining.length > 0) {
+      let offset = 0;
+      const CHUNK = 30;
+      function processChunk() {
+        const end = Math.min(offset + CHUNK, remaining.length);
+        for (let i = offset; i < end; i++) {
+          const segId = remaining[i].dataset.segmentId;
+          if (segId) _renderQuickButtons(segId, remaining[i]);
+        }
+        offset = end;
+        if (offset < remaining.length) {
+          requestAnimationFrame(processChunk);
+        }
+      }
+      requestAnimationFrame(processChunk);
+    }
+  });
 }
 
 // ── Inline text editing ───────────────────────────────────────────────────────
 
 function startTextEdit(card, seg, textEl) {
   if (textEl.getAttribute("contenteditable") === "true") return;
+  // Pause video while editing text
+  const v = video();
+  if (v && !v.paused) {
+    textEl._wasPlaying = true;
+    v.pause();
+  } else {
+    textEl._wasPlaying = false;
+  }
   textEl.setAttribute("contenteditable", "true");
   textEl.classList.add("editing");
   textEl.focus();
@@ -809,102 +1102,219 @@ function finishTextEdit(card, textEl) {
   }
   const editControls = card.querySelector(".seg-edit-controls");
   editControls.classList.remove("visible");
+  // Resume video if it was playing before edit
+  if (textEl._wasPlaying) {
+    textEl._wasPlaying = false;
+    const v = video();
+    if (v) v.play().catch(() => {});
+  }
 }
 
 // ── Confirm handler ───────────────────────────────────────────────────────────
 
 async function handleConfirm(segmentId, personId, cardEl) {
   const btn = cardEl?.querySelector(".seg-confirm-btn");
-  if (btn) { btn.textContent = "…"; btn.disabled = true; }
 
-  try {
-    await confirmAssignment(segmentId, personId);
+  // ── Optimistic UI update (instant, before API call) ──────────────────
+  _confirmedThisSession.add(segmentId);
 
-    // Track as confirmed so polling won't overwrite this card
-    _confirmedThisSession.add(segmentId);
-
-    // Update the card in-place immediately
-    const person = people.find(p => p.person_id === personId);
-    if (cardEl && person) {
-      cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-verified");
-      const badge = cardEl.querySelector(".seg-badge");
-      if (badge) {
-        badge.className = "seg-badge badge-verified";
-        badge.textContent = "✓ verified";
-      }
-      const nameEl = cardEl.querySelector(".seg-speaker-name");
-      if (nameEl) nameEl.textContent = person.canonical_name;
-      if (btn) {
-        btn.textContent = "✓";
-        btn.classList.add("confirmed");
-        btn.disabled = false;
-      }
+  const person = people.find(p => p.person_id === personId);
+  if (cardEl && person) {
+    cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-verified");
+    const badge = cardEl.querySelector(".seg-badge");
+    if (badge) {
+      badge.className = "seg-badge badge-verified";
+      badge.textContent = "✓ verified";
     }
-
-    // Update local segment state
-    const localSeg = segments.find(s => s.segment_id === segmentId);
-    if (localSeg) {
-      if (!localSeg.assignment) localSeg.assignment = {};
-      localSeg.assignment.verified = true;
-      localSeg.assignment.predicted_person_id = personId;
+    const nameEl = cardEl.querySelector(".seg-speaker-name");
+    if (nameEl) nameEl.textContent = person.canonical_name;
+    if (btn) {
+      btn.textContent = "✓";
+      btn.classList.add("confirmed");
     }
-
-    updateStats();
-
-    // Background task is now running — show indicator and poll for updates
-    // to OTHER unverified segments, but never overwrite confirmed ones
-    showReprocessIndicator();
-
-  } catch (err) {
-    alert(`Failed to confirm: ${err.message}`);
-    if (btn) { btn.textContent = "Confirm"; btn.disabled = false; }
+    const undoBtn = cardEl.querySelector(".seg-undo-btn");
+    if (undoBtn) undoBtn.style.display = "";
   }
+
+  const localSeg = segments.find(s => s.segment_id === segmentId);
+  if (localSeg) {
+    if (!localSeg.assignment) localSeg.assignment = {};
+    localSeg.assignment.verified = true;
+    localSeg.assignment.predicted_person_id = personId;
+  }
+
+  _personFrequency.set(personId, (_personFrequency.get(personId) || 0) + 1);
+  _refreshAllQuickButtons();
+  updateStats();
+
+  // ── Fire API in background (don't block UI) ──────────────────────────
+  confirmAssignment(segmentId, personId)
+    .then(() => {
+      showReprocessIndicator();
+    })
+    .catch(err => {
+      // Revert optimistic update on failure
+      alert(`Failed to confirm: ${err.message}`);
+      _confirmedThisSession.delete(segmentId);
+      if (cardEl) {
+        cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-unknown");
+        const badge = cardEl.querySelector(".seg-badge");
+        if (badge) { badge.className = "seg-badge badge-unknown"; badge.textContent = "unknown"; }
+        if (btn) { btn.textContent = "Confirm"; btn.classList.remove("confirmed"); }
+        const undoBtn = cardEl.querySelector(".seg-undo-btn");
+        if (undoBtn) undoBtn.style.display = "none";
+      }
+      if (localSeg && localSeg.assignment) {
+        localSeg.assignment.verified = false;
+      }
+      updateStats();
+    });
 }
 
 // ── Tag handler ──────────────────────────────────────────────────────────────
 
 async function handleTag(segmentId, personId, cardEl) {
   const btn = cardEl?.querySelector(".seg-tag-btn");
-  if (btn) { btn.textContent = "…"; btn.disabled = true; }
+
+  // ── Optimistic UI update (instant, before API call) ──────────────────
+  _confirmedThisSession.add(segmentId);
+
+  const person = people.find(p => p.person_id === personId);
+  if (cardEl && person) {
+    cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-tagged");
+    const badge = cardEl.querySelector(".seg-badge");
+    if (badge) {
+      badge.className = "seg-badge badge-tagged";
+      badge.textContent = "tagged";
+    }
+    const nameEl = cardEl.querySelector(".seg-speaker-name");
+    if (nameEl) nameEl.textContent = person.canonical_name;
+    if (btn) {
+      btn.textContent = "✦ Tagged";
+      btn.classList.add("is-tagged");
+    }
+    const undoBtn = cardEl.querySelector(".seg-undo-btn");
+    if (undoBtn) undoBtn.style.display = "";
+  }
+
+  const localSeg = segments.find(s => s.segment_id === segmentId);
+  if (localSeg) {
+    if (!localSeg.assignment) localSeg.assignment = {};
+    localSeg.assignment.tagged = true;
+    localSeg.assignment.verified = false;
+    localSeg.assignment.predicted_person_id = personId;
+    localSeg.assignment.similarity_score = null;
+  }
+
+  _personFrequency.set(personId, (_personFrequency.get(personId) || 0) + 1);
+  _refreshAllQuickButtons();
+  updateStats();
+
+  // ── Fire API in background (don't block UI) ──────────────────────────
+  tagAssignment(segmentId, personId)
+    .catch(err => {
+      // Revert optimistic update on failure
+      alert(`Failed to tag: ${err.message}`);
+      _confirmedThisSession.delete(segmentId);
+      if (cardEl) {
+        cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-unknown");
+        const badge = cardEl.querySelector(".seg-badge");
+        if (badge) { badge.className = "seg-badge badge-unknown"; badge.textContent = "unknown"; }
+        if (btn) { btn.textContent = "Tag"; btn.classList.remove("is-tagged"); }
+        const undoBtn = cardEl.querySelector(".seg-undo-btn");
+        if (undoBtn) undoBtn.style.display = "none";
+      }
+      if (localSeg && localSeg.assignment) {
+        localSeg.assignment.tagged = false;
+      }
+      updateStats();
+    });
+}
+
+// ── Undo handler (unconfirm / untag) ─────────────────────────────────────────
+
+async function handleUndo(segmentId, cardEl) {
+  const localSeg = segments.find(s => s.segment_id === segmentId);
+  const wasVerified = localSeg?.assignment?.verified;
+  const wasTags = localSeg?.assignment?.tagged;
+
+  if (!wasVerified && !wasTags) return;
+
+  const undoBtn = cardEl?.querySelector(".seg-undo-btn");
+  if (undoBtn) { undoBtn.textContent = "…"; undoBtn.disabled = true; }
 
   try {
-    await tagAssignment(segmentId, personId);
-
-    // Track so polling won't overwrite
-    _confirmedThisSession.add(segmentId);
-
-    // Update the card in-place
-    const person = people.find(p => p.person_id === personId);
-    if (cardEl && person) {
-      cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-tagged");
-      const badge = cardEl.querySelector(".seg-badge");
-      if (badge) {
-        badge.className = "seg-badge badge-tagged";
-        badge.textContent = "tagged";
+    if (wasVerified) {
+      // Unconfirm: removes voiceprints and resets to auto-match
+      const r = await fetch(`/api/assignments/${segmentId}/unconfirm`, { method: "POST" });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${r.status}`);
       }
-      const nameEl = cardEl.querySelector(".seg-speaker-name");
-      if (nameEl) nameEl.textContent = person.canonical_name;
-      if (btn) {
-        btn.textContent = "✦ Tagged";
-        btn.classList.add("is-tagged");
-        btn.disabled = false;
+    } else {
+      // Untag: re-tag with null to clear (use the tag endpoint with reset)
+      // The backend doesn't have an untag endpoint, so we reset via unconfirm-like behavior
+      // Actually we can just call unconfirm which handles both states
+      const r = await fetch(`/api/assignments/${segmentId}/unconfirm`, { method: "POST" });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${r.status}`);
       }
     }
 
-    // Update local segment state
-    const localSeg = segments.find(s => s.segment_id === segmentId);
-    if (localSeg) {
-      if (!localSeg.assignment) localSeg.assignment = {};
-      localSeg.assignment.tagged = true;
+    // Remove from confirmed session set so polling can update it
+    _confirmedThisSession.delete(segmentId);
+
+    // Update local state
+    if (localSeg && localSeg.assignment) {
       localSeg.assignment.verified = false;
-      localSeg.assignment.predicted_person_id = personId;
+      localSeg.assignment.tagged = false;
       localSeg.assignment.similarity_score = null;
     }
 
+    // Update card visually
+    if (cardEl) {
+      cardEl.className = cardEl.className.replace(/conf-\w+/, "conf-unknown");
+      const badge = cardEl.querySelector(".seg-badge");
+      if (badge) {
+        badge.className = "seg-badge badge-unknown";
+        badge.textContent = "unknown";
+      }
+      const nameEl = cardEl.querySelector(".seg-speaker-name");
+      if (nameEl) nameEl.textContent = "Unknown";
+
+      // Reset buttons
+      const confirmBtn = cardEl.querySelector(".seg-confirm-btn");
+      if (confirmBtn) {
+        confirmBtn.textContent = "Confirm";
+        confirmBtn.classList.remove("confirmed");
+        confirmBtn.disabled = false;
+      }
+      const tagBtn = cardEl.querySelector(".seg-tag-btn");
+      if (tagBtn) {
+        tagBtn.textContent = "Tag";
+        tagBtn.classList.remove("is-tagged");
+        tagBtn.disabled = false;
+      }
+      // Clear input
+      const input = cardEl.querySelector(".seg-assign-input");
+      if (input) {
+        input.value = "";
+        input.dataset.personId = "";
+      }
+      // Hide undo button
+      if (undoBtn) { undoBtn.style.display = "none"; }
+    }
+
     updateStats();
+
+    // Trigger background rerun so auto-matching re-evaluates this segment
+    if (wasVerified) {
+      showReprocessIndicator();
+    }
   } catch (err) {
-    alert(`Failed to tag: ${err.message}`);
-    if (btn) { btn.textContent = "Tag"; btn.disabled = false; }
+    alert(`Failed to undo: ${err.message}`);
+    if (undoBtn) { undoBtn.textContent = "✕"; undoBtn.disabled = false; }
   }
 }
 
@@ -926,15 +1336,24 @@ function updateStats() {
 
 // ── Reprocess indicator ───────────────────────────────────────────────────────
 
+// Single reprocess poller — coalesces rapid-fire confirms into one timer.
+let _reprocessTimer = null;
+let _reprocessAttempts = 0;
+const _REPROCESS_MAX = 6;
+
 function showReprocessIndicator() {
   const el = document.getElementById("reprocess-indicator");
   el.classList.add("visible");
 
-  let attempts = 0;
-  const MAX = 6;
-  const timer = setInterval(async () => {
-    attempts++;
-    // Skip render if user is interacting with a dropdown or editing text
+  // Reset attempt counter (new confirm arrived, give it fresh polls)
+  _reprocessAttempts = 0;
+
+  // Only start one poller
+  if (_reprocessTimer) return;
+
+  _reprocessTimer = setInterval(async () => {
+    _reprocessAttempts++;
+    // Skip if user is interacting with a dropdown or editing text
     if (isUserInteracting()) return;
     const fresh = await fetchSegments();
     if (fresh) {
@@ -945,14 +1364,72 @@ function showReprocessIndicator() {
         }
         return s;
       });
-      renderTranscript();
+      // Update visible cards in-place instead of full re-render (avoids scroll jump)
+      _updateVisibleCards();
       updateStats();
     }
-    if (attempts >= MAX) {
-      clearInterval(timer);
+    if (_reprocessAttempts >= _REPROCESS_MAX) {
+      clearInterval(_reprocessTimer);
+      _reprocessTimer = null;
       el.classList.remove("visible");
     }
   }, 5000);
+}
+
+// Update only the currently rendered cards with fresh segment data (no DOM rebuild)
+function _updateVisibleCards() {
+  for (const [rowIdx, el] of VS.renderedEls) {
+    const row = VS.rows[rowIdx];
+    if (!row || row.type !== "segment") continue;
+
+    const seg = segments[row.idx];
+    if (!seg) continue;
+    // Update the row's reference to the latest segment data
+    row.seg = seg;
+
+    const assign = seg.assignment;
+    const verified = assign?.verified ?? false;
+    const tagged = assign?.tagged ?? false;
+    const score = assign?.similarity_score ?? null;
+    const personId = assign?.predicted_person_id ?? null;
+
+    const confClass = verified ? "verified"
+      : tagged ? "tagged"
+      : score === null ? "unknown"
+      : score >= 0.92 ? "high"
+      : score >= 0.75 ? "medium"
+      : "unknown";
+
+    // Update card class
+    el.className = el.className.replace(/conf-\w+/, `conf-${confClass}`);
+
+    // Update badge
+    const badge = el.querySelector(".seg-badge");
+    if (badge) {
+      const scoreStr = score !== null ? `${Math.round(score * 100)}%` : "—";
+      const badgeText = verified ? "✓ verified"
+        : tagged ? "tagged"
+        : confClass === "unknown" ? "unknown"
+        : `${confClass} ${scoreStr}`;
+      badge.className = `seg-badge badge-${confClass}`;
+      badge.textContent = badgeText;
+    }
+
+    // Update speaker name
+    const person = personId ? people.find(p => p.person_id === personId) : null;
+    const nameEl = el.querySelector(".seg-speaker-name");
+    if (nameEl) nameEl.textContent = person?.canonical_name ?? seg.raw_speaker_label ?? "Unknown";
+
+    // Update assign input (only if user isn't focused on it)
+    const input = el.querySelector(".seg-assign-input");
+    if (input && document.activeElement !== input) {
+      input.dataset.personId = personId || "";
+      input.value = person?.canonical_name ?? "";
+    }
+  }
+
+  _buildPersonFrequency();
+  _refreshAllQuickButtons();
 }
 
 // ── Video synchronisation ─────────────────────────────────────────────────────
@@ -979,11 +1456,16 @@ function setupVideoEvents() {
 function syncActiveCard(t, scrollIntoView) {
   if (segments.length === 0) return;
 
+  // Don't scroll or change active card while user is typing in an input
+  const interacting = isUserInteracting();
+
   const idx = segments.findIndex(s => t >= s.start_time && t <= s.end_time);
   if (idx === activeIndex) return;
+  if (interacting) return; // freeze active card while user is in an input
 
+  // Remove old highlight
   if (activeIndex >= 0) {
-    const old = transcriptList().querySelector(`[data-idx="${activeIndex}"]`);
+    const old = VS.getCardBySegmentIdx(activeIndex);
     if (old) old.classList.remove("is-active");
   }
 
@@ -994,11 +1476,30 @@ function syncActiveCard(t, scrollIntoView) {
     return;
   }
 
-  const card = transcriptList().querySelector(`[data-idx="${idx}"]`);
-  if (card) {
-    card.classList.add("is-active");
-    if (scrollIntoView) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  // Only scroll if the card is not already visible in the viewport
+  if (scrollIntoView) {
+    const existingCard = VS.getCardBySegmentIdx(idx);
+    if (existingCard) {
+      // Card is in DOM — only scroll if it's out of view
+      const container = VS.container;
+      const cardTop = existingCard.offsetTop - container.offsetTop;
+      const cardBot = cardTop + existingCard.offsetHeight;
+      const viewTop = container.scrollTop;
+      const viewBot = viewTop + container.clientHeight;
+      if (cardTop < viewTop || cardBot > viewBot) {
+        existingCard.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    } else {
+      // Card not in DOM — need to scroll to render it
+      VS.scrollToSegmentIdx(idx);
+    }
   }
+
+  // Highlight after render settles
+  requestAnimationFrame(() => {
+    const card = VS.getCardBySegmentIdx(idx);
+    if (card) card.classList.add("is-active");
+  });
 
   const seg    = segments[idx];
   const assign = seg.assignment;
@@ -1029,11 +1530,13 @@ function seekToSpeakerFromURL() {
   function doSeek() {
     v.currentTime = seg.start_time;
     v.pause();
-    syncActiveCard(seg.start_time, false);
-    // Scroll the card to the top of the transcript panel
     const idx = segments.indexOf(seg);
-    const card = transcriptList().querySelector(`[data-idx="${idx}"]`);
-    if (card) card.scrollIntoView({ block: "start", behavior: "smooth" });
+    activeIndex = idx;
+    VS.scrollToSegmentIdx(idx);
+    requestAnimationFrame(() => {
+      const card = VS.getCardBySegmentIdx(idx);
+      if (card) card.classList.add("is-active");
+    });
   }
 
   if (v.readyState >= 1) {
@@ -1520,15 +2023,19 @@ async function handleCreatePerson() {
       people.push(person);
     }
 
+    // Close dialog immediately — don't wait for confirm API
     document.getElementById("new-person-dialog").close();
+    btn.textContent = "Create & Assign";
+    btn.disabled = false;
 
     if (pendingSegmentId) {
-      const cardEl = transcriptList().querySelector(`[data-segment-id="${pendingSegmentId}"]`);
-      await handleConfirm(pendingSegmentId, person.person_id, cardEl);
+      const cardEl = VS.getCardBySegmentId(pendingSegmentId);
+      // Set the input so the card shows the new person immediately
+      if (cardEl) _setAssignInput(cardEl, person.person_id, person.canonical_name);
+      handleConfirm(pendingSegmentId, person.person_id, cardEl); // fire-and-forget
       pendingSegmentId = null;
-    } else {
-      await loadSegments();
     }
+    return; // skip finally's btn reset since we already did it
   } catch (err) {
     alert(`Failed: ${err.message}`);
   } finally {
@@ -1559,9 +2066,14 @@ function esc(str) {
 
 async function loadSegmentTags(segmentId) {
   try {
-    const r = await fetch(`/api/tags/for-content?content_type=meeting_segment&content_id=${segmentId}`);
-    if (!r.ok) return;
-    const assignments = await r.json();
+    // Check cache first (avoids re-fetch when scrolling back to a card)
+    let assignments = VS._tagCache.get(segmentId);
+    if (assignments === undefined) {
+      const r = await fetch(`/api/tags/for-content?content_type=meeting_segment&content_id=${segmentId}`);
+      if (!r.ok) return;
+      assignments = await r.json();
+      VS._tagCache.set(segmentId, assignments);
+    }
     const container = document.getElementById(`seg-tags-${segmentId}`);
     if (!container || assignments.length === 0) return;
 
@@ -1582,6 +2094,7 @@ async function loadSegmentTags(segmentId) {
 
 async function confirmSegTag(assignmentId, segmentId) {
   await fetch(`/api/tags/assignments/${assignmentId}/confirm`, { method: "POST" });
+  VS._tagCache.delete(segmentId); // invalidate cache
   loadSegmentTags(segmentId);
 }
 
@@ -1591,6 +2104,7 @@ async function denySegTag(tagId, contentType, contentId) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tag_id: tagId, content_type: contentType, content_id: contentId }),
   });
+  VS._tagCache.delete(contentId); // invalidate cache
   loadSegmentTags(contentId);
 }
 

@@ -5,10 +5,10 @@ Tasks on `huey` (GPU worker):
   - process_video_task:             Full video ingestion pipeline.
   - process_pdf_task:               PDF text extraction (native + OCR fallback).
   - extract_multi_voiceprints_task: Extra voiceprints from long confirmed segments.
-  - rerun_voiceprints_task:         Background voiceprint re-evaluation.
   - process_newscast_task:          TV news processing pipeline.
 
 Tasks on `huey_light` (light worker):
+  - rerun_voiceprints_task:         Background voiceprint re-evaluation (CPU-only NumPy).
   - primegov_discover_task:         PrimeGov meeting discovery.
   - primegov_download_task:         PrimeGov asset download.
   - transcode_video_task:           FFmpeg 540p transcode.
@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.worker import huey, huey_light
-from app.config import MEDIA_DIR, TV_NEWS_DIR
+from app.config import MEDIA_DIR, TV_NEWS_DIR, BASE_DIR
 from app.paths import to_relative, to_absolute
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,10 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
                 added += 1
 
         db.commit()
+
+        # Release cached audio from memory (can be 3+ GB for long meetings)
+        embedder.clear_audio_cache()
+
         logger.info(
             "extract_multi_voiceprints: added %d extra voiceprints for segment %s "
             "(%d windows from %.1fs segment)",
@@ -204,6 +209,7 @@ def extract_multi_voiceprints_task(segment_id: str, person_id: str) -> dict:
 
     except Exception:
         db.rollback()
+        embedder.clear_audio_cache()
         logger.exception(
             "extract_multi_voiceprints failed for segment %s", segment_id,
         )
@@ -244,9 +250,41 @@ def process_newscast_task(newscast_id: str, skip_commercial_strip: bool = False,
         db.close()
 
 
-@huey.task()
+# ── Light tasks (huey_light) ────────────────────────────────────────────────
+
+
+# Debounce: rerun_voiceprints is CPU-only NumPy (13-27s).  Rapid confirms
+# can stack 5+ of these.  A 3s pause at the start lets rapid confirms batch,
+# and the timestamp file lets subsequent tasks skip if one just completed.
+_RERUN_DEBOUNCE_SEC = 5
+
+
+@huey_light.task()
 def rerun_voiceprints_task(meeting_id: str) -> dict:
-    """Re-evaluate all unverified segments against current voiceprints."""
+    """Re-evaluate all unverified segments against current voiceprints.
+
+    Runs on the light worker (CPU-only, no GPU needed).
+    Debounced: sleeps 3s to batch rapid confirms, then skips if a rerun
+    completed within the last 5s for this meeting.
+    """
+    # Brief pause so rapid confirms batch up before we start the expensive loop
+    time.sleep(3)
+
+    # Check if a rerun just completed for this meeting — skip if so
+    debounce_path = BASE_DIR / "database" / f".rerun_ts_{meeting_id[:8]}"
+    if debounce_path.exists():
+        try:
+            last_ts = float(debounce_path.read_text(encoding="utf-8").strip())
+            elapsed = time.time() - last_ts
+            if elapsed < _RERUN_DEBOUNCE_SEC:
+                logger.info(
+                    "rerun_voiceprints: debounced — completed %.1fs ago for %s",
+                    elapsed, meeting_id,
+                )
+                return {"meeting_id": meeting_id, "status": "debounced"}
+        except (ValueError, OSError):
+            pass
+
     from app.database import SessionLocal
     from app.services import voiceprint as vp_service
 
@@ -257,6 +295,13 @@ def rerun_voiceprints_task(meeting_id: str) -> dict:
             "rerun_voiceprints_task complete: %d segments re-evaluated for meeting %s",
             count, meeting_id,
         )
+
+        # Write completion timestamp for debounce
+        try:
+            debounce_path.write_text(str(time.time()), encoding="utf-8")
+        except OSError:
+            pass
+
         return {"meeting_id": meeting_id, "segments_reprocessed": count}
     except Exception:
         db.rollback()
@@ -264,9 +309,6 @@ def rerun_voiceprints_task(meeting_id: str) -> dict:
         raise
     finally:
         db.close()
-
-
-# ── Light tasks (huey_light) ────────────────────────────────────────────────
 
 
 @huey_light.task()

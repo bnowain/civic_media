@@ -85,6 +85,7 @@ class MeetingUpdate(BaseModel):
     meeting_type: Optional[str] = None
     program_type: Optional[str] = None
     venue_id: Optional[str] = None
+    video_url: Optional[str] = None
     summary_short: Optional[str] = None
     summary_long: Optional[str] = None
 

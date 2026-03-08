@@ -13,6 +13,8 @@ Worker commands:
 """
 
 import logging
+import os
+import sys
 from datetime import datetime
 
 from huey import SqliteHuey, signals
@@ -20,6 +22,25 @@ from huey import SqliteHuey, signals
 from app.config import BASE_DIR, ORPHAN_RECOVERY_SECONDS
 
 logger = logging.getLogger(__name__)
+
+
+def _set_below_normal_priority():
+    """Set worker process priority to below-normal so it never starves the desktop."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
+            logger.info("Worker priority set to BELOW_NORMAL")
+        else:
+            os.nice(5)
+            logger.info("Worker niceness increased by 5")
+    except Exception as exc:
+        logger.warning("Could not set process priority (non-fatal): %s", exc)
+
+
+_set_below_normal_priority()
 
 _huey_db = str(BASE_DIR / "database" / "huey.db")
 _huey_light_db = str(BASE_DIR / "database" / "huey_light.db")

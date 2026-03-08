@@ -815,9 +815,12 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  position: relative;
+}
+
+.segment-card,
+.segment-group-header {
+  margin-bottom: 4px;
 }
 
 /* Empty state in transcript */
@@ -1084,6 +1087,22 @@ html, body {
 .seg-new-btn:hover {
   color: var(--text-primary);
   border-color: var(--border-light);
+}
+
+.seg-undo-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.seg-undo-btn:hover {
+  color: var(--accent-red);
+  border-color: var(--accent-red);
+  background: rgba(255, 80, 80, 0.08);
 }
 
 /* ── Quick-Assign Row ────────────────────────────────────────────────────── */
