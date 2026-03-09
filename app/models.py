@@ -78,7 +78,8 @@ class Meeting(Base):
     thumbnail_url     = Column(Text, nullable=True)        # cover art URL from source
     venue_id          = Column(String, ForeignKey("venues.venue_id"), nullable=True)
     primegov_id       = Column(Integer, nullable=True, unique=True, index=True)
-    video_url         = Column(Text, nullable=True)        # Swagit video page URL
+    granicus_id       = Column(Integer, nullable=True, unique=True, index=True)  # Granicus clip_id
+    video_url         = Column(Text, nullable=True)        # Swagit video page URL / direct MP4 URL
     page_url          = Column(Text, nullable=True)        # human-browsable source page URL
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
     minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL

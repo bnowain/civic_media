@@ -11,6 +11,8 @@ Tasks on `huey_light` (light worker):
   - rerun_voiceprints_task:         Background voiceprint re-evaluation (CPU-only NumPy).
   - primegov_discover_task:         PrimeGov meeting discovery.
   - primegov_download_task:         PrimeGov asset download.
+  - granicus_discover_task:         Granicus (Redding City Council) discovery.
+  - granicus_download_task:         Granicus asset download (video + docs) for one meeting.
   - transcode_video_task:           FFmpeg 540p transcode.
   - ingest_radio_task:              Radio show scraper.
   - retag_content_task:             Re-tag content via Atlas LLM.
@@ -1086,3 +1088,98 @@ def _log_vote_ingest(meeting_date, title, vote_count, status, unmatched,
                     f.write(f"  [{i}] {para[:200]}\n")
     except Exception:
         pass
+
+
+@huey_light.task()
+def granicus_discover_task(min_date: str = "2022-01-01") -> dict:
+    """Discover and register Redding City Council meetings from Granicus.
+
+    Scrapes the Granicus ViewPublisher archive and registers new meetings in the DB.
+    Idempotent — safe to re-run; skips meetings already present (by granicus_id).
+    Runs weekly via the self-heal loop; also callable on demand.
+    """
+    from app.database import SessionLocal
+    from app.services.granicus.discovery import run_discovery
+
+    db = SessionLocal()
+    try:
+        return run_discovery(db, min_date=min_date)
+    except Exception:
+        db.rollback()
+        logger.exception("granicus_discover_task failed")
+        raise
+    finally:
+        db.close()
+
+
+@huey_light.task(retries=1, retry_delay=30, context=True)
+def granicus_download_task(
+    meeting_id: str,
+    download_video: bool = True,
+    download_agenda: bool = True,
+    download_minutes: bool = True,
+    task=None,
+) -> dict:
+    """Download Granicus assets (video + PDF documents) for a single meeting.
+
+    Video is a direct MP4 download (no Playwright / HLS extraction needed).
+    After video download, queues transcode_video_task automatically.
+    """
+    from app.database import SessionLocal
+    from app import models
+    from app.config import MEDIA_DIR
+    from app.services.granicus.downloader import (
+        download_video as dl_video,
+        download_document as dl_doc,
+    )
+    from app.services.progress import create_job, update_progress, complete_job, fail_job
+
+    task_id = task.id if task else None
+    db = SessionLocal()
+    results = {}
+
+    try:
+        create_job(db, meeting_id, "download", task_id=task_id)
+
+        meeting = db.query(models.Meeting).filter_by(meeting_id=meeting_id).first()
+        if not meeting:
+            fail_job(db, meeting_id, "Meeting not found")
+            return {"meeting_id": meeting_id, "status": "error", "error": "Meeting not found"}
+
+        if download_video:
+            output_dir = MEDIA_DIR / meeting_id
+            results["video"] = dl_video(db, meeting, output_dir)
+            db.commit()
+            if results["video"].get("status") == "error":
+                fail_job(db, meeting_id, results["video"].get("error", "Download failed"))
+                return {"meeting_id": meeting_id, "results": results}
+
+        if download_agenda:
+            update_progress(db, meeting_id, "Downloading agenda PDF…", 50)
+            results["agenda"] = dl_doc(db, meeting, "agenda")
+            db.commit()
+
+        if download_minutes:
+            update_progress(db, meeting_id, "Downloading minutes PDF…", 70)
+            results["minutes"] = dl_doc(db, meeting, "minutes")
+            db.commit()
+
+        complete_job(db, meeting_id)
+
+        # Queue transcode if video was just downloaded
+        if results.get("video", {}).get("status") == "complete":
+            media_id = results["video"].get("media_id")
+            if media_id:
+                from app.services.task_dispatch import send_task
+                send_task("tasks.transcode_video", args=[meeting_id, media_id])
+                results["transcode"] = "queued"
+
+        return {"meeting_id": meeting_id, "results": results}
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("granicus_download_task failed for meeting %s", meeting_id)
+        fail_job(db, meeting_id, str(exc))
+        raise
+    finally:
+        db.close()

@@ -76,7 +76,7 @@ Thresholds: high ≥ 0.92, medium ≥ 0.75 (both in `app/config.py`).
 - **Services** (`app/services/`) — all business logic, ML model invocations, file I/O
 - **Models** (`app/models.py`) — SQLAlchemy ORM: Meeting, MediaFile, Document, TranscriptSegment, Person, Voiceprint, SegmentAssignment
 - **Schemas** (`app/schemas.py`) — Pydantic v2 with `from_attributes = True`
-- **Tasks** (`app/tasks.py`) — 14 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `export_clip`, `cleanup_clips`, `full_ingest`, `check_minutes`)
+- **Tasks** (`app/tasks.py`) — 16 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `granicus_discover`, `granicus_download`, `export_clip`, `cleanup_clips`, `full_ingest`, `check_minutes`)
 - **Config** (`app/config.py`) — all paths, thresholds, model identifiers, env var defaults
 
 ### Database
@@ -104,6 +104,47 @@ Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|js
 - **Diarization cached to disk** — `diarization.json` saves 10-20 min on re-runs
 - **Audio cached in memory during embedding** — avoids 1700+ disk reads per meeting
 - **Light worker runs 2 threads** — enables parallel downloads (e.g., one download + one transcode)
+
+## Granicus Integration — Redding City Council
+
+The City of Redding uses **Granicus** (not PrimeGov) for meeting archives.
+
+| URL | Purpose |
+|-----|---------|
+| `https://reddingca.granicus.com/ViewPublisher.php?view_id=4` | Full archive listing (HTML) |
+| `MediaPlayer.php?view_id=4&clip_id={N}` | Per-meeting page — has MP4 URL in JS |
+| `AgendaViewer.php?view_id=4&clip_id={N}` | Agenda PDF (redirect chain → DocumentViewer) |
+| `MinutesViewer.php?view_id=4&clip_id={N}&doc_id={UUID}` | Minutes PDF (same redirect pattern) |
+| `archive-video.granicus.com/reddingca/reddingca_{UUID}.mp4` | Direct MP4 download |
+
+**No API** — all discovery requires HTML scraping. The Granicus viewer redirects through
+Google's doc viewer; `resolve_document_url()` in `scraper.py` extracts the inner PDF URL.
+
+**Key dedup field:** `meetings.granicus_id` (the Granicus `clip_id` integer).
+
+**Document structure** (same as Shasta BOS):
+- `document_type = "agenda"` — agenda PDF (always available if meeting has video)
+- `document_type = "minutes"` — approved minutes (posted ~3-4 weeks after meeting)
+
+**Ingest files:**
+```
+app/services/granicus/
+  scraper.py     — ViewPublisher + MediaPlayer HTML scraper, document URL resolver
+  discovery.py   — create/update Meeting rows (dedup by granicus_id)
+  downloader.py  — direct MP4 download + inline 540p transcode + PDF download
+scripts/
+  migrate_granicus_id.py  — one-time migration: adds granicus_id to meetings table
+  granicus_backfill.py    — one-time bulk ingest: discover → register → download → transcode
+```
+
+**One-time backfill command** (run from Windows, not WSL):
+```
+powershell.exe -Command "cd 'E:\0-Automated-Apps\civic_media'; .\venv\Scripts\python.exe scripts\granicus_backfill.py"
+```
+Flags: `--discover-only`, `--no-video`, `--no-docs`, `--min-date YYYY-MM-DD`, `--dry-run`
+
+**Ongoing discovery task:** `granicus_discover_task` (light worker) — re-run to register
+new meetings. New meetings then need `granicus_download_task` to get video + docs.
 
 ## Rolling Minutes Availability Check
 

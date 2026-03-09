@@ -35,6 +35,8 @@ def _get_task_map() -> dict:
         cleanup_clips_task,
         full_ingest_task,
         check_minutes_task,
+        granicus_discover_task,
+        granicus_download_task,
     )
 
     _task_map = {
@@ -48,6 +50,8 @@ def _get_task_map() -> dict:
         "tasks.transcode_video": transcode_video_task,
         "tasks.primegov_discover": primegov_discover_task,
         "tasks.primegov_download": primegov_download_task,
+        "tasks.granicus_discover": granicus_discover_task,
+        "tasks.granicus_download": granicus_download_task,
         "tasks.export_clip": export_clip_task,
         "tasks.cleanup_clips": cleanup_clips_task,
         "tasks.full_ingest": full_ingest_task,
