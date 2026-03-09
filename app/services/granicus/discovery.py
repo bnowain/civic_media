@@ -57,7 +57,7 @@ def clip_to_meeting(db: Session, clip: GranicusClip) -> tuple[Meeting, bool]:
         group_id=group_id,
         meeting_type=clip.meeting_type,
         meeting_date=clip.meeting_date,
-        title=f"Redding City Council - {clip.meeting_type}",
+        title=GRANICUS_GROUP_NAME,  # "Redding City Council" — mirrors PrimeGov BOS pattern
         category="meeting",
         program_type="governing_meeting",
         granicus_id=clip.clip_id,
