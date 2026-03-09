@@ -98,7 +98,8 @@ def _stage_timeout(db: "Session", job) -> int:
 
 # Self-healing loop interval (seconds). A background thread runs _do_reset_stuck
 # this often, so stuck jobs are recovered even if no next-* endpoints are called.
-_SELF_HEAL_INTERVAL = 300  # 5 minutes
+_SELF_HEAL_INTERVAL = 300  # 5 minutes: stuck-job reset cadence
+_AUTO_ADVANCE_INTERVAL = 30  # 30 s: idle-queue refill cadence
 
 _SKIP_FILE = BASE_DIR / "database" / "backfill_skipped.json"
 
@@ -1578,26 +1579,98 @@ def backfill_clear_all_errors(db: Session = Depends(get_db)):
 _self_heal_started = False
 
 
+def _auto_advance(db: Session) -> None:
+    """Refill idle Huey queues from the DB backlog.
+
+    Checks the pending count on each queue AND the DB for running jobs before
+    queuing more work. pending_count() drops to 0 when a worker picks up a
+    task (before it finishes), so we must check DB state as well to avoid
+    queueing multiple tasks while one is already executing.
+    """
+    from app import models
+
+    try:
+        from app.worker import huey, huey_light
+        gpu_pending = huey.pending_count()
+        light_pending = huey_light.pending_count()
+    except Exception as exc:
+        logger.warning("auto-advance: Huey check failed: %s", exc)
+        return
+
+    now = datetime.utcnow()
+
+    # GPU worker: only queue a process task if the queue is empty AND no
+    # process job is queued/running in the DB (belt-and-suspenders).
+    if gpu_pending == 0:
+        gpu_busy = (
+            db.query(models.ProcessingJob)
+            .filter(
+                models.ProcessingJob.status.in_(["queued", "running"]),
+                models.ProcessingJob.updated_at >= now - timedelta(seconds=_STUCK_SECONDS_BY_STAGE["process"]),
+            )
+            .count()
+        ) > 0
+        if not gpu_busy:
+            result = backfill_next_process(db=db)
+            if result.get("queued"):
+                logger.info(
+                    "auto-advance: queued process for %s (%s)",
+                    result.get("meeting_id"), result.get("meeting_date"),
+                )
+
+    # Light worker: only queue a download task if the queue is empty AND no
+    # download job is queued/running in the DB.
+    if light_pending == 0:
+        light_busy = (
+            db.query(models.ProcessingJob)
+            .filter(
+                models.ProcessingJob.status.in_(["queued", "running"]),
+                models.ProcessingJob.stage == "download",
+                models.ProcessingJob.updated_at >= now - timedelta(seconds=_STUCK_SECONDS_BY_STAGE["download"]),
+            )
+            .count()
+        ) > 0
+        if not light_busy:
+            result = backfill_next_download(db=db)
+            if result.get("queued"):
+                logger.info(
+                    "auto-advance: queued download for %s (%s)",
+                    result.get("meeting_id"), result.get("meeting_date"),
+                )
+
+
 def _self_heal_loop():
-    """Periodically reset stuck jobs so recovery doesn't depend on next-* calls.
+    """Periodically reset stuck jobs and refill idle queues from the DB backlog.
 
     Runs in a daemon thread — dies with the process. Uses its own DB session
     (never shares with request handlers). Errors are swallowed and logged.
+
+    Cadence:
+      - Every 30 s: check Huey queue depth and auto-advance if idle
+      - Every 5 min: reset stuck jobs
     """
     import time
+    last_reset = 0.0
     while True:
-        time.sleep(_SELF_HEAL_INTERVAL)
+        time.sleep(_AUTO_ADVANCE_INTERVAL)
+        now = time.monotonic()
         try:
             db = SessionLocal()
             try:
-                result = _do_reset_stuck(db)
-                reset_ids = result.get("reset_ids", [])
-                tc_resets = result.get("transcode_resets", 0)
-                if reset_ids or tc_resets:
-                    logger.info(
-                        "Self-heal: reset %d stuck job(s), %d transcode(s): %s",
-                        len(reset_ids), tc_resets, reset_ids,
-                    )
+                # Reset stuck jobs every 5 minutes
+                if now - last_reset >= _SELF_HEAL_INTERVAL:
+                    result = _do_reset_stuck(db)
+                    reset_ids = result.get("reset_ids", [])
+                    tc_resets = result.get("transcode_resets", 0)
+                    if reset_ids or tc_resets:
+                        logger.info(
+                            "Self-heal: reset %d stuck job(s), %d transcode(s): %s",
+                            len(reset_ids), tc_resets, reset_ids,
+                        )
+                    last_reset = now
+
+                # Auto-advance: refill idle queues every tick
+                _auto_advance(db)
             finally:
                 db.close()
         except Exception as exc:
