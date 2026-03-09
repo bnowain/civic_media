@@ -23,6 +23,7 @@ POST /api/backfill/next-process         Queue one process_video_task (oldest fir
 POST /api/backfill/next-process-newest  Queue one process_video_task (newest first, for dual-worker)
 POST /api/backfill/next-diarize         Queue one process_video_task for transcribed-but-not-diarized meetings
 POST /api/backfill/process-now/{id}     Queue process_video_task for a specific meeting
+POST /api/backfill/process-priority/{id} Queue and jump to front of queue (priority=100 default)
 POST /api/backfill/full/{id}            Queue full_ingest_task for a specific meeting
 POST /api/backfill/skip/{id}            Add meeting to skip set (excluded from auto-queue)
 POST /api/backfill/unskip/{id}          Remove meeting from skip set
@@ -1384,6 +1385,98 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
                      meeting_id, media_pending.media_id)
         return {"queued": True, "meeting_id": meeting_id, "media_id": media_pending.media_id,
                 "action": "full_ingest"}
+
+    raise HTTPException(status_code=404, detail="No eligible media found for this meeting")
+
+
+# ── Priority processing ───────────────────────────────────────────────────────
+
+def _bump_huey_priority(queue_name: str, priority: float = 100.0) -> bool:
+    """Set the most-recently-inserted task in a Huey queue to a higher priority.
+
+    Called immediately after send_task() — the last-inserted row (MAX id) for
+    that queue is our task. Race window is negligible (single-threaded uvicorn,
+    self-heal queues at most one task per 30 s).
+
+    Returns True if a row was updated.
+    """
+    import sqlite3
+    from app.config import HUEY_DB, HUEY_LIGHT_DB
+
+    db_path = str(HUEY_DB if queue_name == "civic_media" else HUEY_LIGHT_DB)
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        cur = conn.execute(
+            "UPDATE task SET priority=? WHERE queue=? AND id=("
+            "  SELECT MAX(id) FROM task WHERE queue=?)",
+            (priority, queue_name, queue_name),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+        conn.close()
+        return updated
+    except Exception as exc:
+        logger.warning("_bump_huey_priority failed: %s", exc)
+        return False
+
+
+@router.post("/process-priority/{meeting_id}")
+def backfill_process_priority(
+    meeting_id: str,
+    priority: float = 100.0,
+    db: Session = Depends(get_db),
+):
+    """Queue processing for a specific meeting and jump it to the front of the queue.
+
+    Same routing logic as process-now, but immediately bumps the task's priority
+    in the Huey DB so the worker picks it up before all default-priority (0.0) tasks.
+
+    priority param: defaults to 100.0. Higher = picked up sooner. All normal
+    backfill tasks have priority 0.0, so anything > 0 jumps the queue.
+    """
+    from app import models
+    from app.services.task_dispatch import send_task
+    from fastapi import HTTPException
+
+    media = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
+            models.MediaFile.transcode_status.in_(["transcoded", None, ""]),
+        )
+        .first()
+    )
+    if media:
+        if not Path(to_absolute(media.file_path)).exists():
+            raise HTTPException(status_code=409, detail="Media file not found on disk")
+        send_task("tasks.process_video", args=[meeting_id, media.media_id])
+        bumped = _bump_huey_priority("civic_media", priority)
+        logger.info("process-priority: queued process_video %s (priority=%.1f, bumped=%s)",
+                    meeting_id, priority, bumped)
+        return {"queued": True, "meeting_id": meeting_id, "media_id": media.media_id,
+                "action": "process", "priority": priority, "jumped_queue": bumped}
+
+    media_pending = (
+        db.query(models.MediaFile)
+        .filter(
+            models.MediaFile.meeting_id == meeting_id,
+            models.MediaFile.file_type.in_(["video", "audio"]),
+            ~models.MediaFile.file_path.like("%_extracted.wav"),
+            models.MediaFile.transcode_status == "pending",
+        )
+        .first()
+    )
+    if media_pending:
+        if not Path(to_absolute(media_pending.file_path)).exists():
+            raise HTTPException(status_code=409, detail="Media file not found on disk")
+        send_task("tasks.full_ingest", args=[meeting_id])
+        bumped = _bump_huey_priority("civic_media_light", priority)
+        logger.info("process-priority: queued full_ingest %s (priority=%.1f, bumped=%s)",
+                    meeting_id, priority, bumped)
+        return {"queued": True, "meeting_id": meeting_id, "media_id": media_pending.media_id,
+                "action": "full_ingest", "priority": priority, "jumped_queue": bumped}
 
     raise HTTPException(status_code=404, detail="No eligible media found for this meeting")
 
