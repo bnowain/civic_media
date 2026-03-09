@@ -17,6 +17,7 @@ Tasks on `huey_light` (light worker):
   - export_clip_task:               FFmpeg clip export.
   - cleanup_clips_task:             Delete old export files.
   - full_ingest_task:               Download + transcode + process in one task.
+  - check_minutes_task:             Rolling 90-day check for newly posted minutes PDFs.
 
 All tasks use their own DB sessions (never share across task boundaries).
 """
@@ -826,6 +827,87 @@ def full_ingest_task(meeting_id: str) -> dict:
     send_task("tasks.process_video", args=[meeting_id, media_id])
     logger.info("full_ingest_task: dispatched process_video to GPU worker for %s", meeting_id)
     return {"meeting_id": meeting_id, "status": "process_queued", "media_id": media_id}
+
+
+@huey_light.task()
+def check_minutes_task(days: int = 90) -> dict:
+    """Rolling check for newly posted minutes PDFs for recent meetings.
+
+    Two phases:
+      1. Re-run PrimeGov discovery for the years covered by the window so any
+         meetings whose minutes_url was NULL get updated if minutes are now posted.
+      2. Download minutes PDFs for any meeting with a minutes_url but no
+         downloaded minutes document in the DB.
+
+    Called automatically once per day by the self-heal background thread, or
+    manually via POST /api/backfill/check-minutes.
+    """
+    from datetime import timedelta, date
+    from app.database import SessionLocal
+    from app import models
+    from app.services.primegov.discovery import run_discovery
+    from app.services.primegov.downloader import download_document
+
+    db = SessionLocal()
+    try:
+        cutoff = date.today() - timedelta(days=days)
+        cutoff_str = cutoff.isoformat()
+
+        # Phase 1: refresh PrimeGov metadata for years in the window so that
+        # any meeting whose minutes became available gets its minutes_url set.
+        years = sorted({cutoff.year, date.today().year})
+        logger.info("check_minutes: re-running discovery for years %s", years)
+        run_discovery(db, committee_ids=None, years=years, mode="update")
+
+        # Phase 2: download minutes for meetings that now have a URL but no doc.
+        existing_min_ids = {
+            r.meeting_id for r in
+            db.query(models.Document.meeting_id)
+            .filter(models.Document.document_type == "minutes")
+            .all()
+        }
+
+        candidates = (
+            db.query(models.Meeting)
+            .filter(
+                models.Meeting.meeting_date >= cutoff_str,
+                models.Meeting.minutes_url.isnot(None),
+                ~models.Meeting.meeting_id.in_(existing_min_ids),
+            )
+            .order_by(models.Meeting.meeting_date)
+            .all()
+        )
+
+        downloaded, errors = [], []
+        for meeting in candidates:
+            result = download_document(db, meeting.meeting_id, "minutes")
+            if result.get("status") == "complete":
+                downloaded.append(meeting.meeting_id)
+                logger.info(
+                    "check_minutes: downloaded minutes for %s (%s)",
+                    meeting.meeting_date, meeting.title,
+                )
+            else:
+                errors.append(meeting.meeting_id)
+                logger.warning(
+                    "check_minutes: failed to download minutes for %s: %s",
+                    meeting.meeting_id, result,
+                )
+
+        return {
+            "window_days": days,
+            "cutoff": cutoff_str,
+            "candidates": len(candidates),
+            "downloaded": len(downloaded),
+            "errors": len(errors),
+        }
+
+    except Exception:
+        db.rollback()
+        logger.exception("check_minutes_task failed")
+        raise
+    finally:
+        db.close()
 
 
 @huey_light.task()

@@ -29,6 +29,7 @@ POST /api/backfill/skip/{id}            Add meeting to skip set (excluded from a
 POST /api/backfill/unskip/{id}          Remove meeting from skip set
 GET  /api/backfill/stuck                List stale in-progress meetings (>10 min)
 POST /api/backfill/reset-stuck          Reset stuck meetings manually
+POST /api/backfill/check-minutes        Trigger rolling 90-day minutes availability check
 """
 
 from __future__ import annotations
@@ -99,8 +100,9 @@ def _stage_timeout(db: "Session", job) -> int:
 
 # Self-healing loop interval (seconds). A background thread runs _do_reset_stuck
 # this often, so stuck jobs are recovered even if no next-* endpoints are called.
-_SELF_HEAL_INTERVAL = 300  # 5 minutes: stuck-job reset cadence
-_AUTO_ADVANCE_INTERVAL = 30  # 30 s: idle-queue refill cadence
+_SELF_HEAL_INTERVAL = 300       # 5 minutes: stuck-job reset cadence
+_AUTO_ADVANCE_INTERVAL = 30    # 30 s: idle-queue refill cadence
+_MINUTES_CHECK_INTERVAL = 86400  # 24 hours: rolling 90-day minutes check cadence
 
 _SKIP_FILE = BASE_DIR / "database" / "backfill_skipped.json"
 
@@ -1667,6 +1669,23 @@ def backfill_clear_all_errors(db: Session = Depends(get_db)):
     }
 
 
+@router.post("/check-minutes")
+def trigger_check_minutes(days: int = 90):
+    """Queue a rolling minutes check for recent meetings.
+
+    Re-runs PrimeGov discovery to refresh minutes_url, then downloads any
+    minutes PDFs that became available since initial ingest.  Runs automatically
+    once per day via the self-heal loop; this endpoint triggers it on demand.
+
+    Args:
+        days: Look-back window in days (default 90).
+    """
+    from app.services.task_dispatch import send_task
+    task_id = send_task("tasks.check_minutes", kwargs={"days": days})
+    logger.info("check-minutes triggered manually (days=%d, task_id=%s)", days, task_id)
+    return {"queued": True, "task_id": task_id, "days": days}
+
+
 # ── Self-healing background thread ────────────────────────────────────────────
 
 _self_heal_started = False
@@ -1741,9 +1760,11 @@ def _self_heal_loop():
     Cadence:
       - Every 30 s: check Huey queue depth and auto-advance if idle
       - Every 5 min: reset stuck jobs
+      - Every 24 hr: rolling 90-day minutes check (discover + download)
     """
     import time
     last_reset = 0.0
+    last_minutes_check = 0.0
     while True:
         time.sleep(_AUTO_ADVANCE_INTERVAL)
         now = time.monotonic()
@@ -1764,6 +1785,16 @@ def _self_heal_loop():
 
                 # Auto-advance: refill idle queues every tick
                 _auto_advance(db)
+
+                # Rolling 90-day minutes check: once per day
+                if now - last_minutes_check >= _MINUTES_CHECK_INTERVAL:
+                    try:
+                        from app.services.task_dispatch import send_task
+                        send_task("tasks.check_minutes", kwargs={"days": 90})
+                        logger.info("Self-heal: queued daily check_minutes_task (90-day window)")
+                    except Exception as exc:
+                        logger.warning("Self-heal: check_minutes dispatch failed: %s", exc)
+                    last_minutes_check = now
             finally:
                 db.close()
         except Exception as exc:

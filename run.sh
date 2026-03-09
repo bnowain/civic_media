@@ -74,7 +74,7 @@ light_watchdog() {
   while true; do
     echo "[$(date)] Starting Huey light worker..."
     python -m huey.bin.huey_consumer app.worker.huey_light \
-      -w 1 -k thread -C \
+      -w 2 -k thread -C \
       --logfile=logs/huey_light.log || true
     echo "[$(date)] Light worker exited. Restarting in 5 seconds..."
     sleep 5

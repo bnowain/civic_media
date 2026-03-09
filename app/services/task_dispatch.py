@@ -34,6 +34,7 @@ def _get_task_map() -> dict:
         export_clip_task,
         cleanup_clips_task,
         full_ingest_task,
+        check_minutes_task,
     )
 
     _task_map = {
@@ -50,6 +51,7 @@ def _get_task_map() -> dict:
         "tasks.export_clip": export_clip_task,
         "tasks.cleanup_clips": cleanup_clips_task,
         "tasks.full_ingest": full_ingest_task,
+        "tasks.check_minutes": check_minutes_task,
     }
     return _task_map
 

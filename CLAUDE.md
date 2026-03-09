@@ -76,7 +76,7 @@ Thresholds: high ≥ 0.92, medium ≥ 0.75 (both in `app/config.py`).
 - **Services** (`app/services/`) — all business logic, ML model invocations, file I/O
 - **Models** (`app/models.py`) — SQLAlchemy ORM: Meeting, MediaFile, Document, TranscriptSegment, Person, Voiceprint, SegmentAssignment
 - **Schemas** (`app/schemas.py`) — Pydantic v2 with `from_attributes = True`
-- **Tasks** (`app/tasks.py`) — 13 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `export_clip`, `cleanup_clips`, `full_ingest`)
+- **Tasks** (`app/tasks.py`) — 14 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `export_clip`, `cleanup_clips`, `full_ingest`, `check_minutes`)
 - **Config** (`app/config.py`) — all paths, thresholds, model identifiers, env var defaults
 
 ### Database
@@ -103,6 +103,23 @@ Four export formats via `GET /api/segments/{meeting_id}/export?format=srt|txt|js
 - **Pipeline is resumable** — each stage checks for existing data before running
 - **Diarization cached to disk** — `diarization.json` saves 10-20 min on re-runs
 - **Audio cached in memory during embedding** — avoids 1700+ disk reads per meeting
+- **Light worker runs 2 threads** — enables parallel downloads (e.g., one download + one transcode)
+
+## Rolling Minutes Availability Check
+
+PrimeGov posts meeting minutes roughly **3–4 weeks after** the meeting occurs (observed range 14–40 days,
+average ~23 days). Minutes are approved in batches (3–6 meetings at once), so a given meeting's minutes
+may not appear until the next meeting or later.
+
+To ensure minutes PDFs are captured after they become available:
+
+- **`check_minutes_task`** (`app/tasks.py`) runs a two-phase check:
+  1. Re-runs PrimeGov discovery for years within the window to refresh `minutes_url` on meetings
+     where it wasn't available at initial ingest.
+  2. Downloads minutes PDFs for any meeting that now has a `minutes_url` but no `Document` record.
+- **Triggered automatically** every 24 hours by the self-heal background thread in `app/routers/backfill.py`.
+- **Triggered on demand** via `POST /api/backfill/check-minutes?days=90` (default window: 90 days).
+- Anything older than 90 days is treated as a one-off manual fix.
 
 ## Environment
 

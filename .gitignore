@@ -32,6 +32,19 @@ ocr_text/
 celery.pid
 celery.log
 
+# Local Windows startup scripts (contain environment-specific paths and secrets)
+.gpu_worker.cmd
+.light_worker.cmd
+.celery_watchdog.cmd
+.uvicorn_start.cmd
+.server.pids
+.worker_pids/
+status.cmd
+
+# Temp / test files
+temp/
+test_dl.mp4
+
 # OS
 .DS_Store
 Thumbs.db
