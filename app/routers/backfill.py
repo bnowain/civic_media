@@ -1723,11 +1723,15 @@ def _auto_advance(db: Session) -> None:
             .count()
         ) > 0
         if not gpu_busy:
-            result = backfill_next_process(db=db)
+            # Priority order: governing meetings first, then audio/radio
+            result = backfill_next_process(db=db, category="meeting")
+            if not result.get("queued"):
+                result = backfill_next_process(db=db)
             if result.get("queued"):
                 logger.info(
-                    "auto-advance: queued process for %s (%s)",
+                    "auto-advance: queued process for %s (%s) [%s]",
                     result.get("meeting_id"), result.get("meeting_date"),
+                    result.get("category", "?"),
                 )
 
     # Light worker: only queue a download task if the queue is empty AND no
