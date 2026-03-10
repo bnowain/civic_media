@@ -1,6 +1,6 @@
 # Civic Media — Ingest Specification
 
-**Last updated**: 2026-02-28
+**Last updated**: 2026-03-10
 **Maintainer**: civic_media project
 
 ---
@@ -247,6 +247,15 @@ Re-encoding audio to a single continuous AAC-LC stream at download time eliminat
 - Creates `Document` record and queues `process_pdf_task` (OCR extraction).
 - `doc_type` is one of: `agenda`, `minutes`, `packet`.
 
+**OCR engine** (`app/services/pdf_ingestor.py`): two-stage pipeline.
+  1. **pdfplumber** — native text extraction for digital/searchable PDFs (instant, no GPU).
+  2. **Surya OCR** (PyTorch + CUDA, RTX 5090) — transformer-based model for scanned/image pages.
+     Falls back to Surya when pdfplumber returns < 50 characters.
+     Predictors are cached in-process after first load (~2–5s warm-up).
+
+Surya replaced the previous Tesseract → EasyOCR fallback chain on 2026-03-10.
+See `SURYA_INSTALL.md` for dependency notes and model cache location.
+
 ### 2.10 Backfill Behavior for Government Meetings
 
 Government meetings have **persistent documents that may appear long after the meeting date**. This is the key difference from audio shows:
@@ -371,3 +380,5 @@ API: POST /api/backfill/process-now/{meeting_id}   (specific meeting)
 | HLS segment AAC profile mismatch in pre-2025 video downloads | Pipeline audio extraction fails at segment boundary | Pipeline fallback: re-fetches audio from original HLS source via `extract_audio_from_url()`. **New downloads** are immune — audio is re-encoded at download time |
 | Worker crash during processing | Job left in `running` state; stuck-reset converts to `error` | Crash counter (3+ errors → auto-skip); clear with `POST /api/backfill/clear-errors/{id}` |
 | Freedom in Action migrated CDN | Pre-Dec 2025: KQMS SecureNet (purged). Dec 2025+: Squarespace CDN | Scraper targets Squarespace CDN; older episodes are unrecoverable |
+| Manual upload uses `supplemental` type | Upload router previously only accepted `agenda`, `minutes`, `supplemental` — `packet` was rejected | Fixed 2026-03-10: `packet` added to `_VALID_DOC_TYPES` in `routers/documents.py` |
+| Meeting discovered before documents posted | `agenda_url`/`packet_url` already in DB when docs are uploaded manually; auto-queue does not re-fire | Upload manually via API: `POST /api/documents/{meeting_id}/upload` with `document_type=agenda` or `packet` |

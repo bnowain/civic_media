@@ -1,12 +1,11 @@
 """
 PDF text extraction service.
 
-Strategy (three-stage fallback):
+Strategy (two-stage):
   1. Native text extraction with pdfplumber (fast, for digital PDFs).
-  2. Tesseract OCR (for scanned printed text).
-  3. EasyOCR with GPU (for handwriting, cursive, mixed content).
+  2. Surya OCR (PyTorch + CUDA) — transformer-based foundation model for scanned pages.
 
-PDF rasterization for stages 2 and 3 uses PyMuPDF (fitz) — no Poppler required.
+PDF rasterization for stage 2 uses PyMuPDF (fitz) — no Poppler required.
 
 No summarisation. No indexing. Raw text only.
 """
@@ -18,9 +17,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Minimum characters before triggering the next fallback stage
+# Minimum characters before triggering Surya OCR fallback
 _MIN_NATIVE_CHARS = 50
-_MIN_TESSERACT_CHARS = 50
+
+# Cached Surya predictors — loading models is expensive (~2–5s on first call)
+_surya_foundation = None
+_surya_rec = None
+_surya_det = None
 
 
 def extract_text(pdf_path: str) -> str:
@@ -39,26 +42,16 @@ def extract_text(pdf_path: str) -> str:
         logger.error("PDF not found: %s", pdf_path)
         return ""
 
-    # Stage 1: Native text extraction (pdfplumber)
+    # Stage 1: Native text extraction (pdfplumber — instant for digital PDFs)
     text = _native_extract(pdf_path)
 
     if len(text.strip()) < _MIN_NATIVE_CHARS:
         logger.info(
-            "Native text too sparse (%d chars), falling back to Tesseract: %s",
+            "Native text too sparse (%d chars), falling back to Surya OCR: %s",
             len(text.strip()), path.name,
         )
-        # Stage 2: Tesseract OCR
-        text = _ocr_extract(pdf_path)
-
-    if len(text.strip()) < _MIN_TESSERACT_CHARS:
-        logger.info(
-            "Tesseract text too sparse (%d chars), falling back to EasyOCR: %s",
-            len(text.strip()), path.name,
-        )
-        # Stage 3: EasyOCR (handles handwriting, cursive, mixed content)
-        easyocr_text = _easyocr_extract(pdf_path)
-        if len(easyocr_text.strip()) > len(text.strip()):
-            text = easyocr_text
+        # Stage 2: Surya OCR (PyTorch + CUDA, transformer-based)
+        text = _surya_extract(pdf_path)
 
     return text
 
@@ -82,7 +75,7 @@ def _native_extract(pdf_path: str) -> str:
         return ""
 
 
-# ── PDF rasterizer (shared by Tesseract and EasyOCR) ─────────────────────────
+# ── PDF rasterizer ────────────────────────────────────────────────────────────
 
 def _pdf_to_images(pdf_path: str, dpi: int = 300) -> list:
     """Rasterize PDF pages to PIL Image objects using PyMuPDF (no Poppler needed)."""
@@ -100,88 +93,53 @@ def _pdf_to_images(pdf_path: str, dpi: int = 300) -> list:
     return images
 
 
-# ── Tesseract OCR fallback ────────────────────────────────────────────────────
+# ── Surya OCR (PyTorch + CUDA) ────────────────────────────────────────────────
 
-def _ocr_extract(pdf_path: str) -> str:
-    try:
-        import pytesseract
-
-        logger.info("Running Tesseract OCR on %s ...", pdf_path)
-        pages = _pdf_to_images(pdf_path, dpi=300)
-        texts = []
-        for i, page_img in enumerate(pages):
-            page_text = pytesseract.image_to_string(page_img)
-            texts.append(page_text)
-            logger.debug("Tesseract page %d: %d chars", i + 1, len(page_text))
-
-        result = "\n\n".join(texts)
-        logger.info("Tesseract complete: %d chars from %s", len(result), pdf_path)
-        return result
-
-    except ImportError as exc:
-        logger.error(
-            "Tesseract dependencies missing (%s). Install: pip install pytesseract",
-            exc,
-        )
-        return ""
-    except Exception as exc:
-        logger.error("Tesseract failed on %s: %s", pdf_path, exc)
-        return ""
-
-
-# ── EasyOCR fallback (handwriting, cursive, mixed) ───────────────────────────
-
-# Cache the EasyOCR reader — loading the model is expensive (~2s)
-_easyocr_reader = None
-
-
-def _get_easyocr_reader():
-    global _easyocr_reader
-    if _easyocr_reader is None:
+def _get_surya_predictors():
+    """Load and cache Surya foundation, recognition, and detection predictors."""
+    global _surya_foundation, _surya_rec, _surya_det
+    if _surya_rec is None:
         try:
-            import easyocr
-            logger.info("Initializing EasyOCR reader (GPU)...")
-            _easyocr_reader = easyocr.Reader(["en"], gpu=True)
-            logger.info("EasyOCR reader ready")
+            from surya.foundation import FoundationPredictor
+            from surya.recognition import RecognitionPredictor
+            from surya.detection import DetectionPredictor
+
+            logger.info("Initializing Surya OCR predictors (GPU)...")
+            _surya_foundation = FoundationPredictor()
+            _surya_rec = RecognitionPredictor(foundation_predictor=_surya_foundation)
+            _surya_det = DetectionPredictor()
+            logger.info("Surya OCR predictors ready")
         except Exception as exc:
-            logger.error("EasyOCR init failed: %s", exc)
-            try:
-                import easyocr
-                logger.info("Retrying EasyOCR with CPU...")
-                _easyocr_reader = easyocr.Reader(["en"], gpu=False)
-            except Exception:
-                pass
-    return _easyocr_reader
+            logger.error("Surya OCR init failed: %s", exc)
+            _surya_foundation = _surya_rec = _surya_det = None
+    return _surya_rec, _surya_det
 
 
-def _easyocr_extract(pdf_path: str) -> str:
+def _surya_extract(pdf_path: str) -> str:
     try:
-        import numpy as np
-
-        reader = _get_easyocr_reader()
-        if reader is None:
-            logger.error("EasyOCR not available")
+        rec, det = _get_surya_predictors()
+        if rec is None:
+            logger.error("Surya OCR not available")
             return ""
 
-        logger.info("Running EasyOCR on %s ...", pdf_path)
-        pages = _pdf_to_images(pdf_path, dpi=300)
-        texts = []
+        logger.info("Running Surya OCR on %s ...", pdf_path)
+        images = _pdf_to_images(pdf_path, dpi=300)
 
-        for i, page_img in enumerate(pages):
-            # EasyOCR expects numpy array
-            img_array = np.array(page_img)
-            results = reader.readtext(img_array, detail=0, paragraph=True)
-            page_text = "\n".join(results)
+        if not images:
+            return ""
+
+        predictions = rec(images, det_predictor=det)
+
+        texts = []
+        for i, pred in enumerate(predictions):
+            page_text = "\n".join(line.text for line in pred.text_lines)
             texts.append(page_text)
-            logger.debug("EasyOCR page %d: %d chars", i + 1, len(page_text))
+            logger.debug("Surya page %d: %d chars", i + 1, len(page_text))
 
         result = "\n\n".join(texts)
-        logger.info("EasyOCR complete: %d chars from %s", len(result), pdf_path)
+        logger.info("Surya OCR complete: %d chars from %s", len(result), pdf_path)
         return result
 
-    except ImportError as exc:
-        logger.error("EasyOCR dependencies missing (%s). Install: pip install easyocr", exc)
-        return ""
     except Exception as exc:
-        logger.error("EasyOCR failed on %s: %s", pdf_path, exc)
+        logger.error("Surya OCR failed on %s: %s", pdf_path, exc)
         return ""

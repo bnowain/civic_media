@@ -132,6 +132,73 @@ async def stream_media(meeting_id: str, request: Request, db: Session = Depends(
     )
 
 
+# ── Article video streaming ───────────────────────────────────────────────────
+
+@router.get("/media/articles/{filename}")
+async def stream_article_video(filename: str, request: Request):
+    """
+    Stream an article video file (e.g. sacbee-2.mp4) with range request support.
+    Files live at MEDIA_DIR/articles/{filename}.
+    """
+    from app.config import MEDIA_DIR
+    video_path = MEDIA_DIR / "articles" / filename
+
+    if not video_path.exists():
+        raise HTTPException(404, "Video file not found")
+
+    suffix     = video_path.suffix.lower()
+    media_type = _MIME_TYPES.get(suffix, "video/mp4")
+    file_size  = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if not range_header:
+        return FileResponse(
+            path=str(video_path),
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes"},
+        )
+
+    try:
+        range_val = range_header.strip().replace("bytes=", "")
+        start_str, _, end_str = range_val.partition("-")
+        start = int(start_str) if start_str else 0
+        end   = int(end_str)   if end_str   else file_size - 1
+    except ValueError:
+        raise HTTPException(400, "Invalid Range header")
+
+    if start > end or end >= file_size:
+        raise HTTPException(
+            416,
+            "Range Not Satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    chunk_size = end - start + 1
+
+    def iterfile():
+        with video_path.open("rb") as f:
+            f.seek(start)
+            remaining = chunk_size
+            buf = 1024 * 256
+            while remaining > 0:
+                data = f.read(min(buf, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    return StreamingResponse(
+        iterfile(),
+        status_code=206,
+        media_type=media_type,
+        headers={
+            "Content-Range":  f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges":  "bytes",
+            "Content-Length": str(chunk_size),
+        },
+    )
+
+
 # ── Upload ────────────────────────────────────────────────────────────────────
 
 @router.post(

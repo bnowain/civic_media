@@ -121,10 +121,12 @@ function renderCard(article) {
       <div class="article-detail-actions">
         <a href="${escHtml(article.canonical_url)}" target="_blank" rel="noopener">Open article ↗</a>
       </div>
+      ${renderVideo(article)}
       ${renderImages(article.image_urls)}
       ${article.article_text
         ? `<div class="article-full-text">${escHtml(article.article_text)}</div>`
-        : '<p style="color:#666;font-size:.78rem;margin:0 0 10px">Full text not available.</p>'}
+        : (article.media_type === 'video' ? '' : '<p style="color:#666;font-size:.78rem;margin:0 0 10px">Full text not available.</p>')}
+      ${renderTranscript(article)}
       ${renderLinks(article.embedded_links)}
       ${renderTags(article.source_tags)}
     </div>
@@ -135,6 +137,50 @@ function renderCard(article) {
   });
 
   return card;
+}
+
+function renderVideo(article) {
+  if (!article.local_video_path) return '';
+  const filename = article.local_video_path.split('/').pop();
+  const src = `/media/articles/${encodeURIComponent(filename)}`;
+  return `
+    <div class="article-video-wrap">
+      <video controls preload="metadata" style="width:100%;max-width:800px;border-radius:6px;background:#000;display:block;margin:0 0 12px;">
+        <source src="${escHtml(src)}" type="video/mp4">
+        Your browser does not support video playback.
+      </video>
+    </div>`;
+}
+
+function renderTranscript(article) {
+  if (!article.transcript && !article.transcript_json) return '';
+
+  let body = '';
+  if (article.transcript_json) {
+    try {
+      const segs = JSON.parse(article.transcript_json);
+      body = segs.map(s => {
+        const ts = s.start != null ? `<span class="seg-time">${fmtSecs(s.start)}</span> ` : '';
+        const sp = s.speaker ? `<strong>${escHtml(s.speaker)}:</strong> ` : '';
+        return `<p class="seg-line">${ts}${sp}${escHtml(s.text)}</p>`;
+      }).join('');
+    } catch { /* fall through to plain text */ }
+  }
+  if (!body && article.transcript) {
+    body = `<p style="white-space:pre-wrap">${escHtml(article.transcript)}</p>`;
+  }
+
+  return `
+    <div class="article-transcript">
+      <div class="article-links-title">Transcript</div>
+      <div class="transcript-body">${body}</div>
+    </div>`;
+}
+
+function fmtSecs(secs) {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2,'0')}`;
 }
 
 function renderImages(imageUrls) {

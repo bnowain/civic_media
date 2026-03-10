@@ -68,6 +68,10 @@ def _row_to_out(row: NewsArticle) -> dict:
         "filter_reason":         row.filter_reason,
         "fetch_status":          row.fetch_status,
         "external_document_urls": _parse_json(row.external_document_urls),
+        "media_type":            row.media_type,
+        "local_video_path":      row.local_video_path,
+        "transcript":            row.transcript,
+        "transcript_json":       row.transcript_json,
         "created_at":            _dt_iso(row.created_at),
         "updated_at":            _dt_iso(row.updated_at),
     }
@@ -125,6 +129,10 @@ def ingest_article(payload: schemas.NewsArticleCreate, db: Session = Depends(get
             'filter_reason':          payload.filter_reason,
             'fetch_status':           payload.fetch_status,
             'external_document_urls': _to_json(payload.external_document_urls),
+            'media_type':             payload.media_type,
+            'local_video_path':       payload.local_video_path,
+            'transcript':             payload.transcript,
+            'transcript_json':        payload.transcript_json,
         }
         changed = False
         for col, new_val in updatable.items():
@@ -163,6 +171,10 @@ def ingest_article(payload: schemas.NewsArticleCreate, db: Session = Depends(get
         filter_reason          = payload.filter_reason,
         fetch_status           = payload.fetch_status,
         external_document_urls = _to_json(payload.external_document_urls),
+        media_type             = payload.media_type,
+        local_video_path       = payload.local_video_path,
+        transcript             = payload.transcript,
+        transcript_json        = payload.transcript_json,
     )
     db.add(row)
     db.commit()

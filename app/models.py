@@ -631,6 +631,12 @@ class NewsArticle(Base):
     fetch_status          = Column(String,   nullable=True)  # 'full', 'partial', 'metadata_only'
     external_document_urls = Column(Text,    nullable=True)  # JSON list of linked doc URLs (.pdf, .docx, gov portals)
 
+    # ── Video / multimedia ───────────────────────────────────────────────────
+    media_type        = Column(String,   nullable=True)   # 'text' (default) | 'video' | 'audio'
+    local_video_path  = Column(Text,     nullable=True)   # relative path under media/ e.g. articles/sacbee-2.mp4
+    transcript        = Column(Text,     nullable=True)   # plain-text transcript
+    transcript_json   = Column(Text,     nullable=True)   # JSON speaker-diarized segments [{start,end,speaker,text}]
+
     created_at  = Column(DateTime, default=datetime.utcnow)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

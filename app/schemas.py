@@ -477,6 +477,10 @@ class NewsArticleCreate(BaseModel):
     filter_reason: Optional[str] = None          # which relevance rule passed
     fetch_status: Optional[str] = None           # 'full', 'partial', 'metadata_only'
     external_document_urls: Optional[list[str]] = None  # linked PDFs / gov docs
+    media_type: Optional[str] = None             # 'text' (default) | 'video' | 'audio'
+    local_video_path: Optional[str] = None       # relative path under media/
+    transcript: Optional[str] = None             # plain-text transcript
+    transcript_json: Optional[str] = None        # JSON diarized segments
 
 
 class NewsArticleOut(BaseModel):
@@ -501,6 +505,10 @@ class NewsArticleOut(BaseModel):
     filter_reason: Optional[str]
     fetch_status: Optional[str]
     external_document_urls: Optional[list[str]]
+    media_type: Optional[str]
+    local_video_path: Optional[str]
+    transcript: Optional[str]
+    transcript_json: Optional[str]
     created_at: datetime
     updated_at: Optional[datetime]
     comment_count: Optional[int] = None
