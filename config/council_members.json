@@ -1,0 +1,99 @@
+{
+  "jurisdiction": "Redding City Council",
+  "time_window": { "start": "2022-01-01", "end": "2026-12-31" },
+  "notes_for_agent": [
+    "end_date null = incumbent/ongoing as of 2026-03-09.",
+    "Redding City Council has 5 seats; Mayor and Vice Mayor are selected annually by the council from its members.",
+    "IMPORTANT: Verify term dates from official city records at https://www.cityofredding.org/government/city-council — these dates are approximate and need cross-validation with meeting minutes.",
+    "Patrick Jones served on BOTH Redding City Council AND Shasta County Board of Supervisors (different terms). He is the SAME person in the people table — his person_id links to both bodies."
+  ],
+  "council_members": [
+    {
+      "name": "Erin Resner",
+      "aliases": ["Resner"],
+      "start_date": "2018-12-11",
+      "end_date": null,
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Michael Dacquisto",
+      "aliases": ["Dacquisto"],
+      "start_date": "2016-12-13",
+      "end_date": null,
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Brent Weaver",
+      "aliases": ["Weaver"],
+      "start_date": "2023-01-10",
+      "end_date": null,
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Julie Winter",
+      "aliases": ["Winter"],
+      "start_date": "2020-12-08",
+      "end_date": null,
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Patrick Jones",
+      "aliases": ["Jones"],
+      "start_date": "2016-12-13",
+      "end_date": "2021-01-05",
+      "notes": "Left city council to serve on Shasta County Board of Supervisors (District 4) starting Jan 2021. Same person_id across both bodies.",
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Mark Mezzano",
+      "aliases": ["Mezzano"],
+      "start_date": "2018-12-11",
+      "end_date": "2023-01-10",
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    },
+    {
+      "name": "Tenessa Audette",
+      "aliases": ["Audette"],
+      "start_date": "2022-12-13",
+      "end_date": null,
+      "source_url": "https://www.cityofredding.org/government/city-council"
+    }
+  ],
+  "mayor_history": [
+    {
+      "mayor": "Erin Resner",
+      "vice_mayor": "Michael Dacquisto",
+      "start_date": "2022-01-01",
+      "end_date": "2023-01-01",
+      "notes": "Approximate — verify from official meeting minutes"
+    },
+    {
+      "mayor": "Michael Dacquisto",
+      "vice_mayor": "Julie Winter",
+      "start_date": "2023-01-01",
+      "end_date": "2024-01-01",
+      "notes": "Approximate — verify from official meeting minutes"
+    },
+    {
+      "mayor": "Julie Winter",
+      "vice_mayor": "Brent Weaver",
+      "start_date": "2024-01-01",
+      "end_date": "2025-01-01",
+      "notes": "Approximate — verify from official meeting minutes"
+    },
+    {
+      "mayor": "Brent Weaver",
+      "vice_mayor": "Tenessa Audette",
+      "start_date": "2025-01-01",
+      "end_date": "2026-01-01",
+      "notes": "Approximate — verify from official meeting minutes"
+    },
+    {
+      "mayor": "Tenessa Audette",
+      "vice_mayor": "Erin Resner",
+      "start_date": "2026-01-01",
+      "end_date": null,
+      "notes": "Approximate — verify from official meeting minutes"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ time periods may produce minutes in different formats. See PARSER REGISTRY below
 
 Currently implemented:
   - Board of Supervisors (Shasta County) — "shasta_bos"
+  - Redding City Council — "redding_city_council"
 
 Adding a new format:
   1. Write a function `parse_<body>(text, ...) -> ParseResult`
@@ -56,6 +57,7 @@ class ParsedVote:
     yes_members:       list = field(default_factory=list)
     no_members:        list = field(default_factory=list)
     absent_members:    list = field(default_factory=list)
+    abstain_members:   list = field(default_factory=list)  # Redding CC and others that track abstentions
 
 
 @dataclass
@@ -207,6 +209,74 @@ def _fix_supervisor_names(v: "ParsedVote", meeting_date: Optional[str]) -> None:
     v.yes_members    = [_correct_supervisor_name(n, meeting_date) for n in v.yes_members]
     v.no_members     = [_correct_supervisor_name(n, meeting_date) for n in v.no_members]
     v.absent_members = [_correct_supervisor_name(n, meeting_date) for n in v.absent_members]
+
+
+# ── Redding City Council roster — OCR name correction ─────────────────────────
+# Loaded once at module import from config/council_members.json.
+
+_COUNCIL_MEMBERS_FILE = Path(__file__).parent.parent.parent / "config" / "council_members.json"
+
+# [(last_name, full_name, start_date, end_date_or_None), ...]
+_COUNCIL_MEMBER_ROSTER: list[tuple[str, str, str, Optional[str]]] = []
+_ALL_COUNCIL_NAMES: list[str] = []   # all unique last names across all terms
+
+
+def _load_council_roster() -> None:
+    if not _COUNCIL_MEMBERS_FILE.exists():
+        return
+    try:
+        data = _json.loads(_COUNCIL_MEMBERS_FILE.read_text(encoding="utf-8"))
+        seen: set[str] = set()
+        for entry in data.get("council_members", []):
+            full  = entry.get("name", "")
+            last  = full.rsplit(" ", 1)[-1]
+            start = entry.get("start_date") or "1900-01-01"
+            end   = entry.get("end_date")
+            _COUNCIL_MEMBER_ROSTER.append((last, full, start, end))
+            if last not in seen:
+                seen.add(last)
+                _ALL_COUNCIL_NAMES.append(last)
+    except Exception:
+        pass
+
+
+_load_council_roster()
+
+
+def _council_members_for_date(meeting_date: Optional[str]) -> list[str]:
+    """Return last names of council members active on meeting_date."""
+    if not meeting_date or not _COUNCIL_MEMBER_ROSTER:
+        return _ALL_COUNCIL_NAMES
+    active = [
+        last for last, _full, start, end in _COUNCIL_MEMBER_ROSTER
+        if start <= meeting_date and (end is None or meeting_date < end)
+    ]
+    return active if active else _ALL_COUNCIL_NAMES
+
+
+def _correct_council_name(name: str, meeting_date: Optional[str] = None) -> str:
+    """Fuzzy-correct an OCR-mangled council member last name."""
+    if not name or not _ALL_COUNCIL_NAMES:
+        return name
+    if any(n.lower() == name.lower() for n in _ALL_COUNCIL_NAMES):
+        return name
+    candidates = _council_members_for_date(meeting_date)
+    matches = difflib.get_close_matches(name, candidates, n=1, cutoff=0.75)
+    if not matches:
+        matches = difflib.get_close_matches(name, _ALL_COUNCIL_NAMES, n=1, cutoff=0.75)
+    return matches[0] if matches else name
+
+
+def _fix_council_names(v: "ParsedVote", meeting_date: Optional[str]) -> None:
+    """Correct OCR-mangled council member names in-place."""
+    if v.mover:
+        v.mover = _correct_council_name(v.mover, meeting_date)
+    if v.seconder:
+        v.seconder = _correct_council_name(v.seconder, meeting_date)
+    v.yes_members     = [_correct_council_name(n, meeting_date) for n in v.yes_members]
+    v.no_members      = [_correct_council_name(n, meeting_date) for n in v.no_members]
+    v.absent_members  = [_correct_council_name(n, meeting_date) for n in v.absent_members]
+    v.abstain_members = [_correct_council_name(n, meeting_date) for n in v.abstain_members]
 
 
 # ── Vote-like detection (format-agnostic) ─────────────────────────────────────
@@ -1091,6 +1161,228 @@ def _parse_shasta_bos(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# REDDING CITY COUNCIL PARSER
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Redding CC minutes use structured four-line vote blocks:
+#   AYES:     Council Members - Smith, Jones, Garcia, and Mayor Brown
+#   NOES:     None
+#   ABSENT:   Council Member - Williams
+#   ABSTAIN:  None
+#
+# Motion language precedes each block:
+#   "Motion by Council Member Weaver, seconded by Council Member Winter, to [action]."
+#   or "MOTION: Motion by Mayor Resner, seconded by Vice Mayor Dacquisto..."
+#
+# Key differences from BOS parser:
+#   - Structured blocks (not prose narrative)
+#   - ABSTAIN tracked separately (BOS doesn't)
+#   - "Council Members -" / "Mayor" role prefixes before name lists
+#   - "None" explicitly marks empty vote categories
+
+# Motion detection patterns (Redding CC style)
+_RCC_MOTION_PAT = re.compile(
+    r'(?:MOTION\s*:\s*)?[Mm]otion\s+by\s+'
+    r'(?:Council\s+Members?\s+|(?:Vice\s+)?Mayor\s+)'
+    r'([\w][\w\s\-]*?)(?=\s*,\s*|\s+and\b)',
+    re.IGNORECASE,
+)
+_RCC_SECONDED_PAT = re.compile(
+    r'seconded\s+by\s+(?:Council\s+Members?\s+|(?:Vice\s+)?Mayor\s+)'
+    r'([\w][\w\s\-]*?)(?=[,.\s]|$)',
+    re.IGNORECASE,
+)
+
+# Full AYES/NOES/ABSENT/ABSTAIN block detector.
+#
+# Works in both raw (multi-line) and normalised (single-line) text.
+# _normalise() collapses single newlines to spaces within paragraphs, so all
+# four labels may appear inline:
+#   "AYES: Council Members - X, Y  NOES: None  ABSENT: None  ABSTAIN: None"
+# The regex captures up to the next label keyword using a lookahead.
+_RCC_VOTE_BLOCK = re.compile(
+    r'AYES\s*:\s*(?P<ayes>.*?)(?=\s+NOES\s*:|$)'
+    r'\s+NOES\s*:\s*(?P<noes>.*?)(?=\s+ABSENT\s*:|\s+ABSTAIN\s*:|$)'
+    r'(?:\s+ABSENT\s*:\s*(?P<absent>.*?)(?=\s+ABSTAIN\s*:|$))?'
+    r'(?:\s+ABSTAIN\s*:\s*(?P<abstain>.*?)(?=\s+AYES\s*:|\n\n|$))?',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Section headers used in Redding CC minutes
+_RCC_SECTION_HEADERS = re.compile(
+    r'^(CONSENT\s+CALENDAR|REGULAR\s+(?:AGENDA|CALENDAR)|PUBLIC\s+COMMENT|'
+    r'CLOSED\s+SESSION|PRESENTATIONS?|REPORTS?|HEARINGS?|UNFINISHED\s+BUSINESS|'
+    r'NEW\s+BUSINESS)',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _rcc_current_section(text_before: str) -> str:
+    matches = list(_RCC_SECTION_HEADERS.finditer(text_before))
+    return matches[-1].group(0).strip().title() if matches else "Regular Agenda"
+
+
+def _extract_rcc_names(line: str, meeting_date: Optional[str] = None) -> list[str]:
+    """
+    Parse 'Council Members - Smith, Jones, and Mayor Brown' → ['Smith', 'Jones', 'Brown'].
+
+    Strips role prefixes (Council Member/Members, Mayor, Vice Mayor) and the
+    dash separator that Redding CC uses before name lists.  Returns empty list
+    for "None" entries.  Applies fuzzy correction against the council roster.
+    """
+    if not line:
+        return []
+    line = line.strip()
+    if line.lower() in ('none', 'n/a', ''):
+        return []
+
+    # Strip role prefix + dash: "Council Members - " or "Council Member - "
+    line = re.sub(r'^Council\s+Members?\s*-\s*', '', line, flags=re.IGNORECASE)
+    # Strip standalone Mayor prefix + dash
+    line = re.sub(r'^(?:Vice\s+)?Mayor\s*-\s*', '', line, flags=re.IGNORECASE)
+
+    # Replace "and Mayor [Name]" / "and Vice Mayor [Name]" → ", [Name]"
+    # so the name gets picked up in the comma split below
+    line = re.sub(r'\band\s+(?:Vice\s+)?Mayor\s+', ', ', line, flags=re.IGNORECASE)
+
+    # Split on commas and conjunctions
+    parts = re.split(r',\s*(?:and\s+)?|\band\b', line)
+
+    names = []
+    for part in parts:
+        # Strip any remaining role prefix
+        name = re.sub(
+            r'^(?:Council\s+Members?\s+|(?:Vice\s+)?Mayor\s+)', '',
+            part.strip(), flags=re.IGNORECASE,
+        )
+        name = name.strip().rstrip('.,')
+        if not name or name.lower() in ('none', 'n/a'):
+            continue
+        names.append(_correct_council_name(name, meeting_date))
+
+    return names
+
+
+def _parse_redding_city_council(
+    ocr_text: str,
+    meeting_id: str,
+    document_id: Optional[str],
+    meeting_date: Optional[str],
+    group_name: Optional[str],
+) -> ParseResult:
+    """
+    Parse Redding City Council minutes into structured vote records.
+
+    Scans for AYES/NOES/ABSENT/ABSTAIN blocks, then looks back in the
+    preceding text for the motion description, mover, and seconder.
+    """
+    normalised = _normalise(ocr_text)
+
+    votes: list[ParsedVote] = []
+    unmatched: list[str] = []
+
+    for block_match in _RCC_VOTE_BLOCK.finditer(normalised):
+        ayes_line   = (block_match.group("ayes")   or "").strip()
+        noes_line   = (block_match.group("noes")   or "").strip()
+        absent_line = (block_match.group("absent") or "").strip()
+        abstain_line = (block_match.group("abstain") or "").strip()
+
+        yes_names     = _extract_rcc_names(ayes_line, meeting_date)
+        no_names      = _extract_rcc_names(noes_line, meeting_date)
+        absent_names  = _extract_rcc_names(absent_line, meeting_date)
+        abstain_names = _extract_rcc_names(abstain_line, meeting_date)
+
+        # Determine outcome
+        if not no_names and not abstain_names:
+            outcome = OUTCOME_UNANIMOUS
+        elif len(yes_names) > len(no_names):
+            outcome = OUTCOME_CARRIED
+        else:
+            outcome = OUTCOME_FAILED
+
+        tally_parts = [str(len(yes_names)), str(len(no_names))]
+        if abstain_names:
+            tally_parts.append(str(len(abstain_names)))
+        tally = "-".join(tally_parts) if yes_names or no_names else None
+
+        # Look back up to 1500 chars for motion language and section header
+        block_start = block_match.start()
+        preamble = normalised[max(0, block_start - 1500):block_start]
+        section = _rcc_current_section(normalised[:block_start])
+
+        # Extract mover
+        mover = None
+        mover_match = None
+        for mm in _RCC_MOTION_PAT.finditer(preamble):
+            mover_match = mm
+        if mover_match:
+            raw_mover = mover_match.group(1).strip().rstrip(",.")
+            mover = _correct_council_name(raw_mover, meeting_date)
+
+        # Extract seconder
+        seconder = None
+        for sm in _RCC_SECONDED_PAT.finditer(preamble):
+            raw_sec = sm.group(1).strip().rstrip(",.")
+            seconder = _correct_council_name(raw_sec, meeting_date)
+
+        # Extract item description — text between the last section header (or paragraph
+        # break) and the AYES block.  Use last 600 chars of preamble for description.
+        # Strip the motion line itself to avoid duplication.
+        desc_raw = preamble[-600:].strip()
+        # Strip anything before the last double-newline (i.e. the prior agenda item)
+        para_splits = re.split(r'\n{2,}', desc_raw)
+        desc = para_splits[-1].strip() if para_splits else desc_raw
+        # Strip leading motion text so description is the item being decided
+        desc = re.sub(
+            r'^(?:MOTION\s*:\s*)?[Mm]otion\s+by\s+.*?(?:seconded\s+by\s+\S+\s+\S+)?\s*[,.]?\s*',
+            '', desc,
+        ).strip()
+        # Truncate for storage
+        item_desc = _truncate(desc or "(see minutes)")
+
+        resolution = _extract_resolution(
+            normalised[max(0, block_start - 500):block_start]
+        )
+
+        v = ParsedVote(
+            meeting_id=meeting_id,
+            document_id=document_id,
+            meeting_date=meeting_date,
+            group_name=group_name,
+            agenda_section=section,
+            item_description=item_desc,
+            resolution_number=resolution,
+            outcome=outcome,
+            vote_tally=tally,
+            mover=mover,
+            seconder=seconder,
+            yes_members=yes_names,
+            no_members=no_names,
+            absent_members=absent_names,
+            abstain_members=abstain_names,
+        )
+        _fix_council_names(v, meeting_date)
+        votes.append(v)
+
+    if not votes:
+        # Check if the document looks like a minutes doc with vote-like content
+        has_vote_signals = bool(
+            re.search(r'AYES\s*:', normalised, re.IGNORECASE) or
+            re.search(r'NOES\s*:', normalised, re.IGNORECASE)
+        )
+        status = "unrecognized" if has_vote_signals else "empty"
+    else:
+        status = "ok" if not unmatched else "partial"
+
+    return ParseResult(
+        votes=votes,
+        unmatched_paragraphs=unmatched,
+        parser_used="redding_city_council",
+        parse_status=status,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PARSER REGISTRY — add new governing body parsers here
 # ═══════════════════════════════════════════════════════════════════════════════
 #
@@ -1103,8 +1395,8 @@ def _parse_shasta_bos(
 PARSER_REGISTRY: dict[str, callable] = {
     "board of supervisors": _parse_shasta_bos,
     "shasta county board": _parse_shasta_bos,
+    "redding city council": _parse_redding_city_council,
     # Future entries:
-    # "redding city council": _parse_redding_city_council,
     # "planning commission":  _parse_planning_commission,
 }
 

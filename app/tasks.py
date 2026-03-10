@@ -835,11 +835,14 @@ def full_ingest_task(meeting_id: str) -> dict:
 def check_minutes_task(days: int = 90) -> dict:
     """Rolling check for newly posted minutes PDFs for recent meetings.
 
-    Two phases:
-      1. Re-run PrimeGov discovery for the years covered by the window so any
-         meetings whose minutes_url was NULL get updated if minutes are now posted.
-      2. Download minutes PDFs for any meeting with a minutes_url but no
-         downloaded minutes document in the DB.
+    Three phases:
+      1a. Re-run PrimeGov discovery for the years covered by the window so any
+          BOS meetings whose minutes_url was NULL get updated if minutes are now posted.
+      1b. Re-run Granicus discovery so any Redding CC meetings whose minutes_url
+          was NULL get updated if minutes are now posted.
+      2.  Download minutes PDFs for any meeting (either source) that now has a
+          minutes_url but no downloaded minutes document in the DB.
+          Routes to the correct downloader based on meeting source.
 
     Called automatically once per day by the self-heal background thread, or
     manually via POST /api/backfill/check-minutes.
@@ -847,21 +850,29 @@ def check_minutes_task(days: int = 90) -> dict:
     from datetime import timedelta, date
     from app.database import SessionLocal
     from app import models
-    from app.services.primegov.discovery import run_discovery
-    from app.services.primegov.downloader import download_document
+    from app.services.primegov.discovery import run_discovery as primegov_run_discovery
+    from app.services.primegov.downloader import download_document as primegov_download_document
+    from app.services.granicus.discovery import run_discovery as granicus_run_discovery
+    from app.services.granicus.downloader import download_document as granicus_download_document
 
     db = SessionLocal()
     try:
         cutoff = date.today() - timedelta(days=days)
         cutoff_str = cutoff.isoformat()
 
-        # Phase 1: refresh PrimeGov metadata for years in the window so that
-        # any meeting whose minutes became available gets its minutes_url set.
+        # Phase 1a: refresh PrimeGov metadata (BOS meetings)
         years = sorted({cutoff.year, date.today().year})
-        logger.info("check_minutes: re-running discovery for years %s", years)
-        run_discovery(db, committee_ids=None, years=years, mode="update")
+        logger.info("check_minutes: re-running PrimeGov discovery for years %s", years)
+        primegov_run_discovery(db, committee_ids=None, years=years, mode="update")
 
-        # Phase 2: download minutes for meetings that now have a URL but no doc.
+        # Phase 1b: refresh Granicus metadata (Redding CC meetings)
+        logger.info("check_minutes: re-running Granicus discovery from %s", cutoff_str)
+        try:
+            granicus_run_discovery(db, min_date=cutoff_str)
+        except Exception as exc:
+            logger.warning("check_minutes: Granicus discovery failed (non-fatal): %s", exc)
+
+        # Phase 2: download minutes for any meeting that now has a URL but no doc
         existing_min_ids = {
             r.meeting_id for r in
             db.query(models.Document.meeting_id)
@@ -882,18 +893,33 @@ def check_minutes_task(days: int = 90) -> dict:
 
         downloaded, errors = [], []
         for meeting in candidates:
-            result = download_document(db, meeting.meeting_id, "minutes")
-            if result.get("status") == "complete":
-                downloaded.append(meeting.meeting_id)
-                logger.info(
-                    "check_minutes: downloaded minutes for %s (%s)",
-                    meeting.meeting_date, meeting.title,
-                )
-            else:
+            try:
+                if meeting.granicus_id is not None:
+                    # Redding City Council — Granicus downloader
+                    result = granicus_download_document(db, meeting, "minutes")
+                else:
+                    # Shasta BOS — PrimeGov downloader
+                    result = primegov_download_document(db, meeting.meeting_id, "minutes")
+
+                if result.get("status") == "complete":
+                    db.commit()
+                    downloaded.append(meeting.meeting_id)
+                    logger.info(
+                        "check_minutes: downloaded minutes for %s (%s)",
+                        meeting.meeting_date, meeting.title,
+                    )
+                else:
+                    errors.append(meeting.meeting_id)
+                    logger.warning(
+                        "check_minutes: failed to download minutes for %s: %s",
+                        meeting.meeting_id, result,
+                    )
+            except Exception as exc:
+                db.rollback()
                 errors.append(meeting.meeting_id)
                 logger.warning(
-                    "check_minutes: failed to download minutes for %s: %s",
-                    meeting.meeting_id, result,
+                    "check_minutes: exception downloading minutes for %s: %s",
+                    meeting.meeting_id, exc,
                 )
 
         return {
@@ -1039,6 +1065,9 @@ def _ingest_minutes_votes(db, doc) -> None:
         for name in v.absent_members:
             db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
                                      vote_value="absent", person_id=person_map.get(name)))
+        for name in getattr(v, "abstain_members", []):
+            db.add(models.VoteMember(vote_id=v.vote_id, member_name=name,
+                                     vote_value="abstain", person_id=person_map.get(name)))
         saved += 1
 
     db.commit()
@@ -1050,23 +1079,45 @@ def _ingest_minutes_votes(db, doc) -> None:
 
 
 def _build_vote_person_lookup(db) -> dict:
-    """Build last-name → person_id mapping from supervisor roster."""
+    """Build last-name → person_id mapping from all known roster files.
+
+    Loads supervisors.json (Shasta BOS) and council_members.json (Redding CC)
+    and merges them.  Both map last-name → person_id via canonical_name in the
+    people table.  Last names are unique across the two bodies so no collision
+    handling is needed.
+    """
     import json as _json
     from app import models
 
-    roster_path = Path(__file__).parent.parent / "config" / "supervisors.json"
-    if not roster_path.exists():
-        return {}
-    try:
-        data = _json.loads(roster_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    last_to_full = {}
-    for entry in data.get("district_supervisors", []):
-        full = entry.get("supervisor", "")
-        last = full.rsplit(" ", 1)[-1]
-        if last not in last_to_full:
-            last_to_full[last] = full
+    config_dir = Path(__file__).parent.parent / "config"
+    last_to_full: dict[str, str] = {}
+
+    # Shasta County Board of Supervisors
+    sup_path = config_dir / "supervisors.json"
+    if sup_path.exists():
+        try:
+            data = _json.loads(sup_path.read_text(encoding="utf-8"))
+            for entry in data.get("district_supervisors", []):
+                full = entry.get("supervisor", "")
+                last = full.rsplit(" ", 1)[-1]
+                if last and last not in last_to_full:
+                    last_to_full[last] = full
+        except Exception:
+            pass
+
+    # Redding City Council
+    cc_path = config_dir / "council_members.json"
+    if cc_path.exists():
+        try:
+            data = _json.loads(cc_path.read_text(encoding="utf-8"))
+            for entry in data.get("council_members", []):
+                full = entry.get("name", "")
+                last = full.rsplit(" ", 1)[-1]
+                if last and last not in last_to_full:
+                    last_to_full[last] = full
+        except Exception:
+            pass
+
     people = {p.canonical_name: p.person_id for p in db.query(models.Person).all()}
     return {last: people[full] for last, full in last_to_full.items() if full in people}
 
