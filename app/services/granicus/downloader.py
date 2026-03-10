@@ -179,7 +179,7 @@ def download_video(
         meeting.meeting_id, output_path.name, size_mb, duration or 0,
     )
     if print_progress:
-        print(f"\n    ✓ Downloaded {output_path.name} ({size_mb:.0f} MB)")
+        print(f"\n    OK Downloaded {output_path.name} ({size_mb:.0f} MB)")
 
     return {
         "status": "complete",
@@ -283,7 +283,7 @@ def transcode_video(
         media_file.meeting_id, out_path.name, size_mb,
     )
     if print_progress:
-        print(f"\n    ✓ Transcoded to {out_path.name} ({size_mb:.0f} MB)")
+        print(f"\n    OK Transcoded to {out_path.name} ({size_mb:.0f} MB)")
 
     return {
         "status": "complete",
@@ -352,7 +352,7 @@ def download_document(
         meeting.meeting_id, doc_type, filename, size_kb,
     )
     if print_progress:
-        print(f"    ✓ {doc_type.capitalize()}: {filename} ({size_kb:.0f} KB)")
+        print(f"    OK {doc_type.capitalize()}: {filename} ({size_kb:.0f} KB)")
 
     # Queue OCR (non-blocking — workers must be running)
     try:

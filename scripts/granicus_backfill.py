@@ -54,21 +54,21 @@ RESET  = "\033[0m"
 
 
 def header(text: str) -> None:
-    print(f"\n{CYAN}{'─' * 70}{RESET}")
+    print(f"\n{CYAN}{'-' * 70}{RESET}")
     print(f"{CYAN}{text}{RESET}")
-    print(f"{CYAN}{'─' * 70}{RESET}")
+    print(f"{CYAN}{'-' * 70}{RESET}")
 
 
 def ok(text: str) -> None:
-    print(f"  {GREEN}✓{RESET} {text}")
+    print(f"  {GREEN}OK{RESET} {text}")
 
 
 def skip(text: str) -> None:
-    print(f"  {YELLOW}↷{RESET} {text}")
+    print(f"  {YELLOW}--{RESET} {text}")
 
 
 def err(text: str) -> None:
-    print(f"  {RED}✗{RESET} {text}")
+    print(f"  {RED}ERR{RESET} {text}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -112,9 +112,9 @@ def main() -> None:
             print(
                 f"  {clip.meeting_date}  {clip.meeting_type:<25}  "
                 f"clip={clip.clip_id}  "
-                f"agenda={'✓' if clip.agenda_url else '✗'}  "
-                f"minutes={'✓' if clip.minutes_url else '✗'}  "
-                f"mp4={'✓' if clip.mp4_url else '✗'}"
+                f"agenda={'Y' if clip.agenda_url else 'N'}  "
+                f"minutes={'Y' if clip.minutes_url else 'N'}  "
+                f"mp4={'Y' if clip.mp4_url else 'N'}"
             )
         print(f"\n{YELLOW}Dry run complete — nothing written.{RESET}")
         return
@@ -238,8 +238,8 @@ def main() -> None:
     print(f"  Minutes downloaded:  {stats['minutes_ok']}")
     print()
     print("Next step: process meetings through the normal pipeline via:")
-    print("  → Review UI → Process button")
-    print("  → OR: POST /api/backfill/next-process (auto-advance will handle it)")
+    print("  - Review UI -> Process button")
+    print("  - OR: POST /api/backfill/next-process (auto-advance will handle it)")
 
 
 if __name__ == "__main__":
