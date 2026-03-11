@@ -38,10 +38,12 @@ def _get_task_map() -> dict:
         check_upcoming_docs_task,
         granicus_discover_task,
         granicus_download_task,
+        preprocess_video_task,
     )
 
     _task_map = {
         "tasks.process_video": process_video_task,
+        "tasks.preprocess_video": preprocess_video_task,
         "tasks.process_pdf": process_pdf_task,
         "tasks.extract_multi_voiceprints": extract_multi_voiceprints_task,
         "tasks.rerun_voiceprints": rerun_voiceprints_task,
@@ -67,6 +69,7 @@ def _get_task_map() -> dict:
 # Maps task_name → initial stage name.
 _MEETING_TASK_STAGES = {
     "tasks.process_video":      "process",
+    "tasks.preprocess_video":   "preprocess",
     "tasks.full_ingest":        "download",
     "tasks.transcode_video":    "transcode",
     "tasks.primegov_download":  "download",

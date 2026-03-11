@@ -19,7 +19,7 @@ from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey, Index, Integer,
     LargeBinary, String, Text, UniqueConstraint, text,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, backref, relationship
 
 
 def _gen_id() -> str:
@@ -588,7 +588,7 @@ class ProcessingJob(Base):
     completed_at   = Column(DateTime, nullable=True)
     updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    meeting = relationship("Meeting", backref="processing_jobs")
+    meeting = relationship("Meeting", backref=backref("processing_jobs", cascade="all, delete-orphan", passive_deletes=True))
 
 
 # ── News Articles (RSS + authenticated scrape) ────────────────────────────────

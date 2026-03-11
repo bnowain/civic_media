@@ -84,7 +84,7 @@ Thresholds: high ≥ 0.92, medium ≥ 0.75 (both in `app/config.py`).
 - **Services** (`app/services/`) — all business logic, ML model invocations, file I/O
 - **Models** (`app/models.py`) — SQLAlchemy ORM: Meeting, MediaFile, Document, TranscriptSegment, Person, Voiceprint, SegmentAssignment
 - **Schemas** (`app/schemas.py`) — Pydantic v2 with `from_attributes = True`
-- **Tasks** (`app/tasks.py`) — 16 Huey tasks across two queues: GPU (`process_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `granicus_discover`, `granicus_download`, `export_clip`, `cleanup_clips`, `full_ingest`, `check_minutes`)
+- **Tasks** (`app/tasks.py`) — 17 Huey tasks across two queues: GPU (`process_video`, `preprocess_video`, `process_pdf`, `extract_multi_voiceprints`, `rerun_voiceprints`, `process_newscast`) and light I/O (`retag_content`, `ingest_radio`, `transcode_video`, `primegov_discover`, `primegov_download`, `granicus_discover`, `granicus_download`, `export_clip`, `cleanup_clips`, `full_ingest`, `check_minutes`). `preprocess_video` runs silence+freeze detection, cuts dead-air segments, and transcodes to 540p before queuing `process_video` — triggered when the "Remove silence" checkbox is checked on upload.
 - **Config** (`app/config.py`) — all paths, thresholds, model identifiers, env var defaults
 
 ### Database

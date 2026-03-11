@@ -3,6 +3,7 @@ Huey task definitions.
 
 Tasks on `huey` (GPU worker):
   - process_video_task:             Full video ingestion pipeline.
+  - preprocess_video_task:          Silence+freeze detection, cut, transcode; then queues process_video.
   - process_pdf_task:               PDF text extraction (native + OCR fallback).
   - extract_multi_voiceprints_task: Extra voiceprints from long confirmed segments.
   - process_newscast_task:          TV news processing pipeline.
@@ -248,6 +249,143 @@ def process_newscast_task(newscast_id: str, skip_commercial_strip: bool = False,
             pass
         logger.exception("process_newscast_task failed for newscast %s", newscast_id)
         _write_error_progress(TV_NEWS_DIR, newscast_id, str(exc))
+        raise
+    finally:
+        db.close()
+
+
+@huey.task(retries=1, retry_delay=30, context=True)
+def preprocess_video_task(
+    meeting_id: str,
+    media_id: str,
+    noise_db: float = -50.0,
+    min_silence: float = 30.0,
+    freeze_noise: float = 0.003,
+    task=None,
+) -> dict:
+    """
+    Silence + freeze detection, cut, and transcode before the main pipeline.
+
+    Steps:
+      1. Detect audio silence gaps below noise_db for min_silence seconds.
+      2. Detect frozen video periods (intersection with audio gaps only).
+      3. Cut segments that are BOTH silent AND frozen; transcode to 540p.
+      4. Overwrite the original media file in-place (no DB record change needed).
+      5. Queue process_video_task to continue the normal pipeline.
+
+    On failure: writes error to progress.json; the upload still completed so the
+    user can trigger the pipeline manually from the UI.
+    """
+    import os
+    import sys
+    from app.database import SessionLocal
+    from app.services.progress import create_job, update_progress, fail_job
+    from app.paths import to_absolute
+
+    task_id = task.id if task else None
+    db = SessionLocal()
+
+    try:
+        create_job(db, meeting_id, "preprocess", task_id=task_id)
+        update_progress(db, meeting_id, "Preprocessing — scanning audio", 2)
+
+        # Resolve the source file path from the DB record
+        from app import models
+        media = db.query(models.MediaFile).filter_by(media_id=media_id).first()
+        if not media:
+            fail_job(db, meeting_id, f"MediaFile {media_id} not found")
+            return {"error": "media_not_found"}
+
+        input_path = Path(to_absolute(media.file_path))
+        if not input_path.exists():
+            fail_job(db, meeting_id, f"Media file not found on disk: {input_path}")
+            return {"error": "file_missing"}
+
+        # ── Import video_editor from Syllego ──────────────────────────────────
+        syllego_path = str(BASE_DIR.parent / "Unified-Tools" / "Syllego")
+        if syllego_path not in sys.path:
+            sys.path.insert(0, syllego_path)
+
+        from mmi.video_editor import (
+            detect_silence, detect_frozen_video, merge_gaps, intersect_gaps,
+            cut_and_transcode,
+        )
+
+        # ── Step 1: Audio silence detection ──────────────────────────────────
+        audio_gaps = detect_silence(input_path, noise_db=noise_db, min_duration=min_silence)
+        if not audio_gaps:
+            logger.info("preprocess: no silence found for %s — skipping cut", meeting_id)
+            update_progress(db, meeting_id, "Queued (process)", 0)
+            from app.services.task_dispatch import send_task
+            send_task("tasks.process_video", args=[meeting_id, media_id])
+            return {"meeting_id": meeting_id, "status": "no_gaps_found"}
+
+        logger.info("preprocess: %d audio gap(s) found for %s", len(audio_gaps), meeting_id)
+        update_progress(db, meeting_id, "Preprocessing — scanning video", 15)
+
+        # ── Step 2: Freeze detection + merge ─────────────────────────────────
+        video_gaps = detect_frozen_video(
+            input_path, min_duration=min_silence, noise=freeze_noise, use_gpu=True,
+        )
+        video_gaps_merged = merge_gaps(video_gaps, max_gap=5.0)
+        logger.info(
+            "preprocess: %d freeze periods (merged to %d) for %s",
+            len(video_gaps), len(video_gaps_merged), meeting_id,
+        )
+
+        # ── Step 3: Intersect ────────────────────────────────────────────────
+        gaps_to_cut = intersect_gaps(audio_gaps, video_gaps_merged, min_overlap=min_silence)
+        if not gaps_to_cut:
+            logger.info(
+                "preprocess: no silent+frozen intersection for %s — skipping cut",
+                meeting_id,
+            )
+            update_progress(db, meeting_id, "Queued (process)", 0)
+            from app.services.task_dispatch import send_task
+            send_task("tasks.process_video", args=[meeting_id, media_id])
+            return {"meeting_id": meeting_id, "status": "no_intersection"}
+
+        logger.info(
+            "preprocess: cutting %d segment(s) for %s (%.0fs total)",
+            len(gaps_to_cut), meeting_id,
+            sum(g.duration for g in gaps_to_cut),
+        )
+        update_progress(db, meeting_id, "Preprocessing — transcoding", 30)
+
+        # ── Step 4: Cut + transcode to temp file, then replace original ───────
+        tmp_path = input_path.with_name(input_path.stem + "_pp_tmp.mp4")
+        result = cut_and_transcode(
+            input_path=input_path,
+            output_path=tmp_path,
+            gaps_to_remove=gaps_to_cut,
+            target_height=540,
+            use_gpu=True,
+        )
+
+        if not result.success:
+            fail_job(db, meeting_id, f"Preprocessing encode failed: {result.error}")
+            if tmp_path.exists():
+                tmp_path.unlink()
+            return {"error": "encode_failed", "detail": result.error}
+
+        # Replace original file in-place (no DB record change needed)
+        os.replace(str(tmp_path), str(input_path))
+        logger.info(
+            "preprocess: done for %s — replaced %s (%.0f MB)",
+            meeting_id, input_path.name, input_path.stat().st_size / (1024 * 1024),
+        )
+
+        # ── Step 5: Queue main pipeline ──────────────────────────────────────
+        update_progress(db, meeting_id, "Queued (process)", 0)
+        from app.services.task_dispatch import send_task
+        send_task("tasks.process_video", args=[meeting_id, media_id])
+
+        return {"meeting_id": meeting_id, "status": "preprocessed", "gaps_cut": len(gaps_to_cut)}
+
+    except Exception as exc:
+        db.rollback()
+        logger.exception("preprocess_video_task failed for meeting %s", meeting_id)
+        fail_job(db, meeting_id, str(exc))
         raise
     finally:
         db.close()

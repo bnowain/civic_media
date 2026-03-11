@@ -13,7 +13,7 @@ import json
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -209,6 +209,7 @@ async def stream_article_video(filename: str, request: Request):
 async def upload_video(
     meeting_id: str,
     file: UploadFile = File(...),
+    preprocess: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """
@@ -264,7 +265,10 @@ async def upload_video(
     db.refresh(media)
 
     from app.services.task_dispatch import send_task
-    send_task("tasks.process_video", args=[meeting_id, media.media_id])
+    if preprocess and is_audio is False:
+        send_task("tasks.preprocess_video", args=[meeting_id, media.media_id])
+    else:
+        send_task("tasks.process_video", args=[meeting_id, media.media_id])
     return media
 
 

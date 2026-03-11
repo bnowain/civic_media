@@ -1861,11 +1861,13 @@ function setupBarPdfButton(inputId, btnId, docType) {
 }
 
 async function uploadVideo(file, btn) {
-  btn.textContent = "Uploading…";
+  const preprocess = document.getElementById("preprocess-checkbox")?.checked ?? false;
+  btn.textContent = preprocess ? "Uploading… (silence removal queued)" : "Uploading…";
   btn.disabled = true;
 
   const fd = new FormData();
   fd.append("file", file);
+  if (preprocess) fd.append("preprocess", "true");
 
   try {
     const r = await fetch(`/api/media/${meetingId}/upload`, {
@@ -1877,7 +1879,10 @@ async function uploadVideo(file, btn) {
       throw new Error(err.detail || `HTTP ${r.status}`);
     }
     document.getElementById("upload-bar").hidden = true;
-    showPipelineBanner("Processing started… transcript will appear when ready.");
+    const msg = preprocess
+      ? "Upload complete. Detecting silence… transcript will appear when ready."
+      : "Processing started… transcript will appear when ready.";
+    showPipelineBanner(msg);
     setVideoSource();
     startPipelinePoll();
   } catch (err) {
