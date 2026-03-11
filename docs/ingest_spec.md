@@ -1,6 +1,6 @@
 # Civic Media — Ingest Specification
 
-**Last updated**: 2026-03-10
+**Last updated**: 2026-03-10 (rev 2)
 **Maintainer**: civic_media project
 
 ---
@@ -245,7 +245,14 @@ Re-encoding audio to a single continuous AAC-LC stream at download time eliminat
 - HTTP GET to the PrimeGov compiled PDF URL (60s timeout).
 - Saves to `documents/{meeting_id}/{date}_{title}_{doc_type}.pdf`.
 - Creates `Document` record and queues `process_pdf_task` (OCR extraction).
-- `doc_type` is one of: `agenda`, `minutes`, `packet`.
+- `doc_type` is one of: `agenda`, `minutes`, `packet`, `addendum`.
+
+**Addendum handling**: PrimeGov posts addenda as separate meeting entries titled
+`"Addendum: <committee name>"`. Discovery merges these onto the parent meeting by
+setting `addendum_url` on that meeting (added 2026-03-10). The addendum PDF is then
+downloaded as a `Document` with `document_type='addendum'`. It is stored separately
+from the original `agenda` — `agenda_url` always points to the original agenda posted
+before the meeting; `addendum_url` is populated only if PrimeGov publishes a late addition.
 
 **OCR engine** (`app/services/pdf_ingestor.py`): two-stage pipeline.
   1. **pdfplumber** — native text extraction for digital/searchable PDFs (instant, no GPU).
@@ -255,6 +262,25 @@ Re-encoding audio to a single continuous AAC-LC stream at download time eliminat
 
 Surya replaced the previous Tesseract → EasyOCR fallback chain on 2026-03-10.
 See `SURYA_INSTALL.md` for dependency notes and model cache location.
+
+### 2.10 Automated Document Polling Schedule
+
+The self-heal background thread (started on FastAPI startup) drives two recurring checks:
+
+| Task | Cadence | Trigger | What it does |
+|------|---------|---------|-------------|
+| `check_upcoming_docs_task` | **Every hour** | Auto + `POST /api/backfill/check-upcoming-docs` | Re-runs PrimeGov discovery, then downloads any missing agenda/packet/addendum for meetings within the next 30 days |
+| `check_minutes_task` | **Every 7 days** | Auto + `POST /api/backfill/check-minutes` | Re-runs discovery for both PrimeGov and Granicus, then downloads minutes for any meeting (past 90 days) that now has a `minutes_url` |
+
+**Why hourly for upcoming docs**: Agenda and packet PDFs are typically posted 1–5 days before
+the meeting but the exact time is unpredictable. Hourly polling ensures they are captured and
+OCR'd well before the meeting date. Addenda can appear with even less notice (same day).
+
+**Why weekly for minutes**: Minutes are posted 1–4 weeks after the meeting. Daily polling is
+unnecessary overhead; weekly is sufficient to capture them promptly.
+
+**Manual trigger**: Both endpoints accept optional parameters and return immediately with a
+task ID. The actual work runs in the Huey light worker.
 
 ### 2.10 Backfill Behavior for Government Meetings
 
@@ -327,8 +353,9 @@ Jobs stale for > 10 minutes are auto-reset to `error` by `_do_reset_stuck()`, wh
 | Podbean RSS | Audio (enclosure) | RSS walk (newest-first) | Break on first item at/before cutoff | Recurring — new episodes weekly |
 | PrimeGov (Meetings) | Meeting metadata | REST API per year per committee | `update` mode: 90-day window | Recurring — weekly recommended |
 | PrimeGov (Video) | MP4 via Swagit/HLS | N/A (per-meeting) | Download once; skip if `MediaFile` exists | **One-time per meeting** |
-| PrimeGov (Agenda/Packet) | PDF | N/A (per-meeting) | Download once; skip if `Document` exists | **One-time per meeting** |
-| PrimeGov (Minutes) | PDF | N/A (per-meeting) | Download once when `minutes_url` becomes non-NULL | **Recurring until minutes posted, then one-time** |
+| PrimeGov (Agenda/Packet) | PDF | N/A (per-meeting) | Hourly until downloaded; skip if `Document` exists | **Hourly until captured, then one-time** |
+| PrimeGov (Addendum) | PDF | N/A (per-meeting) | Hourly check; only present for some meetings | **Hourly until captured (rare), then one-time** |
+| PrimeGov (Minutes) | PDF | N/A (per-meeting) | Weekly check; download once when `minutes_url` becomes non-NULL | **Weekly until minutes posted, then one-time** |
 
 ---
 

@@ -565,10 +565,11 @@ def primegov_download_task(
     download_agenda: bool = True,
     download_minutes: bool = True,
     download_packet: bool = True,
+    download_addendum: bool = True,
     auto_process: bool = False,
     task=None,
 ) -> dict:
-    """Download PrimeGov assets (video, agenda, minutes) for a single meeting."""
+    """Download PrimeGov assets (video, agenda, minutes, packet, addendum) for a single meeting."""
     from app.database import SessionLocal
     from app.services.primegov.downloader import (
         download_video as dl_video,
@@ -601,6 +602,10 @@ def primegov_download_task(
         if download_packet:
             update_progress(db, meeting_id, "Downloading packet PDF...", 80)
             results["packet"] = dl_doc(db, meeting_id, "packet")
+
+        if download_addendum:
+            update_progress(db, meeting_id, "Downloading addendum PDF...", 90)
+            results["addendum"] = dl_doc(db, meeting_id, "addendum")
 
         complete_job(db, meeting_id)
 
@@ -933,6 +938,103 @@ def check_minutes_task(days: int = 90) -> dict:
     except Exception:
         db.rollback()
         logger.exception("check_minutes_task failed")
+        raise
+    finally:
+        db.close()
+
+
+@huey_light.task()
+def check_upcoming_docs_task(days_ahead: int = 30) -> dict:
+    """Hourly check for agenda/packet/addendum PDFs on upcoming meetings.
+
+    Re-runs PrimeGov discovery to refresh document URLs, then downloads any
+    missing agenda, packet, or addendum for meetings that haven't occurred yet
+    (window: yesterday through days_ahead from today).
+
+    Called automatically once per hour by the self-heal background thread, or
+    manually via POST /api/backfill/check-upcoming-docs.
+    """
+    from datetime import timedelta, date
+    from app.database import SessionLocal
+    from app import models
+    from app.services.primegov.discovery import run_discovery as primegov_run_discovery
+    from app.services.primegov.downloader import download_document as primegov_download_document
+
+    db = SessionLocal()
+    try:
+        today = date.today()
+        # Start from yesterday so same-day postings aren't missed
+        window_start = (today - timedelta(days=1)).isoformat()
+        window_end = (today + timedelta(days=days_ahead)).isoformat()
+
+        # Phase 1: Refresh PrimeGov metadata for current year (picks up new URLs)
+        years = [today.year]
+        logger.info("check_upcoming_docs: re-running PrimeGov discovery for year %s", today.year)
+        primegov_run_discovery(db, committee_ids=None, years=years, mode="update")
+
+        # Phase 2: Find upcoming PrimeGov meetings missing any doc
+        upcoming = (
+            db.query(models.Meeting)
+            .filter(
+                models.Meeting.meeting_date >= window_start,
+                models.Meeting.meeting_date <= window_end,
+                models.Meeting.primegov_id.isnot(None),
+            )
+            .order_by(models.Meeting.meeting_date)
+            .all()
+        )
+
+        # Build set of already-downloaded doc types per meeting
+        existing_docs: dict[str, set] = {}
+        if upcoming:
+            for doc in db.query(models.Document).filter(
+                models.Document.meeting_id.in_([m.meeting_id for m in upcoming])
+            ).all():
+                existing_docs.setdefault(doc.meeting_id, set()).add(doc.document_type)
+
+        downloaded, skipped, errors = [], [], []
+        for meeting in upcoming:
+            has = existing_docs.get(meeting.meeting_id, set())
+            for doc_type, url in [
+                ("agenda",   meeting.agenda_url),
+                ("packet",   meeting.packet_url),
+                ("addendum", meeting.addendum_url),
+            ]:
+                if not url:
+                    continue  # URL not posted yet
+                if doc_type in has:
+                    skipped.append(f"{meeting.meeting_date}/{doc_type}")
+                    continue
+                try:
+                    result = primegov_download_document(db, meeting.meeting_id, doc_type)
+                    if result.get("status") in ("complete", "skipped"):
+                        db.commit()
+                        downloaded.append(f"{meeting.meeting_date}/{doc_type}")
+                    else:
+                        errors.append(f"{meeting.meeting_date}/{doc_type}: {result.get('error')}")
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(f"{meeting.meeting_date}/{doc_type}: {exc}")
+                    logger.warning(
+                        "check_upcoming_docs: failed %s/%s: %s",
+                        meeting.meeting_date, doc_type, exc,
+                    )
+
+        logger.info(
+            "check_upcoming_docs: %d upcoming meetings, %d downloaded, %d already present, %d errors",
+            len(upcoming), len(downloaded), len(skipped), len(errors),
+        )
+        return {
+            "window": f"{window_start} → {window_end}",
+            "upcoming_meetings": len(upcoming),
+            "downloaded": downloaded,
+            "already_present": len(skipped),
+            "errors": errors,
+        }
+
+    except Exception:
+        db.rollback()
+        logger.exception("check_upcoming_docs_task failed")
         raise
     finally:
         db.close()

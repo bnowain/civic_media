@@ -230,8 +230,8 @@ def download_video(db: Session, meeting_id: str) -> dict:
     import time as _time
     import tempfile
 
-    _DOWNLOAD_TIMEOUT = 3600      # 1 hour total
-    _STALL_TIMEOUT = 300          # 5 min with no progress tick → kill
+    _DOWNLOAD_TIMEOUT = 7200      # 2 hours total (long BOS meetings can take >1hr on HLS)
+    _STALL_TIMEOUT = 1800         # 30 min — Swagit HLS streams can pause naturally between segments
 
     progress_file = Path(tempfile.mktemp(suffix=".txt", prefix="ffprog_"))
     cmd = [
@@ -429,7 +429,12 @@ def download_document(
     if not meeting:
         return {"error": "Meeting not found", "status": "error"}
 
-    url_map = {"agenda": meeting.agenda_url, "minutes": meeting.minutes_url, "packet": meeting.packet_url}
+    url_map = {
+        "agenda":   meeting.agenda_url,
+        "minutes":  meeting.minutes_url,
+        "packet":   meeting.packet_url,
+        "addendum": meeting.addendum_url,
+    }
     url = url_map.get(doc_type)
     if not url:
         return {"error": f"No {doc_type} URL available", "status": "error"}

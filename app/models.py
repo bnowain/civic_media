@@ -83,7 +83,8 @@ class Meeting(Base):
     page_url          = Column(Text, nullable=True)        # human-browsable source page URL
     agenda_url        = Column(Text, nullable=True)        # PrimeGov agenda PDF URL
     minutes_url       = Column(Text, nullable=True)        # PrimeGov minutes PDF URL
-    packet_url        = Column(Text, nullable=True)         # PrimeGov meeting packet PDF URL
+    packet_url        = Column(Text, nullable=True)        # PrimeGov meeting packet PDF URL
+    addendum_url      = Column(Text, nullable=True)        # PrimeGov addendum PDF URL (posted after agenda)
     processed_at       = Column(DateTime, nullable=True)
     created_at         = Column(DateTime, default=datetime.utcnow)
     summary_short      = Column(Text, nullable=True)

@@ -42,7 +42,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -61,7 +61,7 @@ _STUCK_SECONDS = 7200      # 2 hr: default for GPU-heavy "process" stage
 # Download/transcode emit progress ticks during ffmpeg — if no tick arrives
 # within these windows, the task is dead.
 _STUCK_SECONDS_BY_STAGE = {
-    "download":  600,      # 10 min — ffmpeg download ticks every ~30s
+    "download":  3600,     # 1 hr  — Swagit HLS can pause naturally; internal stall is 30 min
     "transcode": 900,      # 15 min — ffmpeg transcode ticks every ~10s
     "process":   7200,     # 2 hr  — pyannote diarization has no progress callback
 }
@@ -100,9 +100,10 @@ def _stage_timeout(db: "Session", job) -> int:
 
 # Self-healing loop interval (seconds). A background thread runs _do_reset_stuck
 # this often, so stuck jobs are recovered even if no next-* endpoints are called.
-_SELF_HEAL_INTERVAL = 300       # 5 minutes: stuck-job reset cadence
-_AUTO_ADVANCE_INTERVAL = 30    # 30 s: idle-queue refill cadence
-_MINUTES_CHECK_INTERVAL = 86400  # 24 hours: rolling 90-day minutes check cadence
+_SELF_HEAL_INTERVAL = 300           # 5 minutes: stuck-job reset cadence
+_AUTO_ADVANCE_INTERVAL = 30         # 30 s: idle-queue refill cadence
+_UPCOMING_DOCS_INTERVAL = 3600      # 1 hour: upcoming-meeting agenda/packet/addendum check
+_MINUTES_CHECK_INTERVAL = 604800    # 7 days: rolling 90-day minutes check cadence
 
 _SKIP_FILE = BASE_DIR / "database" / "backfill_skipped.json"
 
@@ -1356,7 +1357,8 @@ def backfill_process_now(meeting_id: str, db: Session = Depends(get_db)):
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
-            models.MediaFile.transcode_status.in_(["transcoded", None, ""]),
+            or_(models.MediaFile.transcode_status.in_(["transcoded", ""]),
+                models.MediaFile.transcode_status.is_(None)),
         )
         .first()
     )
@@ -1446,7 +1448,8 @@ def backfill_process_priority(
             models.MediaFile.meeting_id == meeting_id,
             models.MediaFile.file_type.in_(["video", "audio"]),
             ~models.MediaFile.file_path.like("%_extracted.wav"),
-            models.MediaFile.transcode_status.in_(["transcoded", None, ""]),
+            or_(models.MediaFile.transcode_status.in_(["transcoded", ""]),
+                models.MediaFile.transcode_status.is_(None)),
         )
         .first()
     )
@@ -1675,7 +1678,7 @@ def trigger_check_minutes(days: int = 90):
 
     Re-runs PrimeGov discovery to refresh minutes_url, then downloads any
     minutes PDFs that became available since initial ingest.  Runs automatically
-    once per day via the self-heal loop; this endpoint triggers it on demand.
+    once per week via the self-heal loop; this endpoint triggers it on demand.
 
     Args:
         days: Look-back window in days (default 90).
@@ -1684,6 +1687,23 @@ def trigger_check_minutes(days: int = 90):
     task_id = send_task("tasks.check_minutes", kwargs={"days": days})
     logger.info("check-minutes triggered manually (days=%d, task_id=%s)", days, task_id)
     return {"queued": True, "task_id": task_id, "days": days}
+
+
+@router.post("/check-upcoming-docs")
+def trigger_check_upcoming_docs(days_ahead: int = 30):
+    """Queue an upcoming-meeting document check.
+
+    Re-runs PrimeGov discovery then downloads any missing agenda, packet, or
+    addendum PDFs for meetings in the next days_ahead days.  Runs automatically
+    once per hour via the self-heal loop; this endpoint triggers it on demand.
+
+    Args:
+        days_ahead: How many days ahead to scan (default 30).
+    """
+    from app.services.task_dispatch import send_task
+    task_id = send_task("tasks.check_upcoming_docs", kwargs={"days_ahead": days_ahead})
+    logger.info("check-upcoming-docs triggered manually (days_ahead=%d, task_id=%s)", days_ahead, task_id)
+    return {"queued": True, "task_id": task_id, "days_ahead": days_ahead}
 
 
 # ── Self-healing background thread ────────────────────────────────────────────
@@ -1764,10 +1784,12 @@ def _self_heal_loop():
     Cadence:
       - Every 30 s: check Huey queue depth and auto-advance if idle
       - Every 5 min: reset stuck jobs
-      - Every 24 hr: rolling 90-day minutes check (discover + download)
+      - Every 1 hr: check upcoming meetings for newly-posted agenda/packet/addendum
+      - Every 7 days: rolling 90-day minutes check (discover + download)
     """
     import time
     last_reset = 0.0
+    last_upcoming_check = 0.0
     last_minutes_check = 0.0
     while True:
         time.sleep(_AUTO_ADVANCE_INTERVAL)
@@ -1790,12 +1812,22 @@ def _self_heal_loop():
                 # Auto-advance: refill idle queues every tick
                 _auto_advance(db)
 
-                # Rolling 90-day minutes check: once per day
+                # Hourly: check upcoming meetings for newly-posted agenda/packet/addendum
+                if now - last_upcoming_check >= _UPCOMING_DOCS_INTERVAL:
+                    try:
+                        from app.services.task_dispatch import send_task
+                        send_task("tasks.check_upcoming_docs", kwargs={"days_ahead": 30})
+                        logger.info("Self-heal: queued hourly check_upcoming_docs_task")
+                    except Exception as exc:
+                        logger.warning("Self-heal: check_upcoming_docs dispatch failed: %s", exc)
+                    last_upcoming_check = now
+
+                # Weekly: rolling 90-day minutes check
                 if now - last_minutes_check >= _MINUTES_CHECK_INTERVAL:
                     try:
                         from app.services.task_dispatch import send_task
                         send_task("tasks.check_minutes", kwargs={"days": 90})
-                        logger.info("Self-heal: queued daily check_minutes_task (90-day window)")
+                        logger.info("Self-heal: queued weekly check_minutes_task (90-day window)")
                     except Exception as exc:
                         logger.warning("Self-heal: check_minutes dispatch failed: %s", exc)
                     last_minutes_check = now

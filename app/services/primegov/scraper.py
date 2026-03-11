@@ -34,6 +34,7 @@ DOC_TYPES = {
     "Packet": "packet",
     "HTML Packet": "packet",
     "Meeting Packet": "packet",
+    "Addendum": "addendum",
 }
 
 
@@ -85,6 +86,13 @@ class PrimeGovMeeting:
     def packet_url(self) -> Optional[str]:
         for doc in self.documents:
             if doc.doc_type == "packet":
+                return doc.download_url
+        return None
+
+    @property
+    def addendum_url(self) -> Optional[str]:
+        for doc in self.documents:
+            if doc.doc_type == "addendum":
                 return doc.download_url
         return None
 

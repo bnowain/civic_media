@@ -159,6 +159,10 @@ def run_discovery(
                 existing.packet_url = pm.packet_url
                 changed = True
                 doc_changed = True
+            if existing.addendum_url is None and pm.addendum_url:
+                existing.addendum_url = pm.addendum_url
+                changed = True
+                doc_changed = True
 
             if changed:
                 updated += 1
@@ -192,14 +196,15 @@ def run_discovery(
 
                 if match:
                     doc_changed = False
-                    if match.agenda_url is None and pm.agenda_url:
-                        match.agenda_url = pm.agenda_url
+                    # Addendum PDFs go into addendum_url — not agenda_url.
+                    # The agenda_url on the parent meeting is the original agenda;
+                    # addendum_url holds the separately-posted addendum document.
+                    addendum_pdf = pm.agenda_url or pm.packet_url
+                    if match.addendum_url is None and addendum_pdf:
+                        match.addendum_url = addendum_pdf
                         doc_changed = True
                     if match.minutes_url is None and pm.minutes_url:
                         match.minutes_url = pm.minutes_url
-                        doc_changed = True
-                    if match.packet_url is None and pm.packet_url:
-                        match.packet_url = pm.packet_url
                         doc_changed = True
                     if doc_changed:
                         updated += 1
@@ -236,6 +241,7 @@ def run_discovery(
                 agenda_url=pm.agenda_url,
                 minutes_url=pm.minutes_url,
                 packet_url=pm.packet_url,
+                addendum_url=pm.addendum_url,
             )
             db.add(meeting)
             created += 1
@@ -255,6 +261,7 @@ def run_discovery(
                     "download_agenda": meeting.agenda_url is not None,
                     "download_minutes": meeting.minutes_url is not None,
                     "download_packet": meeting.packet_url is not None,
+                    "download_addendum": meeting.addendum_url is not None,
                     "auto_process": False,
                 })
                 docs_queued += 1

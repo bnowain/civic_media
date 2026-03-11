@@ -35,6 +35,7 @@ def _get_task_map() -> dict:
         cleanup_clips_task,
         full_ingest_task,
         check_minutes_task,
+        check_upcoming_docs_task,
         granicus_discover_task,
         granicus_download_task,
     )
@@ -56,6 +57,7 @@ def _get_task_map() -> dict:
         "tasks.cleanup_clips": cleanup_clips_task,
         "tasks.full_ingest": full_ingest_task,
         "tasks.check_minutes": check_minutes_task,
+        "tasks.check_upcoming_docs": check_upcoming_docs_task,
     }
     return _task_map
 

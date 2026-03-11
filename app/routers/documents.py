@@ -21,7 +21,7 @@ from app.paths import to_relative, to_absolute
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-_VALID_DOC_TYPES = {"agenda", "minutes", "supplemental"}
+_VALID_DOC_TYPES = {"agenda", "minutes", "supplemental", "packet", "addendum"}
 
 
 @router.post(

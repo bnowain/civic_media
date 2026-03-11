@@ -8,6 +8,14 @@ civic_media is a local-first civic meeting transcription and speaker diarization
 
 **Stack**: FastAPI + SQLAlchemy (SQLite/WAL) | Huey (SqliteHuey) | faster-whisper (large-v3) | pyannote.audio 3.1 | SpeechBrain ECAPA-TDNN | Vanilla JS frontend
 
+## Key Docs — Read Before Acting
+
+| Situation | Read |
+|-----------|------|
+| Working on any frontend page | `docs/ui-backlog.md` (never delete entries without confirmation) |
+| Processing a meeting transcript (speaker ID, summaries, tags, grounding) | `docs/meeting_processing_rules.md` |
+| Ingesting a local OBS/recorded video (silence removal, 540p transcode, upload) | `docs/obs-recording-ingest.md` |
+
 ## UI Feature Backlog
 
 **`docs/ui-backlog.md`** — persistent list of requested UI changes. Read this at
